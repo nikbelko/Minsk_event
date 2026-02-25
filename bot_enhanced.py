@@ -1,496 +1,723 @@
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 import os
-from dotenv import load_dotenv
-from datetime import datetime, timedelta
-import sqlite3
 import re
-import asyncio
-from telegram import Bot
+import sqlite3
+from contextlib import contextmanager
 from collections import defaultdict
+from datetime import datetime, timedelta
+
+from dotenv import load_dotenv
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+)
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 load_dotenv()
 
-# Настройка логирования
+# ---------------------- Конфиг и логирование ----------------------
+
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
-TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-DB_NAME = 'events_final.db'
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+DB_NAME = "events_final.db"
 
-# Хранилище для результатов поиска (временное)
-user_search_results = {}
+PER_PAGE = 10
+SEARCH_MULTIPLIER = 3
 
+CATEGORY_EMOJI = {
+    "cinema": "🎬",
+    "concert": "🎵",
+    "theater": "🎭",
+    "exhibition": "🖼️",
+    "kids": "🧸",
+    "sport": "⚽",
+    "free": "🆓",
+}
+
+CATEGORY_NAMES = {
+    "cinema": "🎬 Кино",
+    "concert": "🎵 Концерты",
+    "theater": "🎭 Театр",
+    "exhibition": "🖼️ Выставки",
+    "kids": "🧸 Детям",
+    "sport": "⚽ Спорт",
+    "free": "🆓 Бесплатно",
+}
+
+# ---------------------- Работа с БД ----------------------
+
+
+@contextmanager
 def get_db_connection():
-    """Создает подключение к базе"""
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
-    return conn
-
-def search_events_by_title(query, limit=20):
-    """Поиск событий по названию"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    today = datetime.now().strftime('%Y-%m-%d')
-    
-    cursor.execute("""
-        SELECT title, details, description, event_date, place, location, price, category, source_url, show_time 
-        FROM events 
-        WHERE title LIKE ? AND event_date >= ?
-        ORDER BY event_date, show_time, title 
-        LIMIT ?
-    """, (f'%{query}%', today, limit * 3))
-    
-    events = cursor.fetchall()
-    conn.close()
-    return events
-
-def search_events_by_date(date_str):
-    """Поиск событий по дате"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    current_year = datetime.now().year
-    
-    date_str = date_str.strip()
-    
     try:
-        # Формат ДД.ММ.ГГГГ
-        if re.match(r'^\d{1,2}\.\d{1,2}\.\d{4}$', date_str):
-            day, month, year = date_str.split('.')
-            day = day.zfill(2)
-            month = month.zfill(2)
-            search_date = f"{year}-{month}-{day}"
-            formatted_date = f"{day}.{month}.{year}"
-        # Формат ДД.ММ
-        elif re.match(r'^\d{1,2}\.\d{1,2}$', date_str):
-            day, month = date_str.split('.')
-            day = day.zfill(2)
-            month = month.zfill(2)
-            search_date = f"{current_year}-{month}-{day}"
-            formatted_date = f"{day}.{month}.{current_year}"
-        else:
-            conn.close()
-            return None, None, "неверный_формат"
-        
-        cursor.execute("""
-            SELECT title, details, description, event_date, place, location, price, category, source_url, show_time 
+        yield conn
+    finally:
+        conn.close()
+
+
+def init_db():
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                user_id INTEGER,
+                category TEXT,
+                date_type TEXT,
+                PRIMARY KEY (user_id, category, date_type)
+            )
+        """
+        )
+        conn.commit()
+
+
+def search_events_by_title(query: str, limit: int = 20):
+    today = datetime.now().strftime("%Y-%m-%d")
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, title, details, description, event_date, show_time,
+                   place, location, price, category, source_url
+            FROM events 
+            WHERE title LIKE ? AND event_date >= ?
+            ORDER BY event_date, show_time, title 
+            LIMIT ?
+        """,
+            (f"%{query}%", today, limit * SEARCH_MULTIPLIER),
+        )
+        return cursor.fetchall()
+
+
+def search_events_by_date_raw(date_str: str):
+    current_year = datetime.now().year
+    date_str = date_str.strip()
+
+    if re.match(r"^\d{1,2}\.\d{1,2}\.\d{4}$", date_str):
+        day, month, year = date_str.split(".")
+    elif re.match(r"^\d{1,2}\.\d{1,2}$", date_str):
+        day, month = date_str.split(".")
+        year = str(current_year)
+    else:
+        return None, None, "неверный_формат"
+
+    day = day.zfill(2)
+    month = month.zfill(2)
+    search_date = f"{year}-{month}-{day}"
+    formatted_date = f"{day}.{month}.{year}"
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, title, details, description, event_date, show_time,
+                   place, location, price, category, source_url
             FROM events 
             WHERE event_date = ?
             ORDER BY show_time, title 
-            LIMIT 100
-        """, (search_date,))
-        
+            LIMIT 300
+        """,
+            (search_date,),
+        )
         events = cursor.fetchall()
-        conn.close()
-        
-        if events:
-            return events, formatted_date, "найдены"
+
+    if events:
+        return events, formatted_date, "найдены"
+    else:
+        return [], formatted_date, "нет_событий"
+
+
+def get_events_by_date_and_category(target_date: datetime, category: str | None = None):
+    date_str = target_date.strftime("%Y-%m-%d")
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if category and category != "all":
+            cursor.execute(
+                """
+                SELECT id, title, details, description, event_date, show_time,
+                       place, location, price, category, source_url
+                FROM events 
+                WHERE event_date = ? AND category = ?
+                ORDER BY show_time, title
+            """,
+                (date_str, category),
+            )
         else:
-            return [], formatted_date, "нет_событий"
-            
-    except Exception as e:
-        conn.close()
-        return None, None, "ошибка"
+            cursor.execute(
+                """
+                SELECT id, title, details, description, event_date, show_time,
+                       place, location, price, category, source_url
+                FROM events 
+                WHERE event_date = ? 
+                ORDER BY show_time, title
+            """,
+                (date_str,),
+            )
+        return cursor.fetchall()
 
-def group_cinema_events(events):
-    """Группирует сеансы кино по фильмам и датам"""
-    grouped = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
-    
-    for event in events:
-        if event['category'] == 'cinema':
-            key = (event['title'], event['event_date'], event['place'])
-            grouped[key[0]][key[1]][key[2]].append({
-                'time': event['show_time'],
-                'details': event['details']
-            })
-    
-    return grouped
 
-def format_grouped_cinema_events(grouped, limit=10):
-    """Форматирует сгруппированные события кино для вывода"""
-    result = []
-    count = 0
-    
-    for title, dates in grouped.items():
-        if count >= limit:
-            break
-        
-        for date, cinemas in dates.items():
-            if count >= limit:
-                break
-            
-            date_obj = datetime.strptime(date, '%Y-%m-%d')
-            formatted_date = date_obj.strftime('%d.%m.%Y')
-            
-            first_cinema = next(iter(cinemas.values()))
-            details = first_cinema[0]['details'] if first_cinema else ''
-            
-            text = f"🎬 **{title}**"
-            if details:
-                text += f"\n🎭 {details}"
-            text += f"\n📅 {formatted_date}"
-            
-            for place, seances in cinemas.items():
-                times = [s['time'] for s in seances]
-                times_str = ', '.join(times)
-                text += f"\n   ⏰ {times_str} — {place}"
-            
-            result.append(text)
-            count += 1
-    
-    return result
+def get_upcoming_events(limit: int = 20, category: str | None = None):
+    today = datetime.now().strftime("%Y-%m-%d")
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if category and category != "all":
+            cursor.execute(
+                """
+                SELECT id, title, details, description, event_date, show_time,
+                       place, location, price, category, source_url
+                FROM events 
+                WHERE event_date >= ? AND category = ?
+                ORDER BY event_date, show_time, title 
+                LIMIT ?
+            """,
+                (today, category, limit * SEARCH_MULTIPLIER),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT id, title, details, description, event_date, show_time,
+                       place, location, price, category, source_url
+                FROM events 
+                WHERE event_date >= ? 
+                ORDER BY event_date, show_time, title 
+                LIMIT ?
+            """,
+                (today, limit * SEARCH_MULTIPLIER),
+            )
+        return cursor.fetchall()
 
-def get_events_by_date_and_category(target_date, category=None):
-    """Получает события на конкретную дату с опциональной категорией"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    date_str = target_date.strftime('%Y-%m-%d')
-    
-    if category and category != 'all':
-        cursor.execute("""
-            SELECT title, details, description, event_date, place, location, price, category, source_url, show_time 
-            FROM events 
-            WHERE event_date = ? AND category = ?
-            ORDER BY show_time, title
-        """, (date_str, category))
-    else:
-        cursor.execute("""
-            SELECT title, details, description, event_date, place, location, price, category, source_url, show_time 
-            FROM events 
-            WHERE event_date = ? 
-            ORDER BY show_time, title
-        """, (date_str,))
-    
-    events = cursor.fetchall()
-    conn.close()
-    return events
 
-def get_upcoming_events(limit=20, category=None):
-    """Получает ближайшие события с опциональной категорией"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    today = datetime.now().strftime('%Y-%m-%d')
-    
-    if category and category != 'all':
-        cursor.execute("""
-            SELECT title, details, description, event_date, place, location, price, category, source_url, show_time 
-            FROM events 
-            WHERE event_date >= ? AND category = ?
-            ORDER BY event_date, show_time, title 
-            LIMIT ?
-        """, (today, category, limit * 3))
-    else:
-        cursor.execute("""
-            SELECT title, details, description, event_date, place, location, price, category, source_url, show_time 
-            FROM events 
-            WHERE event_date >= ? 
-            ORDER BY event_date, show_time, title 
-            LIMIT ?
-        """, (today, limit * 3))
-    
-    events = cursor.fetchall()
-    conn.close()
-    return events
-
-def get_weekend_events(category=None):
-    """Получает события на ближайшие выходные с опциональной категорией"""
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
+def get_weekend_events(category: str | None = None):
     today = datetime.now()
-    
     days_until_saturday = (5 - today.weekday()) % 7
     if days_until_saturday == 0:
         days_until_saturday = 7
-    
+
     saturday = today + timedelta(days=days_until_saturday)
     sunday = saturday + timedelta(days=1)
-    
-    saturday_str = saturday.strftime('%Y-%m-%d')
-    sunday_str = sunday.strftime('%Y-%m-%d')
-    
-    if category and category != 'all':
-        cursor.execute("""
-            SELECT title, details, description, event_date, place, location, price, category, source_url, show_time 
-            FROM events 
-            WHERE event_date IN (?, ?) AND category = ?
-            ORDER BY event_date, show_time, title
-        """, (saturday_str, sunday_str, category))
-    else:
-        cursor.execute("""
-            SELECT title, details, description, event_date, place, location, price, category, source_url, show_time 
-            FROM events 
-            WHERE event_date IN (?, ?)
-            ORDER BY event_date, show_time, title
-        """, (saturday_str, sunday_str))
-    
-    events = cursor.fetchall()
-    conn.close()
+
+    saturday_str = saturday.strftime("%Y-%m-%d")
+    sunday_str = sunday.strftime("%Y-%m-%d")
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        if category and category != "all":
+            cursor.execute(
+                """
+                SELECT id, title, details, description, event_date, show_time,
+                       place, location, price, category, source_url
+                FROM events 
+                WHERE event_date IN (?, ?) AND category = ?
+                ORDER BY event_date, show_time, title
+            """,
+                (saturday_str, sunday_str, category),
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT id, title, details, description, event_date, show_time,
+                       place, location, price, category, source_url
+                FROM events 
+                WHERE event_date IN (?, ?)
+                ORDER BY event_date, show_time, title
+            """,
+                (saturday_str, sunday_str),
+            )
+        events = cursor.fetchall()
+
     return events, saturday, sunday
 
-def filter_events_by_category(events, category):
-    """Фильтрует события по категории"""
-    return [e for e in events if e['category'] == category]
 
-def format_event_text(event):
-    """Форматирует событие для вывода (для не-кино)"""
+def filter_events_by_category(events, category: str):
+    return [e for e in events if e["category"] == category]
+
+
+def add_subscription(user_id: int, category: str, date_type: str):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO subscriptions (user_id, category, date_type)
+            VALUES (?, ?, ?)
+        """,
+            (user_id, category, date_type),
+        )
+        conn.commit()
+
+
+def get_user_subscriptions(user_id: int):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT category, date_type
+            FROM subscriptions
+            WHERE user_id = ?
+        """,
+            (user_id,),
+        )
+        return cursor.fetchall()
+
+
+# ---------------------- Форматирование ----------------------
+
+
+def format_event_text(event) -> str:
     text = f"🎉 **{event['title']}**"
-    
-    if event['details']:
-        text += f"\n📝 {event['details']}"
-    
-    if event['event_date']:
-        date_obj = datetime.strptime(event['event_date'], '%Y-%m-%d')
-        formatted_date = date_obj.strftime('%d.%m.%Y')
+
+    if event["details"]:
+        details = event["details"]
+        if len(details) > 180:
+            details = details[:177] + "..."
+        text += f"\n📝 {details}"
+
+    if event["event_date"]:
+        date_obj = datetime.strptime(event["event_date"], "%Y-%m-%d")
+        formatted_date = date_obj.strftime("%d.%m.%Y")
         text += f"\n📅 {formatted_date}"
-    
-    if event['show_time']:
+
+    if event["show_time"]:
         text += f" ⏰ {event['show_time']}"
-    
-    if event['place'] and event['place'] != 'Кинотеатр':
+
+    if event["place"] and event["place"] != "Кинотеатр":
         text += f"\n🏢 {event['place']}"
-    
-    if event['price']:
+
+    if event["price"]:
         text += f"\n💰 {event['price']}"
-    
-    if event['category']:
-        category_emoji = {
-            'cinema': '🎬',
-            'concert': '🎵',
-            'theater': '🎭',
-            'exhibition': '🖼️',
-            'kids': '🧸',
-            'sport': '⚽',
-            'free': '🆓'
-        }
-        emoji = category_emoji.get(event['category'], '📌')
+
+    if event["category"]:
+        emoji = CATEGORY_EMOJI.get(event["category"], "📌")
         text += f"\n{emoji} {event['category'].capitalize()}"
-    
+
     return text
 
-async def show_category_filter(update_or_query, events, title, chat_id, date_info=None):
-    """Показывает кнопки для фильтрации по категориям с информацией о дате"""
-    
-    # Подсчитываем количество по категориям
-    category_counts = defaultdict(int)
+
+def group_cinema_events(events):
+    grouped = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     for event in events:
-        category_counts[event['category']] += 1
-    
-    # Создаем кнопки для категорий, которые есть в результатах
+        if event["category"] == "cinema":
+            grouped[event["title"]][event["event_date"]][event["place"]].append(
+                {"time": event["show_time"], "details": event["details"]}
+            )
+    return grouped
+
+
+def format_grouped_cinema_events(grouped):
+    result = []
+
+    for title, dates in grouped.items():
+        for date, cinemas in dates.items():
+            date_obj = datetime.strptime(date, "%Y-%m-%d")
+            formatted_date = date_obj.strftime("%d.%m.%Y")
+
+            first_cinema = next(iter(cinemas.values()))
+            details = first_cinema[0]["details"] if first_cinema else ""
+
+            text = f"🎬 **{title}**"
+            if details:
+                if len(details) > 180:
+                    details = details[:177] + "..."
+                text += f"\n🎭 {details}"
+            text += f"\n📅 {formatted_date}"
+
+            for place, seances in cinemas.items():
+                times = [s["time"] for s in seances if s["time"]]
+                if not times:
+                    continue
+                times_str = ", ".join(times)
+                text += f"\n   ⏰ {times_str} — {place}"
+
+            result.append(text)
+
+    return result
+
+
+# ---------------------- Пагинация + категории ----------------------
+
+
+def set_pagination(
+    context: ContextTypes.DEFAULT_TYPE,
+    events,
+    title: str,
+    date_info: str | None = None,
+):
+    context.user_data["pagination"] = {
+        "events": list(events),
+        "page": 0,
+        "per_page": PER_PAGE,
+        "title": title,
+        "date_info": date_info,
+    }
+
+
+async def show_category_filter(update_or_query, context: ContextTypes.DEFAULT_TYPE):
+    data = context.user_data.get("pagination")
+    if not data:
+        return
+
+    events = data["events"]
+    if len(events) <= PER_PAGE:
+        return
+
+    category_counts = defaultdict(int)
+    for e in events:
+        if e["category"]:
+            category_counts[e["category"]] += 1
+
     keyboard = []
     row = []
-    
+
     category_buttons = {
-        'cinema': ('🎬 Кино', 'cinema'),
-        'concert': ('🎵 Концерты', 'concert'),
-        'theater': ('🎭 Театр', 'theater'),
-        'exhibition': ('🖼️ Выставки', 'exhibition'),
-        'kids': ('🧸 Детям', 'kids'),
-        'sport': ('⚽ Спорт', 'sport'),
-        'free': ('🆓 Бесплатно', 'free')
+        "cinema": ("🎬 Кино", "cinema"),
+        "concert": ("🎵 Концерты", "concert"),
+        "theater": ("🎭 Театр", "theater"),
+        "exhibition": ("🖼️ Выставки", "exhibition"),
+        "kids": ("🧸 Детям", "kids"),
+        "sport": ("⚽ Спорт", "sport"),
+        "free": ("🆓 Бесплатно", "free"),
     }
-    
+
     for cat_key, (cat_name, cat_value) in category_buttons.items():
         if cat_key in category_counts:
             count = category_counts[cat_key]
             button_text = f"{cat_name} ({count})"
-            row.append(InlineKeyboardButton(button_text, callback_data=f"filter_{cat_key}"))
-            
+            row.append(
+                InlineKeyboardButton(button_text, callback_data=f"filter_{cat_key}")
+            )
             if len(row) == 2:
                 keyboard.append(row)
                 row = []
-    
+
     if row:
         keyboard.append(row)
-    
-    # Кнопка для показа всех результатов (без фильтра)
-    keyboard.append([InlineKeyboardButton("📋 Показать все", callback_data="filter_all")])
-    
-    # Сохраняем результаты поиска для этого пользователя
-    user_search_results[chat_id] = {
-        'events': events,
-        'original_title': title
-    }
-    
-    # Формируем сообщение с информацией о дате
-    if date_info:
-        date_text = f"📅 {date_info}\n\n"
-    else:
-        date_text = ""
-    
-    # Отправляем сообщение с предложением фильтрации
+
+    keyboard.append(
+        [InlineKeyboardButton("📋 Показать все", callback_data="filter_all")]
+    )
+
+    total = len(events)
+    text = (
+        f"📊 Найдено всего: {total} событий\n"
+        f"Показаны первые {PER_PAGE}. Выберите категорию для просмотра всех:"
+    )
+
     if isinstance(update_or_query, Update):
         await update_or_query.message.reply_text(
-            f"{date_text}📊 Найдено всего: {len(events)} событий\n"
-            f"Показаны первые 10. Выберите категорию для просмотра всех:",
+            text,
             reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='Markdown'
+            parse_mode="Markdown",
         )
     else:
-        await update_or_query.edit_message_text(
-            f"{date_text}📊 Найдено всего: {len(events)} событий\n"
-            f"Показаны первые 10. Выберите категорию для просмотра всех:",
+        await update_or_query.message.reply_text(
+            text,
             reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='Markdown'
+            parse_mode="Markdown",
         )
 
-async def show_events_and_menu(update_or_query, events, title, limit=10, date_info=None):
-    """Показывает события и затем предлагает фильтрацию или главное меню"""
-    
+
+async def show_page(update_or_query, context: ContextTypes.DEFAULT_TYPE):
+    data = context.user_data.get("pagination")
+    if not data:
+        if isinstance(update_or_query, Update):
+            await update_or_query.message.reply_text(
+                "Данные для пагинации не найдены. Попробуйте запрос заново."
+            )
+        else:
+            await update_or_query.answer(
+                "Данные для пагинации не найдены. Попробуйте запрос заново.",
+                show_alert=True,
+            )
+        return
+
+    events = data["events"]
+    page = data["page"]
+    per_page = data["per_page"]
+    title = data["title"]
+    date_info = data["date_info"]
+
+    total = len(events)
+    if total == 0:
+        if isinstance(update_or_query, Update):
+            send_method = update_or_query.message.reply_text
+        else:
+            send_method = update_or_query.message.reply_text
+        await send_method("😕 Событий не найдено.", parse_mode="Markdown")
+        return
+
+    max_page = (total - 1) // per_page
+    if page < 0:
+        page = 0
+    if page > max_page:
+        page = max_page
+    data["page"] = page
+
+    start = page * per_page
+    end = start + per_page
+    chunk = events[start:end]
+
     if isinstance(update_or_query, Update):
         message = update_or_query.message
         await message.chat.send_action(action="typing")
         send_method = message.reply_text
-        chat_id = message.chat_id
     else:
         query = update_or_query
         await query.answer()
         send_method = query.message.reply_text
-        chat_id = query.message.chat_id
-    
-    if not events:
-        await send_method(
-            f"😕 Событий не найдено.",
-            parse_mode='Markdown'
-        )
-        return
-    
-    total_count = len(events)
-    
-    # Разделяем кино и другие события
-    cinema_events = [e for e in events if e['category'] == 'cinema']
-    other_events = [e for e in events if e['category'] != 'cinema']
-    
-    shown_count = 0
-    
-    # Показываем сгруппированное кино
+
+    header_lines = []
+    if title:
+        header_lines.append(title)
+    if date_info:
+        header_lines.append(f"{date_info}")
+    header_lines.append(
+        f"Страница {page + 1} из {max_page + 1} (показано {len(chunk)} из {total})"
+    )
+    header_text = "\n".join(header_lines)
+
+    await send_method(header_text, parse_mode="Markdown")
+
+    cinema_events = [e for e in chunk if e["category"] == "cinema"]
+    other_events = [e for e in chunk if e["category"] != "cinema"]
+
     if cinema_events:
         grouped = group_cinema_events(cinema_events)
-        formatted = format_grouped_cinema_events(grouped, limit)
-        
+        formatted = format_grouped_cinema_events(grouped)
         for text in formatted:
-            if shown_count >= limit:
-                break
             await send_method(
                 f"{text}\n\n🔗 [Подробнее](https://afisha.relax.by/kino/minsk/)",
-                parse_mode='Markdown',
-                disable_web_page_preview=True
+                parse_mode="Markdown",
+                disable_web_page_preview=True,
             )
-            shown_count += 1
-    
-    # Показываем остальные события без группировки
+
     for event in other_events:
-        if shown_count >= limit:
-            break
-        
         text = format_event_text(event)
-        url = event['source_url']
-        
+        url = event["source_url"]
         await send_method(
             f"{text}\n\n🔗 [Подробнее]({url})",
-            parse_mode='Markdown',
-            disable_web_page_preview=True
+            parse_mode="Markdown",
+            disable_web_page_preview=True,
         )
-        shown_count += 1
-    
-    # Если показали не все, предлагаем фильтрацию
-    if shown_count < total_count:
-        await show_category_filter(update_or_query, events, title, chat_id, date_info)
 
-async def show_main_menu(chat_id, context=None, send_method=None):
-    """Показывает главное меню"""
+    keyboard = []
+    if page < max_page:
+        keyboard.append(
+            [InlineKeyboardButton("➡️ Далее", callback_data="page_next")]
+        )
+
+    if keyboard:
+        await send_method(
+            "Навигация по страницам:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown",
+        )
+
+    if page == 0 and total > per_page:
+        await show_category_filter(update_or_query, context)
+
+
+# ---------------------- UI-хелперы ----------------------
+
+
+def get_reply_main_menu():
     keyboard = [
-        [InlineKeyboardButton("📅 Сегодня", callback_data="today"),
-         InlineKeyboardButton("📆 Завтра", callback_data="tomorrow")],
-        [InlineKeyboardButton("⏰ Ближайшие", callback_data="soon"),
-         InlineKeyboardButton("🎉 Выходные", callback_data="weekend")],
-        [InlineKeyboardButton("📋 Все события", callback_data="all"),
-         InlineKeyboardButton("🎯 Категории", callback_data="show_categories")]
+        ["📅 Сегодня", "📆 Завтра"],
+        ["⏰ Ближайшие", "🎉 Выходные"],
+        ["📋 Все события", "🎯 Категории"],
     ]
-    
-    menu_text = "🎉 **Главное меню**\n\nВыберите действие:"
-    
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+
+async def show_main_menu(
+    chat_id: int,
+    context: ContextTypes.DEFAULT_TYPE | None = None,
+    send_method=None,
+):
+    text = "🎉 **Главное меню**\n\nВыберите действие:"
+    reply_markup = get_reply_main_menu()
+
     if send_method:
         await send_method(
-            menu_text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='Markdown'
+            text,
+            reply_markup=reply_markup,
+            parse_mode="Markdown",
         )
     else:
         await context.bot.send_message(
             chat_id=chat_id,
-            text=menu_text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='Markdown'
+            text=text,
+            reply_markup=reply_markup,
+            parse_mode="Markdown",
         )
 
-async def search_by_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик поиска по названию"""
-    query = update.message.text.strip()
-    
-    if len(query) < 3:
+
+async def show_categories_menu(query, context: ContextTypes.DEFAULT_TYPE):
+    await query.answer()
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🎬 Кино", callback_data="cat_cinema"),
+            InlineKeyboardButton("🎵 Концерты", callback_data="cat_concert"),
+        ],
+        [
+            InlineKeyboardButton("🎭 Театр", callback_data="cat_theater"),
+            InlineKeyboardButton("🖼️ Выставки", callback_data="cat_exhibition"),
+        ],
+        [
+            InlineKeyboardButton("🧸 Детям", callback_data="cat_kids"),
+            InlineKeyboardButton("⚽ Спорт", callback_data="cat_sport"),
+        ],
+        [
+            InlineKeyboardButton("🆓 Бесплатно", callback_data="cat_free"),
+            InlineKeyboardButton(
+                "◀️ Назад в главное меню", callback_data="back_to_main"
+            ),
+        ],
+    ]
+
+    await query.edit_message_text(
+        "🎯 **Выберите категорию:**",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown",
+    )
+
+
+async def show_date_options(update_or_query, category_name: str):
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "📅 Сегодня", callback_data=f"date_today_{category_name}"
+            ),
+            InlineKeyboardButton(
+                "📆 Завтра", callback_data=f"date_tomorrow_{category_name}"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "⏰ Ближайшие", callback_data=f"date_upcoming_{category_name}"
+            ),
+            InlineKeyboardButton(
+                "🎉 Выходные", callback_data=f"date_weekend_{category_name}"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "◀️ Назад к категориям", callback_data="show_categories"
+            )
+        ],
+    ]
+
+    display_name = CATEGORY_NAMES.get(category_name, category_name)
+    text = f"📌 **{display_name}**\n\nВыберите дату для поиска:"
+
+    if isinstance(update_or_query, Update):
+        await update_or_query.message.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown",
+        )
+    else:
+        await update_or_query.edit_message_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown",
+        )
+
+
+# ---------------------- Подписки ----------------------
+
+
+async def send_subscription_prompt(
+    query_or_update, category: str, date_type: str
+):
+    display_name = CATEGORY_NAMES.get(category, category)
+
+    date_type_names = {
+        "today": "на сегодня",
+        "tomorrow": "на завтра",
+        "upcoming": "на ближайшие дни",
+        "weekend": "на выходные",
+    }
+    dt_name = date_type_names.get(date_type, "")
+
+    text = f"🔔 Подписаться на {display_name} {dt_name}?"
+
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "🔔 Подписаться",
+                callback_data=f"sub_{category}_{date_type}",
+            )
+        ]
+    ]
+
+    if isinstance(query_or_update, Update):
+        await query_or_update.message.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown",
+        )
+    else:
+        await query_or_update.message.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown",
+        )
+
+
+async def show_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    subs = get_user_subscriptions(user_id)
+
+    if not subs:
         await update.message.reply_text(
-            "🔍 **Поиск по названию**\n\nВведите минимум 3 символа для поиска.",
-            parse_mode='Markdown'
+            "У вас пока нет активных подписок 🔔",
+            parse_mode="Markdown",
         )
         return
-    
-    await update.message.chat.send_action(action="typing")
-    events = search_events_by_title(query)
-    
-    if events:
-        await show_events_and_menu(update, events, f"🔍 **Результаты поиска по запросу '{query}':**", limit=10)
-    else:
-        await update.message.reply_text(
-            f"🔍 **Поиск по запросу '{query}'**\n\n😕 Ничего не найдено.",
-            parse_mode='Markdown'
-        )
 
-async def search_by_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик поиска по дате"""
-    date_text = update.message.text.strip()
-    
-    result, formatted_date, status = search_events_by_date(date_text)
-    
-    if status == "неверный_формат":
-        await update.message.reply_text(
-            f"📅 **Поиск по дате**\n\nНе удалось распознать дату '{date_text}'.\n\n"
-            "Введите дату в формате:\n• ДД.ММ.ГГГГ (например, 25.02.2026)\n• ДД.ММ (например, 25.02)",
-            parse_mode='Markdown'
-        )
-    elif status == "нет_событий":
-        await update.message.reply_text(
-            f"📅 **Событий на {formatted_date} не найдено.**\n\n"
-            "Попробуйте другую дату или воспользуйтесь поиском по названию.",
-            parse_mode='Markdown'
-        )
-    elif status == "найдены":
-        date_info = f"События на {formatted_date}"
-        await show_events_and_menu(update, result, f"📅 **События на {formatted_date}:**", limit=10, date_info=date_info)
-    else:
-        await update.message.reply_text(
-            "❌ Произошла ошибка при поиске. Попробуйте позже.",
-            parse_mode='Markdown'
-        )
+    lines = ["🔔 Ваши подписки:"]
+    date_type_names = {
+        "today": "на сегодня",
+        "tomorrow": "на завтра",
+        "upcoming": "на ближайшие дни",
+        "weekend": "на выходные",
+    }
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик текстовых сообщений - определяет, что ищет пользователь"""
-    text = update.message.text.strip()
-    
-    if re.match(r'^\d{1,2}\.\d{1,2}(\.\d{2,4})?$', text):
-        await search_by_date(update, context)
-    else:
-        await search_by_title(update, context)
+    for sub in subs:
+        cat = sub["category"]
+        dt = sub["date_type"]
+        cat_name = CATEGORY_NAMES.get(cat, cat)
+        dt_name = date_type_names.get(dt, dt)
+        lines.append(f"• {cat_name} {dt_name}")
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode="Markdown",
+    )
+
+
+# ---------------------- Хендлеры сообщений ----------------------
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Главное меню"""
     user = update.effective_user
-    
+
     welcome_text = f"""
 🎉 Привет, {user.first_name}!
 
@@ -501,317 +728,356 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • Или отправьте **дату** в формате ДД.ММ или ДД.ММ.ГГГГ (например: 25.02 или 25.02.2026)
 
 Используйте кнопки для быстрого поиска 👇
-    """
-    
-    keyboard = [
-        [InlineKeyboardButton("📅 Сегодня", callback_data="today"),
-         InlineKeyboardButton("📆 Завтра", callback_data="tomorrow")],
-        [InlineKeyboardButton("⏰ Ближайшие", callback_data="soon"),
-         InlineKeyboardButton("🎉 Выходные", callback_data="weekend")],
-        [InlineKeyboardButton("📋 Все события", callback_data="all"),
-         InlineKeyboardButton("🎯 Категории", callback_data="show_categories")]
-    ]
-    
+"""
+
+    reply_markup = get_reply_main_menu()
+
     await update.message.reply_text(
         welcome_text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
+        reply_markup=reply_markup,
+        parse_mode="Markdown",
     )
 
-async def show_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает меню категорий"""
-    query = update.callback_query
-    await query.answer()
-    
-    keyboard = [
-        [InlineKeyboardButton("🎬 Кино", callback_data="cat_cinema"),
-         InlineKeyboardButton("🎵 Концерты", callback_data="cat_concert")],
-        [InlineKeyboardButton("🎭 Театр", callback_data="cat_theater"),
-         InlineKeyboardButton("🖼️ Выставки", callback_data="cat_exhibition")],
-        [InlineKeyboardButton("🧸 Детям", callback_data="cat_kids"),
-         InlineKeyboardButton("⚽ Спорт", callback_data="cat_sport")],
-        [InlineKeyboardButton("🆓 Бесплатно", callback_data="cat_free"),
-         InlineKeyboardButton("◀️ Назад в главное меню", callback_data="back_to_main")]
-    ]
-    
-    await query.edit_message_text(
-        "🎯 **Выберите категорию:**",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
 
-async def show_date_options(update_or_query, category_name):
-    """Показывает меню выбора даты после выбора категории"""
-    keyboard = [
-        [InlineKeyboardButton("📅 Сегодня", callback_data=f"date_today_{category_name}"),
-         InlineKeyboardButton("📆 Завтра", callback_data=f"date_tomorrow_{category_name}")],
-        [InlineKeyboardButton("⏰ Ближайшие", callback_data=f"date_upcoming_{category_name}"),
-         InlineKeyboardButton("🎉 Выходные", callback_data=f"date_weekend_{category_name}")],
-        [InlineKeyboardButton("◀️ Назад к категориям", callback_data="show_categories")]
-    ]
-    
-    category_names = {
-        'cinema': '🎬 Кино',
-        'concert': '🎵 Концерты',
-        'theater': '🎭 Театр',
-        'exhibition': '🖼️ Выставки',
-        'kids': '🧸 Детям',
-        'sport': '⚽ Спорт',
-        'free': '🆓 Бесплатно'
-    }
-    
-    display_name = category_names.get(category_name, category_name)
-    
-    if isinstance(update_or_query, Update):
-        await update_or_query.message.reply_text(
-            f"📌 **{display_name}**\n\nВыберите дату для поиска:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='Markdown'
+async def search_by_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.message.text.strip()
+
+    if len(query) < 3:
+        await update.message.reply_text(
+            "🔍 **Поиск по названию**\n\nВведите минимум 3 символа для поиска.",
+            parse_mode="Markdown",
         )
+        return
+
+    await update.message.chat.send_action(action="typing")
+    events = search_events_by_title(query)
+
+    if events:
+        title = f"🔍 **Результаты поиска по запросу '{query}':**"
+        set_pagination(context, events, title, date_info=None)
+        await show_page(update, context)
     else:
-        await update_or_query.edit_message_text(
-            f"📌 **{display_name}**\n\nВыберите дату для поиска:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='Markdown'
+        await update.message.reply_text(
+            f"🔍 **Поиск по запросу '{query}'**\n\n😕 Ничего не найдено.",
+            parse_mode="Markdown",
         )
 
-async def back_to_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Возврат в главное меню (без дублирования)"""
-    query = update.callback_query
-    await query.answer()
-    
-    keyboard = [
-        [InlineKeyboardButton("📅 Сегодня", callback_data="today"),
-         InlineKeyboardButton("📆 Завтра", callback_data="tomorrow")],
-        [InlineKeyboardButton("⏰ Ближайшие", callback_data="soon"),
-         InlineKeyboardButton("🎉 Выходные", callback_data="weekend")],
-        [InlineKeyboardButton("📋 Все события", callback_data="all"),
-         InlineKeyboardButton("🎯 Категории", callback_data="show_categories")]
-    ]
-    
-    await query.edit_message_text(
-        "🎉 **Главное меню**\n\nВыберите действие:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode='Markdown'
-    )
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик нажатий на кнопки"""
-    query = update.callback_query
-    data = query.data
-    chat_id = query.message.chat_id
-    
-    # Обработка фильтрации по категории
-    if data.startswith('filter_'):
-        category = data.replace('filter_', '')
-        
-        if chat_id in user_search_results:
-            search_data = user_search_results[chat_id]
-            all_events = search_data['events']
-            
-            if category == 'all':
-                filtered_events = all_events
-            else:
-                filtered_events = filter_events_by_category(all_events, category)
-            
-            # Очищаем сохраненные результаты
-            del user_search_results[chat_id]
-            
-            # СНАЧАЛА показываем главное меню
-            await show_main_menu(chat_id, context, query.message.reply_text)
-            
-            # ПОТОМ показываем все отфильтрованные события
-            await show_filtered_events(query, filtered_events)
+async def search_by_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    date_text = update.message.text.strip()
+
+    result, formatted_date, status = search_events_by_date_raw(date_text)
+
+    if status == "неверный_формат":
+        await update.message.reply_text(
+            f"📅 **Поиск по дате**\n\nНе удалось распознать дату '{date_text}'.\n\n"
+            "Введите дату в формате:\n• ДД.ММ.ГГГГ (например, 25.02.2026)\n• ДД.ММ (например, 25.02)",
+            parse_mode="Markdown",
+        )
+    elif status == "нет_событий":
+        await update.message.reply_text(
+            f"📅 **Событий на {formatted_date} не найдено.**\n\n"
+            "Попробуйте другую дату или воспользуйтесь поиском по названию.",
+            parse_mode="Markdown",
+        )
+    elif status == "найдены":
+        title = f"📅 **События на {formatted_date}:**"
+        date_info = None  # чтобы не дублировать дату
+        set_pagination(context, result, title, date_info=date_info)
+        await show_page(update, context)
+    else:
+        await update.message.reply_text(
+            "❌ Произошла ошибка при поиске. Попробуйте позже.",
+            parse_mode="Markdown",
+        )
+
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+
+    # обработка reply-клавиатуры
+    if text == "📅 Сегодня":
+        today = datetime.now()
+        events = get_events_by_date_and_category(today)
+        title = f"📅 **События на {today.strftime('%d.%m.%Y')}:**"
+        set_pagination(context, events, title, date_info=None)
+        await show_page(update, context)
+        return
+
+    if text == "📆 Завтра":
+        tomorrow = datetime.now() + timedelta(days=1)
+        events = get_events_by_date_and_category(tomorrow)
+        title = f"📆 **События на {tomorrow.strftime('%d.%m.%Y')}:**"
+        set_pagination(context, events, title, date_info=None)
+        await show_page(update, context)
+        return
+
+    if text == "🎉 Выходные":
+        events, saturday, sunday = get_weekend_events()
+        title = (
+            f"🎉 **Выходные "
+            f"({saturday.strftime('%d.%m')}-{sunday.strftime('%d.%m')}):**"
+        )
+        set_pagination(context, events, title, date_info=None)
+        await show_page(update, context)
+        return
+
+    if text == "⏰ Ближайшие":
+        events = get_upcoming_events(limit=100)
+        if events:
+            title = "⏰ **Ближайшие события:**"
+            set_pagination(context, events, title, date_info=None)
+            await show_page(update, context)
         else:
-            await query.answer("Результаты поиска устарели. Попробуйте снова.")
-        
+            await update.message.reply_text(
+                "😕 Ближайших событий не найдено.",
+                parse_mode="Markdown",
+            )
         return
-    
-    # Обработка комбинированных кнопок (категория + дата)
-    if data.startswith('date_'):
-        parts = data.split('_')
-        date_type = parts[1]  # today, tomorrow, upcoming, weekend
-        category = parts[2]    # cinema, concert, etc.
-        
-        category_names = {
-            'cinema': '🎬 Кино',
-            'concert': '🎵 Концерты',
-            'theater': '🎭 Театр',
-            'exhibition': '🖼️ Выставки',
-            'kids': '🧸 Детям',
-            'sport': '⚽ Спорт',
-            'free': '🆓 Бесплатно'
-        }
-        
-        if date_type == 'today':
-            today = datetime.now()
-            events = get_events_by_date_and_category(today, category)
-            date_info = f"События на {today.strftime('%d.%m.%Y')}"
-            await show_events_and_menu(query, events, f"📅 **{category_names.get(category, category)} на {today.strftime('%d.%m.%Y')}:**", limit=10, date_info=date_info)
-        
-        elif date_type == 'tomorrow':
-            tomorrow = datetime.now() + timedelta(days=1)
-            events = get_events_by_date_and_category(tomorrow, category)
-            date_info = f"События на {tomorrow.strftime('%d.%m.%Y')}"
-            await show_events_and_menu(query, events, f"📆 **{category_names.get(category, category)} на {tomorrow.strftime('%d.%m.%Y')}:**", limit=10, date_info=date_info)
-        
-        elif date_type == 'upcoming':
-            events = get_upcoming_events(limit=100, category=category)
-            if events:
-                date_info = f"Ближайшие {category_names.get(category, category)}"
-                await show_events_and_menu(query, events, f"⏰ **Ближайшие {category_names.get(category, category)}:**", limit=10, date_info=date_info)
-            else:
-                await query.edit_message_text(
-                    f"😕 Ближайших событий в категории {category_names.get(category, category)} не найдено.",
-                    parse_mode='Markdown'
-                )
-        
-        elif date_type == 'weekend':
-            events, saturday, sunday = get_weekend_events(category=category)
-            date_info = f"Выходные {saturday.strftime('%d.%m')}-{sunday.strftime('%d.%m')}"
-            title = f"🎉 **{category_names.get(category, category)} на выходные ({saturday.strftime('%d.%m')}-{sunday.strftime('%d.%m')}):**"
-            await show_events_and_menu(query, events, title, limit=10, date_info=date_info)
-        
+
+    if text == "📋 Все события":
+        events = get_upcoming_events(limit=300)
+        if events:
+            title = "📋 **Все события:**"
+            set_pagination(context, events, title, date_info=None)
+            await show_page(update, context)
+        else:
+            await update.message.reply_text(
+                "😕 Событий не найдено.",
+                parse_mode="Markdown",
+            )
         return
-    
-    # Обычные кнопки
+
+    if text == "🎯 Категории":
+        # просто покажем inline-меню категорий
+        await update.message.reply_text(
+            "🎯 **Выберите категорию:**",
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [
+                        InlineKeyboardButton("🎬 Кино", callback_data="cat_cinema"),
+                        InlineKeyboardButton(
+                            "🎵 Концерты", callback_data="cat_concert"
+                        ),
+                    ],
+                    [
+                        InlineKeyboardButton("🎭 Театр", callback_data="cat_theater"),
+                        InlineKeyboardButton(
+                            "🖼️ Выставки", callback_data="cat_exhibition"
+                        ),
+                    ],
+                    [
+                        InlineKeyboardButton("🧸 Детям", callback_data="cat_kids"),
+                        InlineKeyboardButton("⚽ Спорт", callback_data="cat_sport"),
+                    ],
+                    [
+                        InlineKeyboardButton("🆓 Бесплатно", callback_data="cat_free"),
+                        InlineKeyboardButton(
+                            "◀️ Назад в главное меню",
+                            callback_data="back_to_main",
+                        ),
+                    ],
+                ]
+            ),
+            parse_mode="Markdown",
+        )
+        return
+
+    # если это дата
+    if re.match(r"^\d{1,2}\.\d{1,2}(\.\d{2,4})?$", text):
+        await search_by_date(update, context)
+    else:
+        await search_by_title(update, context)
+
+
+# ---------------------- Хендлер кнопок ----------------------
+
+
+async def handle_filter_buttons(
+    query, context: ContextTypes.DEFAULT_TYPE, category: str
+):
+    data = context.user_data.get("pagination")
+    if not data:
+        await query.answer("Результаты поиска устарели. Попробуйте снова.")
+        return
+
+    all_events = data["events"]
+
+    if category == "all":
+        filtered_events = all_events
+    else:
+        filtered_events = filter_events_by_category(all_events, category)
+
+    title = data["title"]
+    date_info = data["date_info"]
+
+    set_pagination(context, filtered_events, title, date_info=date_info)
+    await show_page(query, context)
+
+
+async def handle_date_category_buttons(
+    query, context: ContextTypes.DEFAULT_TYPE, date_type: str, category: str
+):
+    display_name = CATEGORY_NAMES.get(category, category)
+
+    if date_type == "today":
+        today = datetime.now()
+        events = get_events_by_date_and_category(today, category)
+        title = f"📅 **{display_name} на {today.strftime('%d.%m.%Y')}:**"
+        set_pagination(context, events, title, date_info=None)
+        await show_page(query, context)
+        await send_subscription_prompt(query, category, "today")
+
+    elif date_type == "tomorrow":
+        tomorrow = datetime.now() + timedelta(days=1)
+        events = get_events_by_date_and_category(tomorrow, category)
+        title = f"📆 **{display_name} на {tomorrow.strftime('%d.%m.%Y')}:**"
+        set_pagination(context, events, title, date_info=None)
+        await show_page(query, context)
+        await send_subscription_prompt(query, category, "tomorrow")
+
+    elif date_type == "upcoming":
+        events = get_upcoming_events(limit=100, category=category)
+        if events:
+            title = f"⏰ **Ближайшие {display_name}:**"
+            set_pagination(context, events, title, date_info=None)
+            await show_page(query, context)
+            await send_subscription_prompt(query, category, "upcoming")
+        else:
+            await query.edit_message_text(
+                f"😕 Ближайших событий в категории {display_name} не найдено.",
+                parse_mode="Markdown",
+            )
+
+    elif date_type == "weekend":
+        events, saturday, sunday = get_weekend_events(category=category)
+        title = (
+            f"🎉 **{display_name} на выходные "
+            f"({saturday.strftime('%d.%m')}-{sunday.strftime('%d.%m')}):**"
+        )
+        set_pagination(context, events, title, date_info=None)
+        await show_page(query, context)
+        await send_subscription_prompt(query, category, "weekend")
+
+
+async def handle_simple_buttons(
+    query, context: ContextTypes.DEFAULT_TYPE, data: str
+):
+    chat_id = query.message.chat_id
+
     if data == "today":
         today = datetime.now()
         events = get_events_by_date_and_category(today)
-        date_info = f"События на {today.strftime('%d.%m.%Y')}"
-        await show_events_and_menu(query, events, f"📅 **События на {today.strftime('%d.%m.%Y')}:**", limit=10, date_info=date_info)
-    
+        title = f"📅 **События на {today.strftime('%d.%m.%Y')}:**"
+        set_pagination(context, events, title, date_info=None)
+        await show_page(query, context)
+
     elif data == "tomorrow":
         tomorrow = datetime.now() + timedelta(days=1)
         events = get_events_by_date_and_category(tomorrow)
-        date_info = f"События на {tomorrow.strftime('%d.%m.%Y')}"
-        await show_events_and_menu(query, events, f"📆 **События на {tomorrow.strftime('%d.%m.%Y')}:**", limit=10, date_info=date_info)
-    
+        title = f"📆 **События на {tomorrow.strftime('%d.%m.%Y')}:**"
+        set_pagination(context, events, title, date_info=None)
+        await show_page(query, context)
+
     elif data == "weekend":
         events, saturday, sunday = get_weekend_events()
-        date_info = f"Выходные {saturday.strftime('%d.%m')}-{sunday.strftime('%d.%m')}"
-        title = f"🎉 **Выходные ({saturday.strftime('%d.%m')}-{sunday.strftime('%d.%m')}):**"
-        await show_events_and_menu(query, events, title, limit=10, date_info=date_info)
-    
+        title = (
+            f"🎉 **Выходные "
+            f"({saturday.strftime('%d.%m')}-{sunday.strftime('%d.%m')}):**"
+        )
+        set_pagination(context, events, title, date_info=None)
+        await show_page(query, context)
+
     elif data == "soon":
         events = get_upcoming_events(limit=100)
         if events:
-            date_info = "Ближайшие события"
-            await show_events_and_menu(query, events, "⏰ **Ближайшие события:**", limit=10, date_info=date_info)
+            title = "⏰ **Ближайшие события:**"
+            set_pagination(context, events, title, date_info=None)
+            await show_page(query, context)
         else:
             await query.edit_message_text(
                 "😕 Ближайших событий не найдено.",
-                parse_mode='Markdown'
+                parse_mode="Markdown",
             )
-    
+
     elif data == "all":
-        events = get_upcoming_events(limit=100)
+        events = get_upcoming_events(limit=300)
         if events:
-            date_info = "Все события"
-            await show_events_and_menu(query, events, "📋 **Все события:**", limit=10, date_info=date_info)
+            title = "📋 **Все события:**"
+            set_pagination(context, events, title, date_info=None)
+            await show_page(query, context)
         else:
             await query.edit_message_text(
                 "😕 Событий не найдено.",
-                parse_mode='Markdown'
+                parse_mode="Markdown",
             )
-    
+
     elif data == "show_categories":
-        await show_categories(update, context)
-    
+        await show_categories_menu(query, context)
+
     elif data == "back_to_main":
-        await back_to_main(update, context)
-    
+        await show_main_menu(
+            chat_id, context, query.message.reply_text
+        )
+
     elif data.startswith("cat_"):
         category = data.replace("cat_", "")
         await show_date_options(query, category)
 
-async def show_filtered_events(query, events):
-    """Показывает отфильтрованные события (все, без лимита)"""
-    
-    if not events:
-        await query.message.reply_text(
-            f"😕 Событий не найдено.",
-            parse_mode='Markdown'
-        )
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    data = query.data
+
+    if data.startswith("filter_"):
+        category = data.replace("filter_", "")
+        await handle_filter_buttons(query, context, category)
         return
-    
-    # Разделяем кино и другие события
-    cinema_events = [e for e in events if e['category'] == 'cinema']
-    other_events = [e for e in events if e['category'] != 'cinema']
-    
-    # Показываем сгруппированное кино
-    if cinema_events:
-        grouped = group_cinema_events(cinema_events)
-        formatted = format_grouped_cinema_events(grouped, limit=100)
-        
-        for text in formatted:
-            await query.message.reply_text(
-                f"{text}\n\n🔗 [Подробнее](https://afisha.relax.by/kino/minsk/)",
-                parse_mode='Markdown',
-                disable_web_page_preview=True
-            )
-    
-    # Показываем остальные события
-    for event in other_events:
-        text = format_event_text(event)
-        url = event['source_url']
-        
-        await query.message.reply_text(
-            f"{text}\n\n🔗 [Подробнее]({url})",
-            parse_mode='Markdown',
-            disable_web_page_preview=True
-        )
 
-# Словарь названий категорий
-category_names = {
-    'cinema': '🎬 Кино',
-    'concert': '🎵 Концерты',
-    'theater': '🎭 Театр',
-    'exhibition': '🖼️ Выставки',
-    'kids': '🧸 Детям',
-    'sport': '⚽ Спорт',
-    'free': '🆓 Бесплатно'
-}
+    if data.startswith("date_"):
+        parts = data.split("_")
+        date_type = parts[1]
+        category = parts[2]
+        await handle_date_category_buttons(query, context, date_type, category)
+        return
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Помощь"""
-    help_text = """
-📚 **Как пользоваться ботом**
+    if data == "page_next":
+        if "pagination" in context.user_data:
+            context.user_data["pagination"]["page"] += 1
+        await show_page(query, context)
+        return
 
-🔍 **Поиск:**
-• Просто отправьте **название** события (например: "концерт", "Дельфин", "выставка")
-• Или отправьте **дату** в формате ДД.ММ или ДД.ММ.ГГГГ (например: 25.02 или 25.02.2026)
+    if data.startswith("sub_"):
+        _, category, date_type = data.split("_", 2)
+        user_id = query.from_user.id
+        add_subscription(user_id, category, date_type)
+        await query.answer("Подписка оформлена 🔔", show_alert=False)
+        return
 
-🎯 **Кнопки:**
-📅 Сегодня - события на сегодня
-📆 Завтра - события на завтра
-⏰ Ближайшие - все ближайшие события
-🎉 Выходные - события на субботу и воскресенье
-📋 Все события - все события в базе
-🎯 Категории - выбрать по категории
+    await handle_simple_buttons(query, context, data)
 
-**Новая функция:** Если найдено больше 10 событий, бот предложит выбрать категорию для просмотра всех!
 
-📍 Данные собираются с relax.by
-🔄 Обновляются автоматически
-    """
-    
-    await update.message.reply_text(help_text, parse_mode='Markdown')
+# ---------------------- main ----------------------
+
 
 def main():
-    bot = Bot(TOKEN)
-    asyncio.run(bot.delete_webhook(drop_pending_updates=True))
-    logger.info("✅ Вебхуки очищены")
-    
-    app = Application.builder().token(TOKEN).build()
-    
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    
-    logger.info("🚀 Бот запущен с улучшенной логикой фильтрации")
-    app.run_polling()
+    if not TOKEN:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN не задан в окружении")
 
-if __name__ == '__main__':
+    init_db()
+
+    application = Application.builder().token(TOKEN).build()
+
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("subs", show_subscriptions))
+    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
+    )
+
+    application.run_polling()
+
+
+if __name__ == "__main__":
     main()
+
