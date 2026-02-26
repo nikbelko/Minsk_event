@@ -24,6 +24,11 @@ from telegram.ext import (
 
 load_dotenv()
 
+import asyncio
+import subprocess
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+
 # ---------------------- Конфиг и логирование ----------------------
 
 logging.basicConfig(
@@ -711,7 +716,85 @@ async def show_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
         parse_mode="Markdown",
     )
 
+# ---------------------- Планировщик парсеров ----------------------
 
+async def run_parsers_job():
+    """Запускает все парсеры по расписанию"""
+    logger.info("⏰ Запуск парсеров по расписанию...")
+    
+    try:
+        # Запускаем run_all_parsers.py как отдельный процесс
+        process = await asyncio.create_subprocess_exec(
+            'python', 'run_all_parsers.py',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        stdout, stderr = await process.communicate()
+        
+        if process.returncode == 0:
+            logger.info(f"✅ Парсеры успешно завершены")
+            if stdout:
+                # Логируем только последние строки, чтобы не засорять
+                output = stdout.decode().strip().split('\n')
+                last_lines = output[-5:] if len(output) > 5 else output
+                for line in last_lines:
+                    if line.strip():
+                        logger.info(f"   {line}")
+        else:
+            logger.error(f"❌ Ошибка при запуске парсеров (код {process.returncode})")
+            if stderr:
+                logger.error(f"Ошибка:\n{stderr.decode()}")
+                
+    except Exception as e:
+        logger.error(f"💥 Критическая ошибка при запуске парсеров: {e}")
+
+def setup_scheduler(application):
+    """Настраивает планировщик задач"""
+    scheduler = AsyncIOScheduler()
+    
+    # Запуск каждый день в 6:00 утра по Минску (3:00 UTC)
+    scheduler.add_job(
+        run_parsers_job,
+        trigger=CronTrigger(hour=3, minute=0),  # UTC
+        id='daily_parsers',
+        name='Run all parsers daily at 6:00 Minsk time',
+        replace_existing=True
+    )
+    
+    scheduler.start()
+    logger.info("⏰ Планировщик запущен. Парсеры будут выполняться ежедневно в 6:00 (Минск)")
+
+async def manual_run_parsers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ручной запуск парсеров (команда /run_parsers)"""
+    await update.message.reply_text("🔄 Запускаю парсеры...")
+    
+    try:
+        process = await asyncio.create_subprocess_exec(
+            'python', 'run_all_parsers.py',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        
+        stdout, stderr = await process.communicate()
+        
+        if process.returncode == 0:
+            result_text = "✅ Парсеры завершены успешно\n\n"
+            if stdout:
+                output = stdout.decode().strip().split('\n')
+                last_lines = output[-10:] if len(output) > 10 else output
+                result_text += "```\n" + "\n".join(last_lines) + "\n```"
+            await update.message.reply_text(result_text, parse_mode="Markdown")
+        else:
+            error_text = f"❌ Ошибка при запуске парсеров (код {process.returncode})\n"
+            if stderr:
+                error_text += f"```\n{stderr.decode()}\n```"
+            await update.message.reply_text(error_text, parse_mode="Markdown")
+            
+    except Exception as e:
+        await update.message.reply_text(f"💥 Ошибка: {e}")
+
+        
 # ---------------------- Хендлеры сообщений ----------------------
 
 
@@ -1068,13 +1151,19 @@ def main():
 
     application = Application.builder().token(TOKEN).build()
 
+    # Добавляем хендлеры
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("subs", show_subscriptions))
+    application.add_handler(CommandHandler("run_parsers", manual_run_parsers))  # Новая команда
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )
 
+    # Настраиваем планировщик
+    setup_scheduler(application)
+
+    logger.info("🚀 Бот запущен с ежедневным запуском парсеров в 6:00")
     application.run_polling()
 
 
