@@ -348,8 +348,12 @@ class RelaxExhibitionParser:
         if events:
             saved = self.save_events(events)
             logging.info(f"Итого: найдено {len(events)}, сохранено {saved}")
+            print(f"   🧹 Очищено {len(events)} старых записей выставок")
+            print(f"   📊 Результаты:")
+            print(f"      ✅ Добавлено новых выставок: {saved}")
         else:
             logging.warning("Выставки не найдены")
+            print(f"   ⚠️ Событий выставок не найдено")
         
         logging.info("=" * 60)
 

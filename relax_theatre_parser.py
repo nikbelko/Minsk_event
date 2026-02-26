@@ -368,8 +368,13 @@ class RelaxTheatreParser:
         if events:
             saved = self.save_events(events)
             logging.info(f"Итого: найдено {len(events)}, сохранено {saved}")
+            # Добавляем print для run_all_parsers.py
+            print(f"   🧹 Очищено {len(events)} старых записей театра")
+            print(f"   📊 Результаты:")
+            print(f"      ✅ Добавлено новых спектаклей: {saved}")
         else:
             logging.warning("События не найдены")
+            print(f"   ⚠️ Событий театра не найдено")
         
         logging.info("=" * 60)
 
