@@ -1,3 +1,4 @@
+
 import logging
 import os
 import re
@@ -25,7 +26,6 @@ from telegram.ext import (
 load_dotenv()
 
 import asyncio
-import subprocess
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 DB_NAME = "events_final.db"
+ADMIN_ID = 502917728
 
 PER_PAGE = 10
 SEARCH_MULTIPLIER = 3
@@ -89,7 +90,115 @@ def init_db():
             )
         """
         )
+        # Таблица статистики действий пользователей
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                username TEXT,
+                first_name TEXT,
+                action TEXT NOT NULL,
+                detail TEXT,
+                created_at TEXT NOT NULL
+            )
+        """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_user_stats_user_id ON user_stats(user_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_user_stats_created_at ON user_stats(created_at)"
+        )
         conn.commit()
+
+
+def log_user_action(
+    user_id: int,
+    username: str | None,
+    first_name: str | None,
+    action: str,
+    detail: str | None = None,
+):
+    """Логирует действие пользователя в БД."""
+    try:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO user_stats (user_id, username, first_name, action, detail, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    username,
+                    first_name,
+                    action,
+                    detail,
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                ),
+            )
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Ошибка логирования действия: {e}")
+
+
+def get_stats_data() -> dict:
+    """Возвращает статистику использования бота."""
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM user_stats")
+        total_users = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM user_stats")
+        total_actions = cursor.fetchone()[0]
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        cursor.execute(
+            "SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE created_at LIKE ?",
+            (f"{today}%",),
+        )
+        users_today = cursor.fetchone()[0]
+
+        cursor.execute(
+            "SELECT COUNT(*) FROM user_stats WHERE created_at LIKE ?",
+            (f"{today}%",),
+        )
+        actions_today = cursor.fetchone()[0]
+
+        # Активность по дням за последние 7 дней
+        cursor.execute(
+            """
+            SELECT DATE(created_at) as day, COUNT(*) as cnt, COUNT(DISTINCT user_id) as users
+            FROM user_stats
+            WHERE created_at >= DATE('now', '-7 days')
+            GROUP BY day
+            ORDER BY day DESC
+            """
+        )
+        daily_activity = cursor.fetchall()
+
+        # Топ-10 действий
+        cursor.execute(
+            """
+            SELECT action, COUNT(*) as cnt
+            FROM user_stats
+            GROUP BY action
+            ORDER BY cnt DESC
+            LIMIT 10
+            """
+        )
+        top_actions = cursor.fetchall()
+
+        return {
+            "total_users": total_users,
+            "total_actions": total_actions,
+            "users_today": users_today,
+            "actions_today": actions_today,
+            "daily_activity": daily_activity,
+            "top_actions": top_actions,
+        }
 
 
 def search_events_by_title(query: str, limit: int = 20):
@@ -647,9 +756,7 @@ async def show_date_options(update_or_query, category_name: str):
 # ---------------------- Подписки ----------------------
 
 
-async def send_subscription_prompt(
-    query_or_update, category: str, date_type: str
-):
+async def send_subscription_prompt(query_or_update, category: str, date_type: str):
     display_name = CATEGORY_NAMES.get(category, category)
 
     date_type_names = {
@@ -716,90 +823,165 @@ async def show_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE)
         parse_mode="Markdown",
     )
 
+
+# ---------------------- Статистика (только для админа) ----------------------
+
+
+async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /stats — только для администратора."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Нет доступа.")
+        return
+
+    stats = get_stats_data()
+
+    lines = [
+        "📊 **Статистика бота**",
+        "",
+        f"👥 Всего пользователей: **{stats['total_users']}**",
+        f"📨 Всего запросов: **{stats['total_actions']}**",
+        f"🟢 Пользователей сегодня: **{stats['users_today']}**",
+        f"📬 Запросов сегодня: **{stats['actions_today']}**",
+        "",
+        "📅 **Активность за 7 дней:**",
+    ]
+
+    for row in stats["daily_activity"]:
+        lines.append(f"  {row['day']} — {row['cnt']} запр., {row['users']} польз.")
+
+    lines.append("")
+    lines.append("🔝 **Топ действий:**")
+    for row in stats["top_actions"]:
+        lines.append(f"  {row['action']} — {row['cnt']}")
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode="Markdown",
+    )
+
+
 # ---------------------- Планировщик парсеров ----------------------
 
-async def run_parsers_job():
-    """Запускает все парсеры по расписанию"""
+
+async def run_parsers_job(bot=None):
+    """Запускает все парсеры по расписанию и отправляет отчёт админу."""
     logger.info("⏰ Запуск парсеров по расписанию...")
-    
-    try:
-        # Запускаем run_all_parsers.py как отдельный процесс
-        process = await asyncio.create_subprocess_exec(
-            'python', 'run_all_parsers.py',
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        
-        stdout, stderr = await process.communicate()
-        
-        if process.returncode == 0:
-            logger.info(f"✅ Парсеры успешно завершены")
-            if stdout:
-                # Логируем только последние строки, чтобы не засорять
-                output = stdout.decode().strip().split('\n')
-                last_lines = output[-5:] if len(output) > 5 else output
-                for line in last_lines:
-                    if line.strip():
-                        logger.info(f"   {line}")
+    start_time = datetime.now()
+
+    parsers = [
+        ("relax_kino_live.py", "🎬 Кино"),
+        ("relax_theatre_parser.py", "🎭 Театр"),
+        ("relax_concert_parser.py", "🎵 Концерты"),
+        ("relax_exhibition_parser.py", "🖼️ Выставки"),
+        ("relax_kids_parser.py", "🧸 Детям"),
+    ]
+
+    results = []
+
+    for parser_file, parser_name in parsers:
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "python", parser_file,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
+
+            if process.returncode == 0:
+                output = stdout.decode()
+                added = _parse_added_count(output)
+                results.append({"name": parser_name, "ok": True, "added": added, "error": None})
+                logger.info(f"✅ {parser_name} — добавлено {added}")
+            else:
+                error_msg = stderr.decode()[:300] if stderr else "неизвестная ошибка"
+                results.append({"name": parser_name, "ok": False, "added": 0, "error": error_msg})
+                logger.error(f"❌ {parser_name} упал: {error_msg}")
+
+        except asyncio.TimeoutError:
+            results.append({"name": parser_name, "ok": False, "added": 0, "error": "таймаут (>5 мин)"})
+            logger.error(f"⏰ {parser_name} — таймаут")
+        except Exception as e:
+            results.append({"name": parser_name, "ok": False, "added": 0, "error": str(e)})
+            logger.error(f"💥 {parser_name} — ошибка: {e}")
+
+    elapsed = (datetime.now() - start_time).total_seconds()
+
+    if bot:
+        await _send_parser_report(bot, results, elapsed)
+
+
+def _parse_added_count(output: str) -> int:
+    """Вытаскивает число добавленных событий из вывода парсера."""
+    match = re.search(r'[Дд]обавлено\s+новых[^:]*:\s*(\d+)', output)
+    if match:
+        return int(match.group(1))
+    match = re.search(r'сохранено\s+(\d+)', output)
+    if match:
+        return int(match.group(1))
+    return 0
+
+
+async def _send_parser_report(bot, results: list, elapsed: float):
+    """Отправляет отчёт о работе парсеров админу в Telegram."""
+    lines = [
+        "🤖 **Отчёт о запуске парсеров**",
+        f"🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')} | ⏱ {elapsed:.0f} сек",
+        "",
+    ]
+
+    total_added = 0
+    errors = []
+
+    for r in results:
+        if r["ok"]:
+            lines.append(f"✅ {r['name']} — добавлено: **{r['added']}**")
+            total_added += r["added"]
         else:
-            logger.error(f"❌ Ошибка при запуске парсеров (код {process.returncode})")
-            if stderr:
-                logger.error(f"Ошибка:\n{stderr.decode()}")
-                
+            lines.append(f"❌ {r['name']} — ошибка")
+            errors.append(f"  {r['name']}: {r['error']}")
+
+    lines.append("")
+    lines.append(f"📦 Итого добавлено событий: **{total_added}**")
+
+    if errors:
+        lines.append("")
+        lines.append("⚠️ **Детали ошибок:**")
+        lines.extend(errors)
+
+    try:
+        await bot.send_message(
+            chat_id=ADMIN_ID,
+            text="\n".join(lines),
+            parse_mode="Markdown",
+        )
+        logger.info("📨 Отчёт отправлен админу")
     except Exception as e:
-        logger.error(f"💥 Критическая ошибка при запуске парсеров: {e}")
+        logger.error(f"Не удалось отправить отчёт админу: {e}")
+
 
 def setup_scheduler(application):
-    """Настраивает планировщик задач"""
+    """Настраивает планировщик задач."""
     scheduler = AsyncIOScheduler()
-    
-    # Запуск каждый день в 6:00 утра по Минску (3:00 UTC)
+
     scheduler.add_job(
         run_parsers_job,
-        trigger=CronTrigger(hour=3, minute=0),  # UTC
-        id='daily_parsers',
-        name='Run all parsers daily at 6:00 Minsk time',
-        replace_existing=True
+        trigger=CronTrigger(hour=3, minute=0),  # UTC = 6:00 Минск
+        kwargs={"bot": application.bot},
+        id="daily_parsers",
+        name="Run all parsers daily at 6:00 Minsk time",
+        replace_existing=True,
     )
-    
+
     scheduler.start()
     logger.info("⏰ Планировщик запущен. Парсеры будут выполняться ежедневно в 6:00 (Минск)")
 
-async def manual_run_parsers(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ручной запуск парсеров (команда /run_parsers)"""
-    await update.message.reply_text("🔄 Запускаю парсеры...")
-    
-    try:
-        process = await asyncio.create_subprocess_exec(
-            'python', 'run_all_parsers.py',
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        
-        stdout, stderr = await process.communicate()
-        
-        if process.returncode == 0:
-            result_text = "✅ Парсеры завершены успешно\n\n"
-            if stdout:
-                output = stdout.decode().strip().split('\n')
-                last_lines = output[-10:] if len(output) > 10 else output
-                result_text += "```\n" + "\n".join(last_lines) + "\n```"
-            await update.message.reply_text(result_text, parse_mode="Markdown")
-        else:
-            error_text = f"❌ Ошибка при запуске парсеров (код {process.returncode})\n"
-            if stderr:
-                error_text += f"```\n{stderr.decode()}\n```"
-            await update.message.reply_text(error_text, parse_mode="Markdown")
-            
-    except Exception as e:
-        await update.message.reply_text(f"💥 Ошибка: {e}")
 
-        
 # ---------------------- Хендлеры сообщений ----------------------
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    log_user_action(user.id, user.username, user.first_name, "start")
 
     welcome_text = f"""
 🎉 Привет, {user.first_name}!
@@ -813,17 +995,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 Используйте кнопки для быстрого поиска 👇
 """
 
-    reply_markup = get_reply_main_menu()
-
     await update.message.reply_text(
         welcome_text,
-        reply_markup=reply_markup,
+        reply_markup=get_reply_main_menu(),
         parse_mode="Markdown",
     )
 
 
 async def search_by_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.message.text.strip()
+    user = update.effective_user
 
     if len(query) < 3:
         await update.message.reply_text(
@@ -832,6 +1013,7 @@ async def search_by_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    log_user_action(user.id, user.username, user.first_name, "search_title", query)
     await update.message.chat.send_action(action="typing")
     events = search_events_by_title(query)
 
@@ -848,6 +1030,8 @@ async def search_by_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def search_by_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     date_text = update.message.text.strip()
+    user = update.effective_user
+    log_user_action(user.id, user.username, user.first_name, "search_date", date_text)
 
     result, formatted_date, status = search_events_by_date_raw(date_text)
 
@@ -865,8 +1049,7 @@ async def search_by_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     elif status == "найдены":
         title = f"📅 **События на {formatted_date}:**"
-        date_info = None  # чтобы не дублировать дату
-        set_pagination(context, result, title, date_info=date_info)
+        set_pagination(context, result, title, date_info=None)
         await show_page(update, context)
     else:
         await update.message.reply_text(
@@ -877,9 +1060,10 @@ async def search_by_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
+    user = update.effective_user
 
-    # обработка reply-клавиатуры
     if text == "📅 Сегодня":
+        log_user_action(user.id, user.username, user.first_name, "menu_today")
         today = datetime.now()
         events = get_events_by_date_and_category(today)
         title = f"📅 **События на {today.strftime('%d.%m.%Y')}:**"
@@ -888,6 +1072,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == "📆 Завтра":
+        log_user_action(user.id, user.username, user.first_name, "menu_tomorrow")
         tomorrow = datetime.now() + timedelta(days=1)
         events = get_events_by_date_and_category(tomorrow)
         title = f"📆 **События на {tomorrow.strftime('%d.%m.%Y')}:**"
@@ -896,6 +1081,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == "🎉 Выходные":
+        log_user_action(user.id, user.username, user.first_name, "menu_weekend")
         events, saturday, sunday = get_weekend_events()
         title = (
             f"🎉 **Выходные "
@@ -906,48 +1092,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == "⏰ Ближайшие":
+        log_user_action(user.id, user.username, user.first_name, "menu_upcoming")
         events = get_upcoming_events(limit=100)
         if events:
             title = "⏰ **Ближайшие события:**"
             set_pagination(context, events, title, date_info=None)
             await show_page(update, context)
         else:
-            await update.message.reply_text(
-                "😕 Ближайших событий не найдено.",
-                parse_mode="Markdown",
-            )
+            await update.message.reply_text("😕 Ближайших событий не найдено.", parse_mode="Markdown")
         return
 
     if text == "📋 Все события":
+        log_user_action(user.id, user.username, user.first_name, "menu_all")
         events = get_upcoming_events(limit=300)
         if events:
             title = "📋 **Все события:**"
             set_pagination(context, events, title, date_info=None)
             await show_page(update, context)
         else:
-            await update.message.reply_text(
-                "😕 Событий не найдено.",
-                parse_mode="Markdown",
-            )
+            await update.message.reply_text("😕 Событий не найдено.", parse_mode="Markdown")
         return
 
     if text == "🎯 Категории":
-        # просто покажем inline-меню категорий
+        log_user_action(user.id, user.username, user.first_name, "menu_categories")
         await update.message.reply_text(
             "🎯 **Выберите категорию:**",
             reply_markup=InlineKeyboardMarkup(
                 [
                     [
                         InlineKeyboardButton("🎬 Кино", callback_data="cat_cinema"),
-                        InlineKeyboardButton(
-                            "🎵 Концерты", callback_data="cat_concert"
-                        ),
+                        InlineKeyboardButton("🎵 Концерты", callback_data="cat_concert"),
                     ],
                     [
                         InlineKeyboardButton("🎭 Театр", callback_data="cat_theater"),
-                        InlineKeyboardButton(
-                            "🖼️ Выставки", callback_data="cat_exhibition"
-                        ),
+                        InlineKeyboardButton("🖼️ Выставки", callback_data="cat_exhibition"),
                     ],
                     [
                         InlineKeyboardButton("🧸 Детям", callback_data="cat_kids"),
@@ -955,10 +1133,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     ],
                     [
                         InlineKeyboardButton("🆓 Бесплатно", callback_data="cat_free"),
-                        InlineKeyboardButton(
-                            "◀️ Назад в главное меню",
-                            callback_data="back_to_main",
-                        ),
+                        InlineKeyboardButton("◀️ Назад в главное меню", callback_data="back_to_main"),
                     ],
                 ]
             ),
@@ -966,7 +1141,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # если это дата
     if re.match(r"^\d{1,2}\.\d{1,2}(\.\d{2,4})?$", text):
         await search_by_date(update, context)
     else:
@@ -976,31 +1150,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------- Хендлер кнопок ----------------------
 
 
-async def handle_filter_buttons(
-    query, context: ContextTypes.DEFAULT_TYPE, category: str
-):
+async def handle_filter_buttons(query, context: ContextTypes.DEFAULT_TYPE, category: str):
     data = context.user_data.get("pagination")
     if not data:
         await query.answer("Результаты поиска устарели. Попробуйте снова.")
         return
 
+    user = query.from_user
+    log_user_action(user.id, user.username, user.first_name, "filter_category", category)
+
     all_events = data["events"]
+    filtered_events = all_events if category == "all" else filter_events_by_category(all_events, category)
 
-    if category == "all":
-        filtered_events = all_events
-    else:
-        filtered_events = filter_events_by_category(all_events, category)
-
-    title = data["title"]
-    date_info = data["date_info"]
-
-    set_pagination(context, filtered_events, title, date_info=date_info)
+    set_pagination(context, filtered_events, data["title"], date_info=data["date_info"])
     await show_page(query, context)
 
 
 async def handle_date_category_buttons(
     query, context: ContextTypes.DEFAULT_TYPE, date_type: str, category: str
 ):
+    user = query.from_user
+    log_user_action(user.id, user.username, user.first_name, f"cat_{category}_{date_type}")
+
     display_name = CATEGORY_NAMES.get(category, category)
 
     if date_type == "today":
@@ -1043,12 +1214,12 @@ async def handle_date_category_buttons(
         await send_subscription_prompt(query, category, "weekend")
 
 
-async def handle_simple_buttons(
-    query, context: ContextTypes.DEFAULT_TYPE, data: str
-):
+async def handle_simple_buttons(query, context: ContextTypes.DEFAULT_TYPE, data: str):
     chat_id = query.message.chat_id
+    user = query.from_user
 
     if data == "today":
+        log_user_action(user.id, user.username, user.first_name, "btn_today")
         today = datetime.now()
         events = get_events_by_date_and_category(today)
         title = f"📅 **События на {today.strftime('%d.%m.%Y')}:**"
@@ -1056,6 +1227,7 @@ async def handle_simple_buttons(
         await show_page(query, context)
 
     elif data == "tomorrow":
+        log_user_action(user.id, user.username, user.first_name, "btn_tomorrow")
         tomorrow = datetime.now() + timedelta(days=1)
         events = get_events_by_date_and_category(tomorrow)
         title = f"📆 **События на {tomorrow.strftime('%d.%m.%Y')}:**"
@@ -1063,6 +1235,7 @@ async def handle_simple_buttons(
         await show_page(query, context)
 
     elif data == "weekend":
+        log_user_action(user.id, user.username, user.first_name, "btn_weekend")
         events, saturday, sunday = get_weekend_events()
         title = (
             f"🎉 **Выходные "
@@ -1072,39 +1245,34 @@ async def handle_simple_buttons(
         await show_page(query, context)
 
     elif data == "soon":
+        log_user_action(user.id, user.username, user.first_name, "btn_upcoming")
         events = get_upcoming_events(limit=100)
         if events:
             title = "⏰ **Ближайшие события:**"
             set_pagination(context, events, title, date_info=None)
             await show_page(query, context)
         else:
-            await query.edit_message_text(
-                "😕 Ближайших событий не найдено.",
-                parse_mode="Markdown",
-            )
+            await query.edit_message_text("😕 Ближайших событий не найдено.", parse_mode="Markdown")
 
     elif data == "all":
+        log_user_action(user.id, user.username, user.first_name, "btn_all")
         events = get_upcoming_events(limit=300)
         if events:
             title = "📋 **Все события:**"
             set_pagination(context, events, title, date_info=None)
             await show_page(query, context)
         else:
-            await query.edit_message_text(
-                "😕 Событий не найдено.",
-                parse_mode="Markdown",
-            )
+            await query.edit_message_text("😕 Событий не найдено.", parse_mode="Markdown")
 
     elif data == "show_categories":
         await show_categories_menu(query, context)
 
     elif data == "back_to_main":
-        await show_main_menu(
-            chat_id, context, query.message.reply_text
-        )
+        await show_main_menu(chat_id, context, query.message.reply_text)
 
     elif data.startswith("cat_"):
         category = data.replace("cat_", "")
+        log_user_action(user.id, user.username, user.first_name, "open_category", category)
         await show_date_options(query, category)
 
 
@@ -1132,8 +1300,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data.startswith("sub_"):
         _, category, date_type = data.split("_", 2)
-        user_id = query.from_user.id
-        add_subscription(user_id, category, date_type)
+        user = query.from_user
+        add_subscription(user.id, category, date_type)
+        log_user_action(user.id, user.username, user.first_name, "subscribe", f"{category}_{date_type}")
         await query.answer("Подписка оформлена 🔔", show_alert=False)
         return
 
@@ -1151,22 +1320,19 @@ def main():
 
     application = Application.builder().token(TOKEN).build()
 
-    # Добавляем хендлеры
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("subs", show_subscriptions))
-    application.add_handler(CommandHandler("run_parsers", manual_run_parsers))  # Новая команда
+    application.add_handler(CommandHandler("stats", show_stats))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
     )
 
-    # Настраиваем планировщик
     setup_scheduler(application)
 
-    logger.info("🚀 Бот запущен с ежедневным запуском парсеров в 6:00")
+    logger.info("🚀 Бот запущен")
     application.run_polling()
 
 
 if __name__ == "__main__":
     main()
-
