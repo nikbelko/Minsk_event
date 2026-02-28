@@ -200,7 +200,6 @@ def get_stats_data() -> dict:
             "top_actions": top_actions,
         }
 
-
 def search_events_by_title(query: str, limit: int = 20):
     today = datetime.now().strftime("%Y-%m-%d")
     with get_db_connection() as conn:
@@ -210,7 +209,7 @@ def search_events_by_title(query: str, limit: int = 20):
             SELECT id, title, details, description, event_date, show_time,
                    place, location, price, category, source_url
             FROM events 
-            WHERE title LIKE ? AND event_date >= ?
+            WHERE title LIKE ? COLLATE NOCASE AND event_date >= ?
             ORDER BY event_date, show_time, title 
             LIMIT ?
         """,
@@ -834,30 +833,29 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     stats = get_stats_data()
-
+    
+    # Формируем текст БЕЗ Markdown разметки
     lines = [
-        "📊 **Статистика бота**",
+        "📊 СТАТИСТИКА БОТА",
         "",
-        f"👥 Всего пользователей: **{stats['total_users']}**",
-        f"📨 Всего запросов: **{stats['total_actions']}**",
-        f"🟢 Пользователей сегодня: **{stats['users_today']}**",
-        f"📬 Запросов сегодня: **{stats['actions_today']}**",
+        f"👥 Всего пользователей: {stats['total_users']}",
+        f"📨 Всего запросов: {stats['total_actions']}",
+        f"🟢 Пользователей сегодня: {stats['users_today']}",
+        f"📬 Запросов сегодня: {stats['actions_today']}",
         "",
-        "📅 **Активность за 7 дней:**",
+        "📅 Активность за 7 дней:"
     ]
-
+    
     for row in stats["daily_activity"]:
         lines.append(f"  {row['day']} — {row['cnt']} запр., {row['users']} польз.")
-
+    
     lines.append("")
-    lines.append("🔝 **Топ действий:**")
+    lines.append("🔝 Топ действий:")
     for row in stats["top_actions"]:
         lines.append(f"  {row['action']} — {row['cnt']}")
-
-    await update.message.reply_text(
-        "\n".join(lines),
-        parse_mode="Markdown",
-    )
+    
+    # Отправляем без parse_mode
+    await update.message.reply_text("\n".join(lines))
 
 
 # ---------------------- Планировщик парсеров ----------------------
