@@ -866,85 +866,73 @@ async def run_parsers_job(bot=None):
     logger.info("⏰ Запуск парсеров по расписанию...")
     start_time = datetime.now()
 
-    parsers = [
-        ("relax_kino_live.py", "🎬 Кино"),
-        ("relax_theatre_parser.py", "🎭 Театр"),
-        ("relax_concert_parser.py", "🎵 Концерты"),
-        ("relax_exhibition_parser.py", "🖼️ Выставки"),
-        ("relax_kids_parser.py", "🧸 Детям"),
-    ]
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "python", "run_all_parsers.py",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=600)  # 10 минут на всё
 
-    results = []
+        elapsed = (datetime.now() - start_time).total_seconds()
 
-    for parser_file, parser_name in parsers:
-        try:
-            process = await asyncio.create_subprocess_exec(
-                "python", parser_file,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+        if process.returncode == 0:
+            output = stdout.decode()
+            logger.info(f"✅ run_all_parsers.py завершен за {elapsed:.0f} сек")
+            
+            # Парсим общую статистику из вывода
+            added_total = 0
+            success_count = 0
+            failed_count = 0
+            
+            for line in output.split('\n'):
+                if "✅ Успешно:" in line:
+                    success_count = int(re.search(r'(\d+)', line).group(1))
+                elif "❌ С ошибками:" in line:
+                    failed_count = int(re.search(r'(\d+)', line).group(1))
+                elif "📦 Всего парсеров:" in line:
+                    total_parsers = int(re.search(r'(\d+)', line).group(1))
+            
+            if bot:
+                await _send_parser_report(bot, success_count, failed_count, elapsed)
+        else:
+            error_msg = stderr.decode()[:300] if stderr else "неизвестная ошибка"
+            logger.error(f"❌ run_all_parsers.py упал: {error_msg}")
+            if bot:
+                await bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=f"❌ **Ошибка запуска парсеров**\n\n```\n{error_msg}\n```",
+                    parse_mode="Markdown",
+                )
+
+    except asyncio.TimeoutError:
+        logger.error("⏰ run_all_parsers.py превысил время ожидания (10 мин)")
+        if bot:
+            await bot.send_message(
+                chat_id=ADMIN_ID,
+                text="⏰ **Таймаут** при запуске парсеров (больше 10 минут)",
+                parse_mode="Markdown",
             )
-            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
+    except Exception as e:
+        logger.error(f"💥 Ошибка при запуске парсеров: {e}")
+        if bot:
+            await bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"💥 **Критическая ошибка**: {e}",
+                parse_mode="Markdown",
+            )
 
-            if process.returncode == 0:
-                output = stdout.decode()
-                added = _parse_added_count(output)
-                results.append({"name": parser_name, "ok": True, "added": added, "error": None})
-                logger.info(f"✅ {parser_name} — добавлено {added}")
-            else:
-                error_msg = stderr.decode()[:300] if stderr else "неизвестная ошибка"
-                results.append({"name": parser_name, "ok": False, "added": 0, "error": error_msg})
-                logger.error(f"❌ {parser_name} упал: {error_msg}")
-
-        except asyncio.TimeoutError:
-            results.append({"name": parser_name, "ok": False, "added": 0, "error": "таймаут (>5 мин)"})
-            logger.error(f"⏰ {parser_name} — таймаут")
-        except Exception as e:
-            results.append({"name": parser_name, "ok": False, "added": 0, "error": str(e)})
-            logger.error(f"💥 {parser_name} — ошибка: {e}")
-
-    elapsed = (datetime.now() - start_time).total_seconds()
-
-    if bot:
-        await _send_parser_report(bot, results, elapsed)
-
-
-def _parse_added_count(output: str) -> int:
-    """Вытаскивает число добавленных событий из вывода парсера."""
-    match = re.search(r'[Дд]обавлено\s+новых[^:]*:\s*(\d+)', output)
-    if match:
-        return int(match.group(1))
-    match = re.search(r'сохранено\s+(\d+)', output)
-    if match:
-        return int(match.group(1))
-    return 0
-
-
-async def _send_parser_report(bot, results: list, elapsed: float):
-    """Отправляет отчёт о работе парсеров админу в Telegram."""
+async def _send_parser_report(bot, success: int, failed: int, elapsed: float):
+    """Отправляет отчёт о работе парсеров админу."""
+    total = success + failed
     lines = [
         "🤖 **Отчёт о запуске парсеров**",
         f"🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')} | ⏱ {elapsed:.0f} сек",
         "",
+        f"✅ Успешно: **{success}**",
+        f"❌ С ошибками: **{failed}**",
+        f"📦 Всего парсеров: **{total}**",
     ]
-
-    total_added = 0
-    errors = []
-
-    for r in results:
-        if r["ok"]:
-            lines.append(f"✅ {r['name']} — добавлено: **{r['added']}**")
-            total_added += r["added"]
-        else:
-            lines.append(f"❌ {r['name']} — ошибка")
-            errors.append(f"  {r['name']}: {r['error']}")
-
-    lines.append("")
-    lines.append(f"📦 Итого добавлено событий: **{total_added}**")
-
-    if errors:
-        lines.append("")
-        lines.append("⚠️ **Детали ошибок:**")
-        lines.extend(errors)
 
     try:
         await bot.send_message(
@@ -954,24 +942,7 @@ async def _send_parser_report(bot, results: list, elapsed: float):
         )
         logger.info("📨 Отчёт отправлен админу")
     except Exception as e:
-        logger.error(f"Не удалось отправить отчёт админу: {e}")
-
-
-def setup_scheduler(application):
-    """Настраивает планировщик задач."""
-    scheduler = AsyncIOScheduler()
-
-    scheduler.add_job(
-        run_parsers_job,
-        trigger=CronTrigger(hour=3, minute=0),  # UTC = 6:00 Минск
-        kwargs={"bot": application.bot},
-        id="daily_parsers",
-        name="Run all parsers daily at 6:00 Minsk time",
-        replace_existing=True,
-    )
-
-    scheduler.start()
-    logger.info("⏰ Планировщик запущен. Парсеры будут выполняться ежедневно в 6:00 (Минск)")
+        logger.error(f"Не удалось отправить отчёт: {e}")
 
 
 # ---------------------- Хендлеры сообщений ----------------------
