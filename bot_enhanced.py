@@ -672,6 +672,10 @@ async def update_parsers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if process.returncode == 0:
             output = stdout.decode()
             
+                if process.returncode == 0:
+            output = stdout.decode()
+            
+            # Собираем результаты (только понятные строки)
             results = []
             lines = output.split('\n')
             
@@ -679,13 +683,30 @@ async def update_parsers(update: Update, context: ContextTypes.DEFAULT_TYPE):
             failed_count = 0
             
             for line in lines:
-                if '✅' in line and ('добавлено' in line.lower() or 'сохранено' in line.lower()):
-                    results.append(line.strip())
-                    success_count += 1
-                elif '❌' in line and ('ошибка' in line.lower() or 'упал' in line.lower()):
-                    results.append(line.strip())
-                    failed_count += 1
+                # Пропускаем строки с INFO и технической информацией
+                if 'INFO -' in line:
+                    continue
+                # Оставляем строки с эмодзи и результатами
+                if '✅' in line or '❌' in line or '📊' in line:
+                    # Очищаем от технической информации
+                    clean_line = line.strip()
+                    # Если есть дата и время в начале, убираем их
+                    if re.match(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', clean_line):
+                        # Убираем первые 20 символов (дата+время)
+                        parts = clean_line.split(' - ', 1)
+                        if len(parts) > 1:
+                            clean_line = parts[1]
+                        else:
+                            clean_line = clean_line[20:]
+                    
+                    if '✅' in line:
+                        success_count += 1
+                    elif '❌' in line:
+                        failed_count += 1
+                    
+                    results.append(clean_line)
             
+            # Формируем ответ
             response = [
                 "✅ **Обновление завершено!**",
                 f"⏱ Время выполнения: {elapsed:.0f} сек",
@@ -693,9 +714,9 @@ async def update_parsers(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]
             
             if results:
-                response.extend(results[:10])
-                if len(results) > 10:
-                    response.append(f"... и ещё {len(results) - 10} результатов")
+                response.extend(results[:15])  # Показываем первые 15 результатов
+                if len(results) > 15:
+                    response.append(f"... и ещё {len(results) - 15} результатов")
             else:
                 response.append("ℹ️ Нет данных о результатах")
             
@@ -703,6 +724,9 @@ async def update_parsers(update: Update, context: ContextTypes.DEFAULT_TYPE):
             response.append(f"📊 Итог: ✅ {success_count} успешно | ❌ {failed_count} ошибок")
             
             await update.message.reply_text(
+                "\n".join(response),
+                parse_mode="Markdown"
+            )await update.message.reply_text(
                 "\n".join(response),
                 parse_mode="Markdown"
             )
@@ -1196,6 +1220,59 @@ async def custom_donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.MARKDOWN
         )
 
+
+
+async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Информация о боте и контакты"""
+    user = update.effective_user
+    log_user_action(user.id, user.username, user.first_name, "about")
+    
+    text = """
+🌟 **MinskDvizh** — твой гид по событиям Минска!
+
+📅 **О проекте:**
+Этот бот создан, чтобы помочь тебе находить самые интересные мероприятия в городе. Мы собираем данные из разных источников и обновляем афишу каждое утро.
+
+🎯 **Что умеет бот:**
+• 🎬 **Кино** — расписание всех кинотеатров
+• 🎵 **Концерты** — живые выступления
+• 🎭 **Театр** — спектакли и премьеры
+• 🖼️ **Выставки** — искусство и культура
+• 🧸 **Детям** — мероприятия для детей
+• ⚽ **Спорт** — спортивные события
+
+🔍 **Как пользоваться:**
+• Просто отправьте **название** события
+• Или введите **дату** в формате ДД.ММ
+• Используйте кнопки для быстрого поиска
+
+📊 **Статистика:**
+• 2700+ событий в базе
+• 6 категорий мероприятий
+• Обновление каждое утро в 6:00
+
+💼 **Сотрудничество:**
+Хотите добавить своё мероприятие?
+📱 По вопросам сотрудничества: @i354444
+
+⭐ **Поддержать проект:**
+Если бот оказался полезным, вы можете поддержать его развитие, нажав кнопку "Поддержать" в главном меню или командой /donate
+
+#minskdvizh #афишаминск #минск
+    """
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📅 Сегодня", callback_data="today"),
+         InlineKeyboardButton("🎯 Категории", callback_data="show_categories")],
+        [InlineKeyboardButton("⭐ Поддержать", callback_data="show_donate")],
+    ])
+    
+    await update.message.reply_text(
+        text,
+        reply_markup=keyboard,
+        parse_mode=ParseMode.MARKDOWN,
+        disable_web_page_preview=True
+    )
 async def send_star_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE, amount: int):
     """Отправляет инвойс для оплаты Stars"""
     title = "Поддержка бота"
@@ -1279,6 +1356,7 @@ def main():
     application.add_handler(CommandHandler("update", update_parsers))
     application.add_handler(CommandHandler("donate", custom_donate))
     application.add_handler(CommandHandler("support", donate_command))
+    application.add_handler(CommandHandler("about", about))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(PreCheckoutQueryHandler(precheckout_callback))
     application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
