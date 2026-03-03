@@ -543,7 +543,7 @@ def get_reply_main_menu():
         ["📅 Сегодня", "📆 Завтра"],
         ["⏰ Ближайшие", "🎉 Выходные"],
         ["📋 Все события", "🎯 Категории"],
-        ["⭐ Поддержать проект"],
+        ["ℹ️ О проекте", "⭐ Поддержать"],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -643,9 +643,6 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------------- Планировщик парсеров ----------------------
 
-
-
-
 async def update_parsers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Ручной запуск всех парсеров (только для администратора)"""
     if update.effective_user.id != ADMIN_ID:
@@ -670,9 +667,6 @@ async def update_parsers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elapsed = (datetime.now() - update.message.date.replace(tzinfo=None)).total_seconds()
         
         if process.returncode == 0:
-            output = stdout.decode()
-            
-                if process.returncode == 0:
             output = stdout.decode()
             
             # Собираем результаты (только понятные строки)
@@ -726,9 +720,6 @@ async def update_parsers(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "\n".join(response),
                 parse_mode="Markdown"
-            )await update.message.reply_text(
-                "\n".join(response),
-                parse_mode="Markdown"
             )
         else:
             error_msg = stderr.decode()[:500] if stderr else "неизвестная ошибка"
@@ -748,6 +739,7 @@ async def update_parsers(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"💥 **Критическая ошибка**:\n```\n{str(e)}\n```",
             parse_mode="Markdown"
         )
+
 async def run_parsers_job(bot=None):
     """Запускает все парсеры по расписанию и отправляет отчёт админу."""
     logger.info("⏰ Запуск парсеров по расписанию...")
@@ -940,6 +932,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_user_action(user.id, user.username, user.first_name, "donate_menu_button")
         await donate_command(update, context)
         return
+    if text == "ℹ️ О проекте":
+        log_user_action(user.id, user.username, user.first_name, "about_button")
+        await about(update, context)
+        return
+    
     if text == "📅 Сегодня":
         log_user_action(user.id, user.username, user.first_name, "menu_today")
         today = datetime.now()
@@ -1232,6 +1229,7 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 📅 **О проекте:**
 Этот бот создан, чтобы помочь тебе находить самые интересные мероприятия в городе. Мы собираем данные из разных источников и обновляем афишу каждое утро.
+Что будет дальше? Скоро узнаете!
 
 🎯 **Что умеет бот:**
 • 🎬 **Кино** — расписание всех кинотеатров
@@ -1242,23 +1240,23 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
 • ⚽ **Спорт** — спортивные события
 
 🔍 **Как пользоваться:**
-• Просто отправьте **название** события
-• Или введите **дату** в формате ДД.ММ
-• Используйте кнопки для быстрого поиска
+• Просто отправь **название** события
+• Или введи **дату** в формате ДД.ММ
+• Или используй кнопки для быстрого поиска
 
 📊 **Статистика:**
 • 2700+ событий в базе
 • 6 категорий мероприятий
-• Обновление каждое утро в 6:00
+• Новинки каждое утро
 
 💼 **Сотрудничество:**
-Хотите добавить своё мероприятие?
-📱 По вопросам сотрудничества: @i354444
+Хотите добавить свое мероприятие?
+📱 По всем вопросам: @i354444
 
 ⭐ **Поддержать проект:**
 Если бот оказался полезным, вы можете поддержать его развитие, нажав кнопку "Поддержать" в главном меню или командой /donate
 
-#minskdvizh #афишаминск #минск
+#minskdvizh #афишаминск #минск #событияминск #концертыминск 
     """
     
     keyboard = InlineKeyboardMarkup([
