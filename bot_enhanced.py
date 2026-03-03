@@ -253,7 +253,9 @@ def get_events_by_date_and_category(target_date: datetime, category: str | None 
         query += " ORDER BY show_time, title"
         
         cursor.execute(query, params)
-        return cursor.fetchall()def get_upcoming_events(limit: int = 20, category: str | None = None):
+        return cursor.fetchall()
+
+def get_upcoming_events(limit: int = 20, category: str | None = None):
     today = datetime.now().strftime("%Y-%m-%d")
     with get_db_connection() as conn:
         cursor = conn.cursor()
