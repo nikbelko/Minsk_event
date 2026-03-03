@@ -928,7 +928,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user = update.effective_user
     
-    if text == "⭐ Поддержать проект":
+    if text == "⭐ Поддержать":
         log_user_action(user.id, user.username, user.first_name, "donate_menu_button")
         await donate_command(update, context)
         return
@@ -1107,6 +1107,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
     
     # Обработка кнопок доната (новые)
+    
+    # Обработка кнопки "Поддержать" из about
+    if data == "show_donate":
+        await donate_command(update, context)
+        return
     if data.startswith("donate_"):
         amount = int(data.replace("donate_", ""))
         await query.answer()
