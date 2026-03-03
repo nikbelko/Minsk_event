@@ -13,6 +13,12 @@ from typing import List, Dict, Optional
 
 import requests
 from bs4 import BeautifulSoup
+# Определяем путь к БД (локально или на Railway)
+if os.path.exists('/data'):
+    DB_PATH = '/data/events_final.db'  # Railway volume
+else:
+    DB_PATH = 'events_final.db'        # локально
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -81,8 +87,8 @@ PLACE_ALIASES = {
 }
 
 class TicketproParser:
-    def __init__(self, db_path=os.getenv("DB_PATH", "/data/events_final.db")):
-        self.db_path = db_path
+    def __init__(self, DB_PATH=os.getenv("DB_PATH", "/data/events_final.db")):
+        DB_PATH = DB_PATH
         self.base_url = 'https://www.ticketpro.by'
         
         self.categories = [
@@ -213,7 +219,7 @@ class TicketproParser:
         
         # 1. Проверка по дата+категория+место+время (самый точный метод)
         if place and show_time:
-            conn = sqlite3.connect(self.db_path)
+            conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT id FROM events 
@@ -231,7 +237,7 @@ class TicketproParser:
         # 2. Если точного совпадения нет, проверяем по нормализованному названию
         norm_title = self.normalize_title(title)
         
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
         cursor.execute("""
@@ -403,7 +409,7 @@ class TicketproParser:
             logger.info("Нет событий для сохранения")
             return 0
         
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
         # 1. Удаляем все старые события Ticketpro

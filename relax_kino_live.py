@@ -5,6 +5,12 @@ import sqlite3
 from datetime import datetime
 import re
 import time
+# Определяем путь к БД (локально или на Railway)
+if os.path.exists('/data'):
+    DB_PATH = '/data/events_final.db'  # Railway volume
+else:
+    DB_PATH = 'events_final.db'        # локально
+
 
 def setup_database():
     """Подключается к базе events_final.db"""

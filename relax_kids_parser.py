@@ -8,6 +8,12 @@ import re
 import time
 import logging
 from collections import defaultdict
+# Определяем путь к БД (локально или на Railway)
+if os.path.exists('/data'):
+    DB_PATH = '/data/events_final.db'  # Railway volume
+else:
+    DB_PATH = 'events_final.db'        # локально
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,8 +25,8 @@ logging.basicConfig(
 )
 
 class RelaxKidsParser:
-    def __init__(self, db_path=os.getenv(\"DB_PATH\", \"/data/events_final.db\")):
-        self.db_path = db_path
+    def __init__(self, DB_PATH=os.getenv("DB_PATH", "/data/events_final.db")):
+        DB_PATH = DB_PATH
         self.base_url = 'https://afisha.relax.by'
         self.kids_url = f'{self.base_url}/kids/minsk/'
         self.session = requests.Session()
@@ -297,7 +303,7 @@ class RelaxKidsParser:
             logging.info("Нет событий для сохранения")
             return 0
         
-        conn = sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
         cursor.execute("DELETE FROM events WHERE category='kids'")
