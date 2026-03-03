@@ -643,7 +643,9 @@ async def update_parsers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ Нет доступа.")
         return
+    
     await update.message.reply_text("🔄 **Обновление афиши...**\nЗапускаю парсеры, ~1-2 минуты.", parse_mode="Markdown")
+    
     try:
         process = await asyncio.create_subprocess_exec(
             "python", "run_all_parsers.py",
@@ -651,37 +653,90 @@ async def update_parsers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
         elapsed = (datetime.now() - update.message.date.replace(tzinfo=None)).total_seconds()
+        
         if process.returncode == 0:
             output = stdout.decode("utf-8", errors="replace")
-            # Берём строки с эмодзи-маркерами из всего вывода (stdout + убираем мусор)
-            results = []
-            success_count = failed_count = 0
-            for line in output.split("\n"):
+            
+            # Собираем статистику по парсерам
+            parsers_stats = {
+                'total': 0,
+                'success': 0,
+                'failed': 0
+            }
+            
+            # Список для хранения строк с результатами
+            result_lines = []
+            
+            # Парсим вывод построчно
+            lines = output.split('\n')
+            for line in lines:
                 line = line.strip()
                 if not line:
                     continue
-                # Убираем строки логгера (timestamp + level)
+                
+                # Убираем логи (время и уровень)
                 clean = re.sub(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+ - [\w.]+ - \w+ - ", "", line)
                 clean = re.sub(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+ - \w+ - ", "", clean)
-                if any(m in clean for m in ["✅", "❌", "📊", "🧹", "⚠️", "🎬", "🎭", "🎵", "🖼️", "🧸", "🎫"]):
-                    if len(clean) < 120:  # пропускаем слишком длинные строки отладки
-                        results.append(clean)
-                        success_count += "✅" in clean
-                        failed_count += "❌" in clean
-            # Дедупликация (парсеры могут дублировать строки)
+                
+                # Ищем строки с запуском парсеров
+                if "▶️ Запуск" in clean:
+                    parsers_stats['total'] += 1
+                    result_lines.append(clean)
+                
+                # Ищем успешные завершения
+                elif "✅" in clean and "завершен успешно" in clean:
+                    parsers_stats['success'] += 1
+                    result_lines.append(clean)
+                
+                # Ищем ошибки
+                elif "❌" in clean and ("ошибкой" in clean.lower() or "превысил" in clean.lower() or "ошибка" in clean.lower()):
+                    parsers_stats['failed'] += 1
+                    result_lines.append(clean)
+                
+                # Показываем статистику парсеров (добавлено новых и т.д.)
+                elif any(marker in clean for marker in ["✅ Добавлено", "📊 Результаты", "📊 Всего найдено"]):
+                    # Убираем дубликаты (первые 3 строки с результатами)
+                    if len(result_lines) < 20:  # Лимит на количество строк
+                        result_lines.append(clean)
+                
+                # Показываем важные предупреждения
+                elif "⚠️" in clean:
+                    result_lines.append(clean)
+            
+            # Убираем дубликаты строк
             seen = set()
-            unique = []
-            for r in results:
-                if r not in seen:
-                    seen.add(r)
-                    unique.append(r)
-            response = [f"✅ Обновление завершено! ⏱ {elapsed:.0f} сек", ""]
-            response.extend(unique[:20] or ["ℹ️ Нет данных — проверьте Railway Logs"])
-            response.extend(["", f"Итог: ✅ {success_count} | ❌ {failed_count}"])
-            await update.message.reply_text("\n".join(response))
+            unique_lines = []
+            for line in result_lines:
+                if line not in seen:
+                    seen.add(line)
+                    unique_lines.append(line)
+            
+            # Формируем ответ
+            response = [
+                f"✅ Обновление завершено! ⏱ {elapsed:.0f} сек",
+                f"📊 **Статистика парсеров:**",
+                f"   • Всего запущено: {parsers_stats['total']}",
+                f"   • ✅ Успешно: {parsers_stats['success']}",
+                f"   • ❌ Ошибок: {parsers_stats['failed']}",
+                "",
+                "📋 **Детали:**"
+            ]
+            
+            # Добавляем результаты (максимум 15 строк)
+            response.extend(unique_lines[:15])
+            
+            if len(unique_lines) > 15:
+                response.append(f"...и ещё {len(unique_lines) - 15} строк")
+            
+            await update.message.reply_text("\n".join(response), parse_mode="Markdown")
+            
         else:
             error_msg = stderr.decode()[:500] if stderr else "неизвестная ошибка"
-            await update.message.reply_text(f"❌ **Ошибка**\n\n```\n{error_msg}\n```", parse_mode="Markdown")
+            await update.message.reply_text(
+                f"❌ **Ошибка при выполнении парсеров**\n\n```\n{error_msg}\n```", 
+                parse_mode="Markdown"
+            )
+            
     except asyncio.TimeoutError:
         await update.message.reply_text("⏰ Превышено время ожидания (5 мин).", parse_mode="Markdown")
     except Exception as e:

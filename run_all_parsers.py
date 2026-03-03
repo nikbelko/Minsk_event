@@ -116,13 +116,15 @@ def main():
     
     logger.info("=" * 60)
     logger.info("📊 ИТОГИ ЗАПУСКА")
-    logger.info(f"✅ Успешно: {results['success']}")
-    logger.info(f"❌ С ошибками: {results['failed']}")
-    logger.info(f"📦 Всего парсеров: {results['total']}")
-    logger.info(f"⏱️  Время выполнения: {duration:.1f} сек")
+    logger.info(f"✅ УСПЕШНО: {results['success']}")
+    logger.info(f"❌ ОШИБКИ: {results['failed']}")
+    logger.info(f"📦 ВСЕГО: {results['total']}")
+    logger.info(f"⏱️  ВРЕМЯ: {duration:.1f} сек")
     logger.info("=" * 60)
     
-    # Возвращаем код ошибки, если были проблемы
+    # Добавляем маркер для легкого парсинга
+    logger.info(f"PARSER_STATS:{results['success']}:{results['failed']}:{results['total']}")
+    
     return 1 if results['failed'] > 0 else 0
 
 if __name__ == "__main__":
