@@ -1,3 +1,4 @@
+import os
 #!/usr/bin/env python3
 # run_all_parsers.py
 # Скрипт для последовательного запуска всех парсеров
@@ -6,6 +7,8 @@ import subprocess
 import logging
 import sys
 from datetime import datetime
+DB_PATH = os.getenv("DB_PATH", "/data/events_final.db")
+
 
 # Настройка логирования
 logging.basicConfig(

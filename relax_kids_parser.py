@@ -1,3 +1,4 @@
+import os
 # relax_kids_parser.py
 import requests
 from bs4 import BeautifulSoup
@@ -18,7 +19,7 @@ logging.basicConfig(
 )
 
 class RelaxKidsParser:
-    def __init__(self, db_path='events_final.db'):
+    def __init__(self, db_path=os.getenv(\"DB_PATH\", \"/data/events_final.db\")):
         self.db_path = db_path
         self.base_url = 'https://afisha.relax.by'
         self.kids_url = f'{self.base_url}/kids/minsk/'

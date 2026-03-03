@@ -1,3 +1,4 @@
+import os
 import requests
 from bs4 import BeautifulSoup
 import sqlite3
@@ -7,7 +8,7 @@ import time
 
 def setup_database():
     """Подключается к базе events_final.db"""
-    conn = sqlite3.connect('events_final.db')
+    conn = sqlite3.connect(DB_PATH)
     return conn
 
 def clear_cinema_data(conn):

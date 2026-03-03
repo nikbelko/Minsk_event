@@ -1,3 +1,4 @@
+import os
 import requests
 from bs4 import BeautifulSoup
 import sqlite3
@@ -17,7 +18,7 @@ logging.basicConfig(
 )
 
 class RelaxConcertParser:
-    def __init__(self, db_path='events_final.db'):
+    def __init__(self, db_path=os.getenv(\"DB_PATH\", \"/data/events_final.db\")):
         self.db_path = db_path
         self.base_url = 'https://afisha.relax.by'
         self.concert_url = f'{self.base_url}/conserts/minsk/'
