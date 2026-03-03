@@ -32,6 +32,7 @@ import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from telegram.constants import ParseMode
+from telegram import LabeledPrice
 from telegram.ext import PreCheckoutQueryHandler, ShippingQueryHandler
 
 # ---------------------- Конфиг и логирование ----------------------
@@ -245,8 +246,8 @@ def get_events_by_date_and_category(target_date: datetime, category: str | None 
         if date_str == today_str:
             current_time = datetime.now().strftime("%H:%M")
             query += """ AND (
-                show_time = ''  # События без времени (на весь день)
-                OR show_time > ?  # События, которые ещё не начались
+                show_time = \'\'
+                OR show_time > ?
             )"""
             params.append(current_time)
         
@@ -1162,6 +1163,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def donate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показывает варианты доната"""
+    # Если это callback запрос, используем message из него
+    if update.callback_query:
+        message = update.callback_query.message
+    else:
+        message = update.message
     user = update.effective_user
     log_user_action(user.id, user.username, user.first_name, "donate_menu")
     
@@ -1281,13 +1287,25 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.MARKDOWN,
         disable_web_page_preview=True
     )
+
+
+async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /today - события на сегодня"""
+    user = update.effective_user
+    log_user_action(user.id, user.username, user.first_name, "command_today")
+    
+    today = datetime.now()
+    events = get_events_by_date_and_category(today)
+    title = f"📅 **События на {today.strftime('%d.%m.%Y')}:**"
+    set_pagination(context, events, title, date_info=None)
+    await show_page(update, context)
 async def send_star_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE, amount: int):
     """Отправляет инвойс для оплаты Stars"""
     title = "Поддержка бота"
     description = f"Благодарим вас за поддержку проекта! Вы отправляете {amount} Telegram Stars."
     payload = f"donation_{amount}_{datetime.now().timestamp()}"
     currency = DONATION_CURRENCY
-    prices = [{"amount": amount, "label": f"⭐ {amount} Stars"}]
+    prices = [LabeledPrice(label=f"⭐ {amount} Stars", amount=amount)]
     
     if update.callback_query:
         chat_id = update.callback_query.message.chat_id
@@ -1362,6 +1380,7 @@ def main():
     application.add_handler(CommandHandler("subs", show_subscriptions))
     application.add_handler(CommandHandler("stats", show_stats))
     application.add_handler(CommandHandler("update", update_parsers))
+    application.add_handler(CommandHandler("today", today_command))
     application.add_handler(CommandHandler("donate", custom_donate))
     application.add_handler(CommandHandler("support", donate_command))
     application.add_handler(CommandHandler("about", about))
