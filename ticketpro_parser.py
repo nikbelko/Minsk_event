@@ -81,7 +81,7 @@ PLACE_ALIASES = {
 }
 
 class TicketproParser:
-    def __init__(self, db_path=os.getenv(\"DB_PATH\", \"/data/events_final.db\")):
+    def __init__(self, db_path=os.getenv("DB_PATH", "/data/events_final.db")):
         self.db_path = db_path
         self.base_url = 'https://www.ticketpro.by'
         
