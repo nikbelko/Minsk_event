@@ -220,35 +220,40 @@ def search_events_by_date_raw(date_str: str):
 
 
 def get_events_by_date_and_category(target_date: datetime, category: str | None = None):
+    """Получает события на конкретную дату с учётом времени (для сегодня)"""
     date_str = target_date.strftime("%Y-%m-%d")
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        
+        # Базовый запрос
+        query = """
+            SELECT id, title, details, description, event_date, show_time,
+                   place, location, price, category, source_url
+            FROM events 
+            WHERE event_date = ?
+        """
+        params = [date_str]
+        
+        # Добавляем фильтр по категории если нужно
         if category and category != "all":
-            cursor.execute(
-                """
-                SELECT id, title, details, description, event_date, show_time,
-                       place, location, price, category, source_url
-                FROM events 
-                WHERE event_date = ? AND category = ?
-                ORDER BY show_time, title
-            """,
-                (date_str, category),
-            )
-        else:
-            cursor.execute(
-                """
-                SELECT id, title, details, description, event_date, show_time,
-                       place, location, price, category, source_url
-                FROM events 
-                WHERE event_date = ? 
-                ORDER BY show_time, title
-            """,
-                (date_str,),
-            )
-        return cursor.fetchall()
-
-
-def get_upcoming_events(limit: int = 20, category: str | None = None):
+            query += " AND category = ?"
+            params.append(category)
+        
+        # Если это сегодня - фильтруем по времени
+        if date_str == today_str:
+            current_time = datetime.now().strftime("%H:%M")
+            query += """ AND (
+                show_time = ''  # События без времени (на весь день)
+                OR show_time > ?  # События, которые ещё не начались
+            )"""
+            params.append(current_time)
+        
+        query += " ORDER BY show_time, title"
+        
+        cursor.execute(query, params)
+        return cursor.fetchall()def get_upcoming_events(limit: int = 20, category: str | None = None):
     today = datetime.now().strftime("%Y-%m-%d")
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -1265,8 +1270,6 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📅 Сегодня", callback_data="today"),
-         InlineKeyboardButton("🎯 Категории", callback_data="show_categories")],
         [InlineKeyboardButton("⭐ Поддержать", callback_data="show_donate")],
     ])
     
