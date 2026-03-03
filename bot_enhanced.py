@@ -30,6 +30,7 @@ from telegram.ext import (
 load_dotenv()
 
 import asyncio
+from datetime import timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from telegram.constants import ParseMode
@@ -42,6 +43,8 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+MINSK_TZ = timezone(timedelta(hours=3))
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 DB_NAME = os.getenv("DB_PATH", "/data/events_final.db")  # Volume path
@@ -133,7 +136,7 @@ def log_user_action(user_id: int, username: str | None, first_name: str | None, 
 
 
 def get_stats_data() -> dict:
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(DISTINCT user_id) FROM user_stats")
@@ -171,7 +174,7 @@ def get_stats_data() -> dict:
 
 def get_events_count_by_category() -> dict:
     """Реальное кол-во актуальных событий по категориям (для /about)."""
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -182,7 +185,7 @@ def get_events_count_by_category() -> dict:
 
 
 def search_events_by_title(query: str, limit: int = 20):
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -198,7 +201,7 @@ def search_events_by_title(query: str, limit: int = 20):
 
 
 def search_events_by_date_raw(date_str: str):
-    current_year = datetime.now().year
+    current_year = datetime.now(MINSK_TZ).year
     date_str = date_str.strip()
     if re.match(r"^\d{1,2}\.\d{1,2}\.\d{4}$", date_str):
         day, month, year = date_str.split(".")
@@ -224,7 +227,7 @@ def search_events_by_date_raw(date_str: str):
 def get_events_by_date_and_category(target_date: datetime, category: str | None = None):
     """События на дату. Для сегодня фильтрует прошедшие сеансы."""
     date_str = target_date.strftime("%Y-%m-%d")
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
     with get_db_connection() as conn:
         cursor = conn.cursor()
         query = """
@@ -238,14 +241,14 @@ def get_events_by_date_and_category(target_date: datetime, category: str | None 
             params.append(category)
         if date_str == today_str:
             query += " AND (show_time = '' OR show_time IS NULL OR show_time > ?)"
-            params.append(datetime.now().strftime("%H:%M"))
+            params.append(datetime.now(MINSK_TZ).strftime("%H:%M"))
         query += " ORDER BY show_time, title"
         cursor.execute(query, params)
         return cursor.fetchall()
 
 
 def get_upcoming_events(limit: int = 20, category: str | None = None):
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
     with get_db_connection() as conn:
         cursor = conn.cursor()
         if category and category != "all":
@@ -266,7 +269,7 @@ def get_upcoming_events(limit: int = 20, category: str | None = None):
 
 
 def get_weekend_events(category: str | None = None):
-    today = datetime.now()
+    today = datetime.now(MINSK_TZ)
     days_until_saturday = (5 - today.weekday()) % 7 or 7
     saturday = today + timedelta(days=days_until_saturday)
     sunday = saturday + timedelta(days=1)
@@ -536,7 +539,7 @@ async def send_subscriptions_digest(bot, date_type: str):
     """Рассылает дайджест подписчикам после обновления парсеров."""
     logger.info(f"📬 Рассылка дайджеста: {date_type}")
     subscribers = get_all_subscribers()
-    today = datetime.now()
+    today = datetime.now(MINSK_TZ)
     tomorrow = today + timedelta(days=1)
     sent_count, error_count = 0, 0
 
@@ -704,7 +707,7 @@ async def run_parsers_job(bot=None):
 async def _send_parser_report(bot, results: list, elapsed: float):
     lines = [
         "🤖 **Отчёт о запуске парсеров**",
-        f"🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')} | ⏱ {elapsed:.0f} сек", "",
+        f"🕐 {datetime.now(MINSK_TZ).strftime('%d.%m.%Y %H:%M')} | ⏱ {elapsed:.0f} сек", "",
     ]
     lines.extend(results or ["ℹ️ Нет данных о результатах"])
     success = sum(1 for r in results if '✅' in r)
@@ -837,7 +840,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     log_user_action(user.id, user.username, user.first_name, "cmd_today")
-    today = datetime.now()
+    today = datetime.now(MINSK_TZ)
     events = get_events_by_date_and_category(today)
     set_pagination(context, events, f"📅 **События на {today.strftime('%d.%m.%Y')}:**")
     await show_page(update, context)
@@ -925,14 +928,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if text == "📅 Сегодня":
         log_user_action(user.id, user.username, user.first_name, "menu_today")
-        today = datetime.now()
+        today = datetime.now(MINSK_TZ)
         events = get_events_by_date_and_category(today)
         set_pagination(context, events, f"📅 **События на {today.strftime('%d.%m.%Y')}:**")
         await show_page(update, context)
         return
     if text == "📆 Завтра":
         log_user_action(user.id, user.username, user.first_name, "menu_tomorrow")
-        tomorrow = datetime.now() + timedelta(days=1)
+        tomorrow = datetime.now(MINSK_TZ) + timedelta(days=1)
         events = get_events_by_date_and_category(tomorrow)
         set_pagination(context, events, f"📆 **События на {tomorrow.strftime('%d.%m.%Y')}:**")
         await show_page(update, context)
@@ -1000,13 +1003,13 @@ async def handle_date_category_buttons(query, context: ContextTypes.DEFAULT_TYPE
     log_user_action(user.id, user.username, user.first_name, f"cat_{category}_{date_type}")
     display_name = CATEGORY_NAMES.get(category, category)
     if date_type == "today":
-        today = datetime.now()
+        today = datetime.now(MINSK_TZ)
         events = get_events_by_date_and_category(today, category)
         set_pagination(context, events, f"📅 **{display_name} на {today.strftime('%d.%m.%Y')}:**")
         await show_page(query, context)
         await send_subscription_prompt(query, category, "today")
     elif date_type == "tomorrow":
-        tomorrow = datetime.now() + timedelta(days=1)
+        tomorrow = datetime.now(MINSK_TZ) + timedelta(days=1)
         events = get_events_by_date_and_category(tomorrow, category)
         set_pagination(context, events, f"📆 **{display_name} на {tomorrow.strftime('%d.%m.%Y')}:**")
         await show_page(query, context)
@@ -1031,13 +1034,13 @@ async def handle_simple_buttons(query, context: ContextTypes.DEFAULT_TYPE, data:
     user = query.from_user
     if data == "today":
         log_user_action(user.id, user.username, user.first_name, "btn_today")
-        today = datetime.now()
+        today = datetime.now(MINSK_TZ)
         events = get_events_by_date_and_category(today)
         set_pagination(context, events, f"📅 **События на {today.strftime('%d.%m.%Y')}:**")
         await show_page(query, context)
     elif data == "tomorrow":
         log_user_action(user.id, user.username, user.first_name, "btn_tomorrow")
-        tomorrow = datetime.now() + timedelta(days=1)
+        tomorrow = datetime.now(MINSK_TZ) + timedelta(days=1)
         events = get_events_by_date_and_category(tomorrow)
         set_pagination(context, events, f"📆 **События на {tomorrow.strftime('%d.%m.%Y')}:**")
         await show_page(query, context)
