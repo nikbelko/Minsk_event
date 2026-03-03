@@ -602,23 +602,37 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ Нет доступа.")
         return
+    
     stats = get_stats_data()
+    
     lines = [
-        "📊 **СТАТИСТИКА БОТА**", "",
-        f"👥 Всего пользователей: **{stats['total_users']}**",
-        f"📨 Всего запросов: **{stats['total_actions']}**",
-        f"🟢 Пользователей сегодня: **{stats['users_today']}**",
-        f"📬 Запросов сегодня: **{stats['actions_today']}**",
-        f"🔔 Подписчиков: **{stats['subscribers_count']}**",
-        f"🗂 Событий в базе: **{stats['events_count']}**",
-        "", "📅 **Активность за 7 дней:**",
+        "<b>📊 СТАТИСТИКА БОТА</b>",
+        "",
+        f"👥 Всего пользователей: <b>{stats['total_users']}</b>",
+        f"📨 Всего запросов: <b>{stats['total_actions']}</b>",
+        f"🟢 Пользователей сегодня: <b>{stats['users_today']}</b>",
+        f"📬 Запросов сегодня: <b>{stats['actions_today']}</b>",
+        f"🔔 Подписчиков: <b>{stats['subscribers_count']}</b>",
+        f"🗂 Событий в базе: <b>{stats['events_count']}</b>",
+        "",
+        "<b>📅 Активность за 7 дней:</b>",
     ]
+    
     for row in stats["daily_activity"]:
-        lines.append(f"  {row['day']} — {row['cnt']} запр., {row['users']} польз.")
-    lines.extend(["", "🔝 **Топ действий:**"])
+        lines.append(f"  {row['day']} — {row['cnt']} запр. {row['users']} польз.")
+    
+    lines.extend([
+        "",
+        "<b>🔝 Топ действий:</b>"
+    ])
+    
     for row in stats["top_actions"]:
         lines.append(f"  {row['action']} — {row['cnt']}")
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    
+    await update.message.reply_text(
+        "\n".join(lines), 
+        parse_mode="HTML"
+    )
 
 
 # ---------------------- Планировщик парсеров ----------------------
