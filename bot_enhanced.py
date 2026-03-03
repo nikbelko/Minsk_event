@@ -642,13 +642,23 @@ async def run_parsers_job(bot=None):
     logger.info("⏰ Запуск парсеров по расписанию...")
     start_time = datetime.now()
 
+    # Список парсеров для отчёта
+    parser_names = [
+        "🎬 Кино (Relax)",
+        "🎭 Театр (Relax)",
+        "🎵 Концерты (Relax)",
+        "🖼️ Выставки (Relax)",
+        "🧸 Детям (Relax)",
+        "🎫 Ticketpro"
+    ]
+
     try:
         process = await asyncio.create_subprocess_exec(
             "python", "run_all_parsers.py",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=600)  # 10 минут
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=600)
 
         elapsed = (datetime.now() - start_time).total_seconds()
 
@@ -656,27 +666,25 @@ async def run_parsers_job(bot=None):
             output = stdout.decode()
             logger.info(f"✅ run_all_parsers.py завершен за {elapsed:.0f} сек")
             
-            # Парсим общую статистику из вывода
-            success_count = 0
-            failed_count = 0
-            total_parsers = 0
+            # Собираем статистику по каждому парсеру
+            results = []
+            lines = output.split('\n')
             
-            for line in output.split('\n'):
-                if "✅ Успешно:" in line:
-                    match = re.search(r'(\d+)', line)
-                    if match:
-                        success_count = int(match.group(1))
-                elif "❌ С ошибками:" in line:
-                    match = re.search(r'(\d+)', line)
-                    if match:
-                        failed_count = int(match.group(1))
-                elif "📦 Всего парсеров:" in line:
-                    match = re.search(r'(\d+)', line)
-                    if match:
-                        total_parsers = int(match.group(1))
+            for line in lines:
+                # Ищем строки с результатами парсеров
+                if '✅' in line and ('добавлено' in line.lower() or 'сохранено' in line.lower()):
+                    results.append(line.strip())
+                elif '❌' in line and ('ошибка' in line.lower() or 'упал' in line.lower()):
+                    results.append(line.strip())
+            
+            # Если не нашли строк с результатами, добавляем заглушку
+            if not results:
+                for i, name in enumerate(parser_names, 1):
+                    if f"Парсер {i}" in output:
+                        results.append(f"{name}: выполнен")
             
             if bot:
-                await _send_parser_report(bot, success_count, failed_count, elapsed)
+                await _send_parser_report(bot, results, elapsed)
         else:
             error_msg = stderr.decode()[:300] if stderr else "неизвестная ошибка"
             logger.error(f"❌ run_all_parsers.py упал: {error_msg}")
@@ -705,17 +713,25 @@ async def run_parsers_job(bot=None):
             )
 
 
-async def _send_parser_report(bot, success: int, failed: int, elapsed: float):
+async def _send_parser_report(bot, results: list, elapsed: float):
     """Отправляет отчёт о работе парсеров админу."""
-    total = success + failed
     lines = [
         "🤖 **Отчёт о запуске парсеров**",
         f"🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')} | ⏱ {elapsed:.0f} сек",
         "",
-        f"✅ Успешно: **{success}**",
-        f"❌ С ошибками: **{failed}**",
-        f"📦 Всего парсеров: **{total}**",
     ]
+    
+    if results:
+        lines.extend(results)
+    else:
+        lines.append("❌ Нет данных о работе парсеров")
+    
+    # Подсчитываем успешные и ошибочные
+    success = sum(1 for r in results if '✅' in r)
+    failed = sum(1 for r in results if '❌' in r)
+    
+    lines.append("")
+    lines.append(f"📊 Итого: ✅ {success} | ❌ {failed}")
 
     try:
         await bot.send_message(
@@ -725,7 +741,7 @@ async def _send_parser_report(bot, success: int, failed: int, elapsed: float):
         )
         logger.info("📨 Отчёт отправлен админу")
     except Exception as e:
-        logger.error(f"Не удалось отправ���ть отчёт: {e}")
+        logger.error(f"Не удалось отправить отчёт: {e}")
 
 
 def setup_scheduler(application):
