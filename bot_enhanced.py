@@ -47,7 +47,7 @@ DB_NAME = "events_final.db"
 ADMIN_ID = 502917728
 
 DONATION_ENABLED = True
-DONATION_SUGGESTIONS = [50, 100, 200, 500]  # Варианты доната в звёздах
+DONATION_SUGGESTIONS = [10, 50, 100, 500]  # Варианты доната в звёздах
 DONATION_CURRENCY = "XTR"  # XTR = Telegram Stars
 
 PER_PAGE = 10
@@ -543,6 +543,7 @@ def get_reply_main_menu():
         ["📅 Сегодня", "📆 Завтра"],
         ["⏰ Ближайшие", "🎉 Выходные"],
         ["📋 Все события", "🎯 Категории"],
+        ["⭐ Поддержать проект"],
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -666,7 +667,7 @@ async def update_parsers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
         
-        elapsed = (datetime.now() - update.message.date).total_seconds()
+        elapsed = (datetime.now() - update.message.date.replace(tzinfo=None)).total_seconds()
         
         if process.returncode == 0:
             output = stdout.decode()
@@ -910,6 +911,11 @@ async def search_by_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user = update.effective_user
+    
+    if text == "⭐ Поддержать проект":
+        log_user_action(user.id, user.username, user.first_name, "donate_menu_button")
+        await donate_command(update, context)
+        return
     if text == "📅 Сегодня":
         log_user_action(user.id, user.username, user.first_name, "menu_today")
         today = datetime.now()
