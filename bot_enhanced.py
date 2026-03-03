@@ -15,6 +15,7 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    LabeledPrice,
     ReplyKeyboardMarkup,
 )
 from telegram.ext import (
@@ -32,8 +33,7 @@ import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from telegram.constants import ParseMode
-from telegram import LabeledPrice
-from telegram.ext import PreCheckoutQueryHandler, ShippingQueryHandler
+from telegram.ext import PreCheckoutQueryHandler
 
 # ---------------------- Конфиг и логирование ----------------------
 
@@ -48,7 +48,7 @@ DB_NAME = "events_final.db"
 ADMIN_ID = 502917728
 
 DONATION_ENABLED = True
-DONATION_SUGGESTIONS = [10, 50, 100, 500]  # Варианты доната в звёздах
+DONATION_SUGGESTIONS = [10, 50, 100, 500]
 DONATION_CURRENCY = "XTR"  # XTR = Telegram Stars
 
 PER_PAGE = 10
@@ -176,9 +176,9 @@ def search_events_by_title(query: str, limit: int = 20):
             """
             SELECT id, title, details, description, event_date, show_time,
                    place, location, price, category, source_url
-            FROM events 
+            FROM events
             WHERE title LIKE ? COLLATE NOCASE AND event_date >= ?
-            ORDER BY event_date, show_time, title 
+            ORDER BY event_date, show_time, title
             LIMIT ?
         """,
             (f"%{query}%", today, limit * SEARCH_MULTIPLIER),
@@ -206,9 +206,9 @@ def search_events_by_date_raw(date_str: str):
             """
             SELECT id, title, details, description, event_date, show_time,
                    place, location, price, category, source_url
-            FROM events 
+            FROM events
             WHERE event_date = ?
-            ORDER BY show_time, title 
+            ORDER BY show_time, title
             LIMIT 300
         """,
             (search_date,),
@@ -221,40 +221,36 @@ def search_events_by_date_raw(date_str: str):
 
 
 def get_events_by_date_and_category(target_date: datetime, category: str | None = None):
-    """Получает события на конкретную дату с учётом времени (для сегодня)"""
+    """Получает события на конкретную дату с учётом времени (для сегодня)."""
     date_str = target_date.strftime("%Y-%m-%d")
     today_str = datetime.now().strftime("%Y-%m-%d")
-    
+
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        
-        # Базовый запрос
+
         query = """
             SELECT id, title, details, description, event_date, show_time,
                    place, location, price, category, source_url
-            FROM events 
+            FROM events
             WHERE event_date = ?
         """
         params = [date_str]
-        
-        # Добавляем фильтр по категории если нужно
+
         if category and category != "all":
             query += " AND category = ?"
             params.append(category)
-        
-        # Если это сегодня - фильтруем по времени
+
+        # Для сегодня показываем только ещё не начавшиеся сеансы
         if date_str == today_str:
             current_time = datetime.now().strftime("%H:%M")
-            query += """ AND (
-                show_time = \'\'
-                OR show_time > ?
-            )"""
+            query += " AND (show_time = '' OR show_time IS NULL OR show_time > ?)"
             params.append(current_time)
-        
+
         query += " ORDER BY show_time, title"
-        
+
         cursor.execute(query, params)
         return cursor.fetchall()
+
 
 def get_upcoming_events(limit: int = 20, category: str | None = None):
     today = datetime.now().strftime("%Y-%m-%d")
@@ -265,9 +261,9 @@ def get_upcoming_events(limit: int = 20, category: str | None = None):
                 """
                 SELECT id, title, details, description, event_date, show_time,
                        place, location, price, category, source_url
-                FROM events 
+                FROM events
                 WHERE event_date >= ? AND category = ?
-                ORDER BY event_date, show_time, title 
+                ORDER BY event_date, show_time, title
                 LIMIT ?
             """,
                 (today, category, limit * SEARCH_MULTIPLIER),
@@ -277,9 +273,9 @@ def get_upcoming_events(limit: int = 20, category: str | None = None):
                 """
                 SELECT id, title, details, description, event_date, show_time,
                        place, location, price, category, source_url
-                FROM events 
-                WHERE event_date >= ? 
-                ORDER BY event_date, show_time, title 
+                FROM events
+                WHERE event_date >= ?
+                ORDER BY event_date, show_time, title
                 LIMIT ?
             """,
                 (today, limit * SEARCH_MULTIPLIER),
@@ -303,7 +299,7 @@ def get_weekend_events(category: str | None = None):
                 """
                 SELECT id, title, details, description, event_date, show_time,
                        place, location, price, category, source_url
-                FROM events 
+                FROM events
                 WHERE event_date IN (?, ?) AND category = ?
                 ORDER BY event_date, show_time, title
             """,
@@ -314,7 +310,7 @@ def get_weekend_events(category: str | None = None):
                 """
                 SELECT id, title, details, description, event_date, show_time,
                        place, location, price, category, source_url
-                FROM events 
+                FROM events
                 WHERE event_date IN (?, ?)
                 ORDER BY event_date, show_time, title
             """,
@@ -638,7 +634,7 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🟢 Пользователей сегодня: {stats['users_today']}",
         f"📬 Запросов сегодня: {stats['actions_today']}",
         "",
-        "📅 Активность за 7 дней:"
+        "📅 Активность за 7 дней:",
     ]
     for row in stats["daily_activity"]:
         lines.append(f"  {row['day']} — {row['cnt']} запр., {row['users']} польз.")
@@ -651,95 +647,75 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------------- Планировщик парсеров ----------------------
 
+
 async def update_parsers(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ручной запуск всех парсеров (только для администратора)"""
+    """Ручной запуск всех парсеров (только для администратора)."""
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ Нет доступа.")
         return
-    
+
     await update.message.reply_text(
         "🔄 **Обновление афиши...**\n"
         "Запускаю все парсеры. Это может занять 1-2 минуты.",
         parse_mode="Markdown"
     )
-    
+
     try:
         process = await asyncio.create_subprocess_exec(
             "python", "run_all_parsers.py",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        
+
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
-        
         elapsed = (datetime.now() - update.message.date.replace(tzinfo=None)).total_seconds()
-        
+
         if process.returncode == 0:
             output = stdout.decode()
-            
-            # Собираем результаты (только понятные строки)
             results = []
             lines = output.split('\n')
-            
             success_count = 0
             failed_count = 0
-            
+
             for line in lines:
-                # Пропускаем строки с INFO и технической информацией
                 if 'INFO -' in line:
                     continue
-                # Оставляем строки с эмодзи и результатами
                 if '✅' in line or '❌' in line or '📊' in line:
-                    # Очищаем от технической информации
                     clean_line = line.strip()
-                    # Если есть дата и время в начале, убираем их
                     if re.match(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}', clean_line):
-                        # Убираем первые 20 символов (дата+время)
                         parts = clean_line.split(' - ', 1)
-                        if len(parts) > 1:
-                            clean_line = parts[1]
-                        else:
-                            clean_line = clean_line[20:]
-                    
+                        clean_line = parts[1] if len(parts) > 1 else clean_line[20:]
                     if '✅' in line:
                         success_count += 1
                     elif '❌' in line:
                         failed_count += 1
-                    
                     results.append(clean_line)
-            
-            # Формируем ответ
+
             response = [
                 "✅ **Обновление завершено!**",
                 f"⏱ Время выполнения: {elapsed:.0f} сек",
-                ""
+                "",
             ]
-            
             if results:
-                response.extend(results[:15])  # Показываем первые 15 результатов
+                response.extend(results[:15])
                 if len(results) > 15:
                     response.append(f"... и ещё {len(results) - 15} результатов")
             else:
                 response.append("ℹ️ Нет данных о результатах")
-            
             response.append("")
             response.append(f"📊 Итог: ✅ {success_count} успешно | ❌ {failed_count} ошибок")
-            
-            await update.message.reply_text(
-                "\n".join(response),
-                parse_mode="Markdown"
-            )
+
+            await update.message.reply_text("\n".join(response), parse_mode="Markdown")
         else:
             error_msg = stderr.decode()[:500] if stderr else "неизвестная ошибка"
             await update.message.reply_text(
                 f"❌ **Ошибка при обновлении**\n\n```\n{error_msg}\n```",
                 parse_mode="Markdown"
             )
-            
+
     except asyncio.TimeoutError:
         await update.message.reply_text(
-            "⏰ **Превышено время ожидания**\n"
-            "Парсеры выполнялись дольше 5 минут.",
+            "⏰ **Превышено время ожидания**\nПарсеры выполнялись дольше 5 минут.",
             parse_mode="Markdown"
         )
     except Exception as e:
@@ -748,20 +724,11 @@ async def update_parsers(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
+
 async def run_parsers_job(bot=None):
     """Запускает все парсеры по расписанию и отправляет отчёт админу."""
     logger.info("⏰ Запуск парсеров по расписанию...")
     start_time = datetime.now()
-
-    # Список парсеров для отчёта
-    parser_names = [
-        "🎬 Кино (Relax)",
-        "🎭 Театр (Relax)",
-        "🎵 Концерты (Relax)",
-        "🖼️ Выставки (Relax)",
-        "🧸 Детям (Relax)",
-        "🎫 Ticketpro"
-    ]
 
     try:
         process = await asyncio.create_subprocess_exec(
@@ -770,30 +737,15 @@ async def run_parsers_job(bot=None):
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=600)
-
         elapsed = (datetime.now() - start_time).total_seconds()
 
         if process.returncode == 0:
             output = stdout.decode()
             logger.info(f"✅ run_all_parsers.py завершен за {elapsed:.0f} сек")
-            
-            # Собираем статистику по каждому парсеру
             results = []
-            lines = output.split('\n')
-            
-            for line in lines:
-                # Ищем строки с результатами парсеров
-                if '✅' in line and ('добавлено' in line.lower() or 'сохранено' in line.lower()):
+            for line in output.split('\n'):
+                if ('✅' in line or '❌' in line) and ('добавлено' in line.lower() or 'сохранено' in line.lower() or 'ошибка' in line.lower()):
                     results.append(line.strip())
-                elif '❌' in line and ('ошибка' in line.lower() or 'упал' in line.lower()):
-                    results.append(line.strip())
-            
-            # Если не нашли строк с результатами, добавляем заглушку
-            if not results:
-                for i, name in enumerate(parser_names, 1):
-                    if f"Парсер {i}" in output:
-                        results.append(f"{name}: выполнен")
-            
             if bot:
                 await _send_parser_report(bot, results, elapsed)
         else:
@@ -831,16 +783,13 @@ async def _send_parser_report(bot, results: list, elapsed: float):
         f"🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')} | ⏱ {elapsed:.0f} сек",
         "",
     ]
-    
     if results:
         lines.extend(results)
     else:
-        lines.append("❌ Нет данных о работе парсеров")
-    
-    # Подсчитываем успешные и ошибочные
+        lines.append("ℹ️ Нет данных о результатах парсеров")
+
     success = sum(1 for r in results if '✅' in r)
     failed = sum(1 for r in results if '❌' in r)
-    
     lines.append("")
     lines.append(f"📊 Итого: ✅ {success} | ❌ {failed}")
 
@@ -870,24 +819,189 @@ def setup_scheduler(application):
     logger.info("⏰ Планировщик запущен. Парсеры будут выполняться ежедневно в 6:00 (Минск)")
 
 
+# ---------------------- Донат ----------------------
+
+
+def _build_donate_keyboard():
+    """Строит клавиатуру с вариантами доната."""
+    keyboard = []
+    row = []
+    for amount in DONATION_SUGGESTIONS:
+        row.append(InlineKeyboardButton(f"⭐ {amount} Stars", callback_data=f"donate_{amount}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    return keyboard
+
+
+DONATE_TEXT = (
+    "🌟 **Поддержать проект**\n\n"
+    "Если вам нравится бот и вы хотите поддержать его развитие, "
+    "вы можете отправить донат в Telegram Stars.\n\n"
+    "Выберите сумму ниже или отправьте команду\n"
+    "`/donate <сумма>` (например, `/donate 150`)"
+)
+
+
+async def donate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает варианты доната (команда /support или кнопка меню)."""
+    user = update.effective_user
+    log_user_action(user.id, user.username, user.first_name, "donate_menu")
+    await update.message.reply_text(
+        DONATE_TEXT,
+        reply_markup=InlineKeyboardMarkup(_build_donate_keyboard()),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def custom_donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает команду /donate <сумма>."""
+    user = update.effective_user
+    try:
+        if not context.args or len(context.args) != 1:
+            await update.message.reply_text(
+                "❌ Используйте: `/donate <сумма>`\nНапример: `/donate 150`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+            return
+        amount = int(context.args[0])
+        if amount < 10:
+            await update.message.reply_text("❌ Минимальная сумма доната — 10 Stars")
+            return
+        if amount > 2500:
+            await update.message.reply_text("❌ Максимальная сумма доната — 2500 Stars")
+            return
+        log_user_action(user.id, user.username, user.first_name, "donate_custom", str(amount))
+        await send_star_invoice(update, context, amount)
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Пожалуйста, введите число.\nПример: `/donate 150`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+
+
+async def send_star_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE, amount: int):
+    """Отправляет инвойс для оплаты Stars."""
+    if update.callback_query:
+        chat_id = update.callback_query.message.chat_id
+    else:
+        chat_id = update.message.chat_id
+
+    await context.bot.send_invoice(
+        chat_id=chat_id,
+        title="Поддержка бота",
+        description=f"Благодарим вас за поддержку проекта! Вы отправляете {amount} Telegram Stars.",
+        payload=f"donation_{amount}_{datetime.now().timestamp()}",
+        provider_token="",  # Для Stars оставляем пустым
+        currency=DONATION_CURRENCY,
+        prices=[LabeledPrice(label=f"Stars {amount}", amount=amount)],
+        need_name=False,
+        need_phone_number=False,
+        need_email=False,
+        need_shipping_address=False,
+        is_flexible=False,
+    )
+
+
+async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверка перед оплатой."""
+    query = update.pre_checkout_query
+    if query.invoice_payload.startswith("donation_"):
+        await query.answer(ok=True)
+    else:
+        await query.answer(ok=False, error_message="Что-то пошло не так")
+
+
+async def successful_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка успешной оплаты."""
+    user = update.effective_user
+    amount = update.message.successful_payment.total_amount
+    log_user_action(user.id, user.username, user.first_name, "donate_success", str(amount))
+
+    await update.message.reply_text(
+        f"✅ **Спасибо за поддержку!**\n\n"
+        f"Вы отправили {amount} ⭐ Stars.\n"
+        f"Ваша помощь очень ценится и помогает развивать бота! 🙏",
+        parse_mode=ParseMode.MARKDOWN,
+    )
+    await context.bot.send_message(
+        chat_id=ADMIN_ID,
+        text=(
+            f"💰 **Получен донат!**\n\n"
+            f"От: {user.first_name}\n"
+            f"Username: @{user.username if user.username else 'нет'}\n"
+            f"ID: `{user.id}`\n"
+            f"Сумма: {amount} ⭐ Stars"
+        ),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
 # ---------------------- Хендлеры сообщений ----------------------
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     log_user_action(user.id, user.username, user.first_name, "start")
-    welcome_text = f"""
-🎉 Привет, {user.first_name}!
-
-Я бот-афиша Минска. Помогу найти интересные события в городе.
-
-🔍 **Как искать:**
-• Просто отправьте **название** события (например: "концерт", "выставка", "Дельфин")
-• Или отправьте **дату** в формате ДД.ММ или ДД.ММ.ГГГГ (например: 25.02 или 25.02.2026)
-
-Используйте кнопки для быстрого поиска 👇
-"""
+    welcome_text = (
+        f"🎉 Привет, {user.first_name}!\n\n"
+        "Я бот-афиша Минска. Помогу найти интересные события в городе.\n\n"
+        "🔍 **Как искать:**\n"
+        "• Просто отправьте **название** события (например: \"концерт\", \"выставка\", \"Дельфин\")\n"
+        "• Или отправьте **дату** в формате ДД.ММ или ДД.ММ.ГГГГ (например: 25.02 или 25.02.2026)\n\n"
+        "Используйте кнопки для быстрого поиска 👇"
+    )
     await update.message.reply_text(welcome_text, reply_markup=get_reply_main_menu(), parse_mode="Markdown")
+
+
+async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /today — события на сегодня."""
+    user = update.effective_user
+    log_user_action(user.id, user.username, user.first_name, "cmd_today")
+    today = datetime.now()
+    events = get_events_by_date_and_category(today)
+    title = f"📅 **События на {today.strftime('%d.%m.%Y')}:**"
+    set_pagination(context, events, title, date_info=None)
+    await show_page(update, context)
+
+
+async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Информация о боте и контакты."""
+    user = update.effective_user
+    log_user_action(user.id, user.username, user.first_name, "about")
+    text = (
+        "🌟 **MinskDvizh** — твой гид по событиям Минска!\n\n"
+        "📅 **О проекте:**\n"
+        "Этот бот создан, чтобы помочь тебе находить самые интересные мероприятия в городе. "
+        "Мы собираем данные из разных источников и обновляем афишу каждое утро.\n"
+        "Что будет дальше? Скоро узнаете!\n\n"
+        "🎯 **Что умеет бот:**\n"
+        "• 🎬 **Кино** — расписание всех кинотеатров\n"
+        "• 🎵 **Концерты** — живые выступления\n"
+        "• 🎭 **Театр** — спектакли и премьеры\n"
+        "• 🖼️ **Выставки** — искусство и культура\n"
+        "• 🧸 **Детям** — мероприятия для детей\n"
+        "• ⚽ **Спорт** — спортивные события\n\n"
+        "🔍 **Как пользоваться:**\n"
+        "• Просто отправь **название** события\n"
+        "• Или введи **дату** в формате ДД.ММ\n"
+        "• Или используй кнопки для быстрого поиска\n\n"
+        "💼 **Сотрудничество:**\n"
+        "Хотите добавить свое мероприятие?\n"
+        "📱 По всем вопросам: @i354444\n\n"
+        "⭐ **Поддержать проект:**\n"
+        "Если бот оказался полезным, вы можете поддержать его развитие, "
+        "нажав кнопку ниже или командой /donate\n\n"
+        "#minskdvizh #афишаминск #минск #событияминск #концертыминск"
+    )
+    await update.message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⭐ Поддержать", callback_data="show_donate")]]),
+        parse_mode=ParseMode.MARKDOWN,
+        disable_web_page_preview=True,
+    )
 
 
 async def search_by_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -935,7 +1049,7 @@ async def search_by_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user = update.effective_user
-    
+
     if text == "⭐ Поддержать":
         log_user_action(user.id, user.username, user.first_name, "donate_menu_button")
         await donate_command(update, context)
@@ -944,7 +1058,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_user_action(user.id, user.username, user.first_name, "about_button")
         await about(update, context)
         return
-    
     if text == "📅 Сегодня":
         log_user_action(user.id, user.username, user.first_name, "menu_today")
         today = datetime.now()
@@ -992,14 +1105,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_user_action(user.id, user.username, user.first_name, "menu_categories")
         await update.message.reply_text(
             "🎯 **Выберите категорию:**",
-            reply_markup=InlineKeyboardMarkup(
-                [
-                    [InlineKeyboardButton("🎬 Кино", callback_data="cat_cinema"), InlineKeyboardButton("🎵 Концерты", callback_data="cat_concert")],
-                    [InlineKeyboardButton("🎭 Театр", callback_data="cat_theater"), InlineKeyboardButton("🖼️ Выставки", callback_data="cat_exhibition")],
-                    [InlineKeyboardButton("🧸 Детям", callback_data="cat_kids"), InlineKeyboardButton("⚽ Спорт", callback_data="cat_sport")],
-                    [InlineKeyboardButton("🆓 Бесплатно", callback_data="cat_free"), InlineKeyboardButton("◀️ Назад в главное меню", callback_data="back_to_main")],
-                ]
-            ),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🎬 Кино", callback_data="cat_cinema"), InlineKeyboardButton("🎵 Концерты", callback_data="cat_concert")],
+                [InlineKeyboardButton("🎭 Театр", callback_data="cat_theater"), InlineKeyboardButton("🖼️ Выставки", callback_data="cat_exhibition")],
+                [InlineKeyboardButton("🧸 Детям", callback_data="cat_kids"), InlineKeyboardButton("⚽ Спорт", callback_data="cat_sport")],
+                [InlineKeyboardButton("🆓 Бесплатно", callback_data="cat_free"), InlineKeyboardButton("◀️ Назад в главное меню", callback_data="back_to_main")],
+            ]),
             parse_mode="Markdown",
         )
         return
@@ -1110,44 +1221,47 @@ async def handle_simple_buttons(query, context: ContextTypes.DEFAULT_TYPE, data:
         log_user_action(user.id, user.username, user.first_name, "open_category", category)
         await show_date_options(query, category)
 
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
-    
-    # Обработка кнопок доната (новые)
-    
-    # Обработка кнопки "Поддержать" из about
+
+    # Кнопка "Поддержать" из /about — исправлена: отвечаем через query.message
     if data == "show_donate":
-        await donate_command(update, context)
+        await query.answer()
+        user = query.from_user
+        log_user_action(user.id, user.username, user.first_name, "donate_menu")
+        await query.message.reply_text(
+            DONATE_TEXT,
+            reply_markup=InlineKeyboardMarkup(_build_donate_keyboard()),
+            parse_mode=ParseMode.MARKDOWN,
+        )
         return
+
     if data.startswith("donate_"):
         amount = int(data.replace("donate_", ""))
         await query.answer()
         await send_star_invoice(update, context, amount)
         return
-    
-    # Обработка фильтров
+
     if data.startswith("filter_"):
         category = data.replace("filter_", "")
         await handle_filter_buttons(query, context, category)
         return
-    
-    # Обработка дат
+
     if data.startswith("date_"):
         parts = data.split("_")
         date_type = parts[1]
         category = parts[2]
         await handle_date_category_buttons(query, context, date_type, category)
         return
-    
-    # Обработка пагинации
+
     if data == "page_next":
         if "pagination" in context.user_data:
             context.user_data["pagination"]["page"] += 1
         await show_page(query, context)
         return
-    
-    # Обработка подписок
+
     if data.startswith("sub_"):
         _, category, date_type = data.split("_", 2)
         user = query.from_user
@@ -1155,215 +1269,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_user_action(user.id, user.username, user.first_name, "subscribe", f"{category}_{date_type}")
         await query.answer("Подписка оформлена 🔔", show_alert=False)
         return
-    
-    # Все остальные кнопки
+
     await handle_simple_buttons(query, context, data)
-    
-# ---------------------- Донат ----------------------
 
-async def donate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает варианты доната"""
-    # Если это callback запрос, используем message из него
-    if update.callback_query:
-        message = update.callback_query.message
-    else:
-        message = update.message
-    user = update.effective_user
-    log_user_action(user.id, user.username, user.first_name, "donate_menu")
-    
-    keyboard = []
-    row = []
-    
-    for amount in DONATION_SUGGESTIONS:
-        button = InlineKeyboardButton(
-            f"⭐ {amount} Stars", 
-            callback_data=f"donate_{amount}"
-        )
-        row.append(button)
-        if len(row) == 2:
-            keyboard.append(row)
-            row = []
-    
-    if row:
-        keyboard.append(row)
-    
-    text = (
-        "🌟 **Поддержать проект**\n\n"
-        "Если вам нравится бот и вы хотите поддержать его развитие, "
-        "вы можете отправить донат в Telegram Stars.\n\n"
-        "Выберите сумму ниже или отправьте команду\n"
-        "`/donate <сумма>` (например, `/donate 150`)"
-    )
-    
-    await update.message.reply_text(
-        text,
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode=ParseMode.MARKDOWN
-    )
-
-async def custom_donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает команду /donate <сумма>"""
-    user = update.effective_user
-    
-    try:
-        # Проверяем, есть ли аргумент
-        if not context.args or len(context.args) != 1:
-            await update.message.reply_text(
-                "❌ Используйте: `/donate <сумма>`\n"
-                "Например: `/donate 150`",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return
-        
-        amount = int(context.args[0])
-        
-        if amount < 10:
-            await update.message.reply_text("❌ Минимальная сумма доната — 10 Stars")
-            return
-        
-        if amount > 2500:
-            await update.message.reply_text("❌ Максимальная сумма доната — 2500 Stars")
-            return
-        
-        log_user_action(user.id, user.username, user.first_name, "donate_custom", str(amount))
-        await send_star_invoice(update, context, amount)
-        
-    except ValueError:
-        await update.message.reply_text(
-            "❌ Пожалуйста, введите число.\n"
-            "Пример: `/donate 150`",
-            parse_mode=ParseMode.MARKDOWN
-        )
-
-
-
-async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Информация о боте и контакты"""
-    user = update.effective_user
-    log_user_action(user.id, user.username, user.first_name, "about")
-    
-    text = """
-🌟 **MinskDvizh** — твой гид по событиям Минска!
-
-📅 **О проекте:**
-Этот бот создан, чтобы помочь тебе находить самые интересные мероприятия в городе. Мы собираем данные из разных источников и обновляем афишу каждое утро.
-Что будет дальше? Скоро узнаете!
-
-🎯 **Что умеет бот:**
-• 🎬 **Кино** — расписание всех кинотеатров
-• 🎵 **Концерты** — живые выступления
-• 🎭 **Театр** — спектакли и премьеры
-• 🖼️ **Выставки** — искусство и культура
-• 🧸 **Детям** — мероприятия для детей
-• ⚽ **Спорт** — спортивные события
-
-🔍 **Как пользоваться:**
-• Просто отправь **название** события
-• Или введи **дату** в формате ДД.ММ
-• Или используй кнопки для быстрого поиска
-
-📊 **Статистика:**
-• 2700+ событий в базе
-• 6 категорий мероприятий
-• Новинки каждое утро
-
-💼 **Сотрудничество:**
-Хотите добавить свое мероприятие?
-📱 По всем вопросам: @i354444
-
-⭐ **Поддержать проект:**
-Если бот оказался полезным, вы можете поддержать его развитие, нажав кнопку "Поддержать" в главном меню или командой /donate
-
-#minskdvizh #афишаминск #минск #событияминск #концертыминск 
-    """
-    
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("⭐ Поддержать", callback_data="show_donate")],
-    ])
-    
-    await update.message.reply_text(
-        text,
-        reply_markup=keyboard,
-        parse_mode=ParseMode.MARKDOWN,
-        disable_web_page_preview=True
-    )
-
-
-async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /today - события на сегодня"""
-    user = update.effective_user
-    log_user_action(user.id, user.username, user.first_name, "command_today")
-    
-    today = datetime.now()
-    events = get_events_by_date_and_category(today)
-    title = f"📅 **События на {today.strftime('%d.%m.%Y')}:**"
-    set_pagination(context, events, title, date_info=None)
-    await show_page(update, context)
-async def send_star_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE, amount: int):
-    """Отправляет инвойс для оплаты Stars"""
-    title = "Поддержка бота"
-    description = f"Благодарим вас за поддержку проекта! Вы отправляете {amount} Telegram Stars."
-    payload = f"donation_{amount}_{datetime.now().timestamp()}"
-    currency = DONATION_CURRENCY
-    prices = [LabeledPrice(label=f"⭐ {amount} Stars", amount=amount)]
-    
-    if update.callback_query:
-        chat_id = update.callback_query.message.chat_id
-    else:
-        chat_id = update.message.chat_id
-    
-    await context.bot.send_invoice(
-        chat_id=chat_id,
-        title=title,
-        description=description,
-        payload=payload,
-        provider_token="",  # Для Stars оставляем пустым
-        currency=currency,
-        prices=prices,
-        need_name=False,
-        need_phone_number=False,
-        need_email=False,
-        need_shipping_address=False,
-        is_flexible=False,
-    )
-
-async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Проверка перед оплатой"""
-    query = update.pre_checkout_query
-    if query.invoice_payload.startswith("donation_"):
-        await query.answer(ok=True)
-    else:
-        await query.answer(ok=False, error_message="Что-то пошло не так")
-
-async def successful_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка успешной оплаты"""
-    user = update.effective_user
-    payment = update.message.successful_payment
-    
-    amount = payment.total_amount
-    
-    log_user_action(user.id, user.username, user.first_name, "donate_success", str(amount))
-    
-    # Отправляем благодарность пользователю
-    await update.message.reply_text(
-        f"✅ **Спасибо за поддержку!**\n\n"
-        f"Вы отправили {amount} ⭐ Stars.\n"
-        f"Ваша помощь очень ценится и помогает развивать бота! 🙏",
-        parse_mode=ParseMode.MARKDOWN
-    )
-    
-    # Отправляем уведомление админу
-    await context.bot.send_message(
-        chat_id=ADMIN_ID,
-        text=(
-            f"💰 **Получен донат!**\n\n"
-            f"От: {user.first_name}\n"
-            f"Username: @{user.username if user.username else 'нет'}\n"
-            f"ID: `{user.id}`\n"
-            f"Сумма: {amount} ⭐ Stars"
-        ),
-        parse_mode=ParseMode.MARKDOWN
-    )
 
 # ---------------------- main ----------------------
 
@@ -1377,17 +1285,16 @@ def main():
     application = Application.builder().token(TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("today", today_command))
     application.add_handler(CommandHandler("subs", show_subscriptions))
     application.add_handler(CommandHandler("stats", show_stats))
     application.add_handler(CommandHandler("update", update_parsers))
-    application.add_handler(CommandHandler("today", today_command))
     application.add_handler(CommandHandler("donate", custom_donate))
     application.add_handler(CommandHandler("support", donate_command))
     application.add_handler(CommandHandler("about", about))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(PreCheckoutQueryHandler(precheckout_callback))
     application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
-    
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     setup_scheduler(application)
