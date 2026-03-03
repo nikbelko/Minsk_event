@@ -31,6 +31,8 @@ load_dotenv()
 import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from telegram.constants import ParseMode
+from telegram.ext import PreCheckoutQueryHandler, ShippingQueryHandler
 
 # ---------------------- Конфиг и логирование ----------------------
 
@@ -43,6 +45,10 @@ logger = logging.getLogger(__name__)
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 DB_NAME = "events_final.db"
 ADMIN_ID = 502917728
+
+DONATION_ENABLED = True
+DONATION_SUGGESTIONS = [50, 100, 200, 500]  # Варианты доната в звёздах
+DONATION_CURRENCY = "XTR"  # XTR = Telegram Stars
 
 PER_PAGE = 10
 SEARCH_MULTIPLIER = 3
@@ -637,6 +643,86 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------- Планировщик парсеров ----------------------
 
 
+
+
+async def update_parsers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ручной запуск всех парсеров (только для администратора)"""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Нет доступа.")
+        return
+    
+    await update.message.reply_text(
+        "🔄 **Обновление афиши...**\n"
+        "Запускаю все парсеры. Это может занять 1-2 минуты.",
+        parse_mode="Markdown"
+    )
+    
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "python", "run_all_parsers.py",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
+        
+        elapsed = (datetime.now() - update.message.date).total_seconds()
+        
+        if process.returncode == 0:
+            output = stdout.decode()
+            
+            results = []
+            lines = output.split('\n')
+            
+            success_count = 0
+            failed_count = 0
+            
+            for line in lines:
+                if '✅' in line and ('добавлено' in line.lower() or 'сохранено' in line.lower()):
+                    results.append(line.strip())
+                    success_count += 1
+                elif '❌' in line and ('ошибка' in line.lower() or 'упал' in line.lower()):
+                    results.append(line.strip())
+                    failed_count += 1
+            
+            response = [
+                "✅ **Обновление завершено!**",
+                f"⏱ Время выполнения: {elapsed:.0f} сек",
+                ""
+            ]
+            
+            if results:
+                response.extend(results[:10])
+                if len(results) > 10:
+                    response.append(f"... и ещё {len(results) - 10} результатов")
+            else:
+                response.append("ℹ️ Нет данных о результатах")
+            
+            response.append("")
+            response.append(f"📊 Итог: ✅ {success_count} успешно | ❌ {failed_count} ошибок")
+            
+            await update.message.reply_text(
+                "\n".join(response),
+                parse_mode="Markdown"
+            )
+        else:
+            error_msg = stderr.decode()[:500] if stderr else "неизвестная ошибка"
+            await update.message.reply_text(
+                f"❌ **Ошибка при обновлении**\n\n```\n{error_msg}\n```",
+                parse_mode="Markdown"
+            )
+            
+    except asyncio.TimeoutError:
+        await update.message.reply_text(
+            "⏰ **Превышено время ожидания**\n"
+            "Парсеры выполнялись дольше 5 минут.",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await update.message.reply_text(
+            f"💥 **Критическая ошибка**:\n```\n{str(e)}\n```",
+            parse_mode="Markdown"
+        )
 async def run_parsers_job(bot=None):
     """Запускает все парсеры по расписанию и отправляет отчёт админу."""
     logger.info("⏰ Запуск парсеров по расписанию...")
@@ -989,25 +1075,39 @@ async def handle_simple_buttons(query, context: ContextTypes.DEFAULT_TYPE, data:
         log_user_action(user.id, user.username, user.first_name, "open_category", category)
         await show_date_options(query, category)
 
-
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     data = query.data
+    
+    # Обработка кнопок доната (новые)
+    if data.startswith("donate_"):
+        amount = int(data.replace("donate_", ""))
+        await query.answer()
+        await send_star_invoice(update, context, amount)
+        return
+    
+    # Обработка фильтров
     if data.startswith("filter_"):
         category = data.replace("filter_", "")
         await handle_filter_buttons(query, context, category)
         return
+    
+    # Обработка дат
     if data.startswith("date_"):
         parts = data.split("_")
         date_type = parts[1]
         category = parts[2]
         await handle_date_category_buttons(query, context, date_type, category)
         return
+    
+    # Обработка пагинации
     if data == "page_next":
         if "pagination" in context.user_data:
             context.user_data["pagination"]["page"] += 1
         await show_page(query, context)
         return
+    
+    # Обработка подписок
     if data.startswith("sub_"):
         _, category, date_type = data.split("_", 2)
         user = query.from_user
@@ -1015,8 +1115,146 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_user_action(user.id, user.username, user.first_name, "subscribe", f"{category}_{date_type}")
         await query.answer("Подписка оформлена 🔔", show_alert=False)
         return
+    
+    # Все остальные кнопки
     await handle_simple_buttons(query, context, data)
+    
+# ---------------------- Донат ----------------------
 
+async def donate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает варианты доната"""
+    user = update.effective_user
+    log_user_action(user.id, user.username, user.first_name, "donate_menu")
+    
+    keyboard = []
+    row = []
+    
+    for amount in DONATION_SUGGESTIONS:
+        button = InlineKeyboardButton(
+            f"⭐ {amount} Stars", 
+            callback_data=f"donate_{amount}"
+        )
+        row.append(button)
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    
+    if row:
+        keyboard.append(row)
+    
+    text = (
+        "🌟 **Поддержать проект**\n\n"
+        "Если вам нравится бот и вы хотите поддержать его развитие, "
+        "вы можете отправить донат в Telegram Stars.\n\n"
+        "Выберите сумму ниже или отправьте команду\n"
+        "`/donate <сумма>` (например, `/donate 150`)"
+    )
+    
+    await update.message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+async def custom_donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обрабатывает команду /donate <сумма>"""
+    user = update.effective_user
+    
+    try:
+        # Проверяем, есть ли аргумент
+        if not context.args or len(context.args) != 1:
+            await update.message.reply_text(
+                "❌ Используйте: `/donate <сумма>`\n"
+                "Например: `/donate 150`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        amount = int(context.args[0])
+        
+        if amount < 10:
+            await update.message.reply_text("❌ Минимальная сумма доната — 10 Stars")
+            return
+        
+        if amount > 2500:
+            await update.message.reply_text("❌ Максимальная сумма доната — 2500 Stars")
+            return
+        
+        log_user_action(user.id, user.username, user.first_name, "donate_custom", str(amount))
+        await send_star_invoice(update, context, amount)
+        
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Пожалуйста, введите число.\n"
+            "Пример: `/donate 150`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+async def send_star_invoice(update: Update, context: ContextTypes.DEFAULT_TYPE, amount: int):
+    """Отправляет инвойс для оплаты Stars"""
+    title = "Поддержка бота"
+    description = f"Благодарим вас за поддержку проекта! Вы отправляете {amount} Telegram Stars."
+    payload = f"donation_{amount}_{datetime.now().timestamp()}"
+    currency = DONATION_CURRENCY
+    prices = [{"amount": amount, "label": f"⭐ {amount} Stars"}]
+    
+    if update.callback_query:
+        chat_id = update.callback_query.message.chat_id
+    else:
+        chat_id = update.message.chat_id
+    
+    await context.bot.send_invoice(
+        chat_id=chat_id,
+        title=title,
+        description=description,
+        payload=payload,
+        provider_token="",  # Для Stars оставляем пустым
+        currency=currency,
+        prices=prices,
+        need_name=False,
+        need_phone_number=False,
+        need_email=False,
+        need_shipping_address=False,
+        is_flexible=False,
+    )
+
+async def precheckout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверка перед оплатой"""
+    query = update.pre_checkout_query
+    if query.invoice_payload.startswith("donation_"):
+        await query.answer(ok=True)
+    else:
+        await query.answer(ok=False, error_message="Что-то пошло не так")
+
+async def successful_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка успешной оплаты"""
+    user = update.effective_user
+    payment = update.message.successful_payment
+    
+    amount = payment.total_amount
+    
+    log_user_action(user.id, user.username, user.first_name, "donate_success", str(amount))
+    
+    # Отправляем благодарность пользователю
+    await update.message.reply_text(
+        f"✅ **Спасибо за поддержку!**\n\n"
+        f"Вы отправили {amount} ⭐ Stars.\n"
+        f"Ваша помощь очень ценится и помогает развивать бота! 🙏",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    
+    # Отправляем уведомление админу
+    await context.bot.send_message(
+        chat_id=ADMIN_ID,
+        text=(
+            f"💰 **Получен донат!**\n\n"
+            f"От: {user.first_name}\n"
+            f"Username: @{user.username if user.username else 'нет'}\n"
+            f"ID: `{user.id}`\n"
+            f"Сумма: {amount} ⭐ Stars"
+        ),
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 # ---------------------- main ----------------------
 
@@ -1032,12 +1270,18 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("subs", show_subscriptions))
     application.add_handler(CommandHandler("stats", show_stats))
+    application.add_handler(CommandHandler("update", update_parsers))
+    application.add_handler(CommandHandler("donate", custom_donate))
+    application.add_handler(CommandHandler("support", donate_command))
     application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(PreCheckoutQueryHandler(precheckout_callback))
+    application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
+    
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     setup_scheduler(application)
 
-    logger.info("🚀 Бот запущен")
+    logger.info("🚀 Бот запущен с поддержкой донатов ⭐")
     application.run_polling()
 
 
