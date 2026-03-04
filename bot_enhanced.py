@@ -182,18 +182,19 @@ def get_events_count_by_category() -> dict:
 
 
 def search_events_by_title(query: str, limit: int = 20):
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
+    q = query.lower()
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT id, title, details, description, event_date, show_time,
                    place, location, price, category, source_url
             FROM events
-            WHERE (title LIKE ? COLLATE NOCASE OR details LIKE ? COLLATE NOCASE)
+            WHERE (LOWER(title) LIKE ? OR LOWER(details) LIKE ? OR LOWER(place) LIKE ?)
               AND event_date >= ?
             ORDER BY event_date, show_time, title
             LIMIT ?
-        """, (f"%{query}%", f"%{query}%", today, limit * SEARCH_MULTIPLIER))
+        """, (f"%{q}%", f"%{q}%", f"%{q}%", today, limit * SEARCH_MULTIPLIER))
         return cursor.fetchall()
 
 
@@ -304,6 +305,14 @@ def add_subscription(user_id: int, category: str, date_type: str):
         conn.commit()
 
 
+def remove_subscription(user_id: int, category: str, date_type: str):
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM subscriptions WHERE user_id = ? AND category = ? AND date_type = ?",
+                       (user_id, category, date_type))
+        conn.commit()
+
+
 def get_user_subscriptions(user_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -382,53 +391,31 @@ def set_pagination(context: ContextTypes.DEFAULT_TYPE, events, title: str, date_
     }
 
 
-def build_page_keyboard(data: dict) -> InlineKeyboardMarkup:
-    """Строит клавиатуру: фильтры по категориям + навигация по страницам."""
+def build_page_keyboard(data: dict):
+    """Клавиатура: фильтры категорий + навигация ◀ 1/5 ▶."""
     events = data["events"]
     page = data["page"]
     per_page = data["per_page"]
     total = len(events)
     max_page = max(0, (total - 1) // per_page)
-
     keyboard = []
-
-    # Кнопки категорий (только если есть несколько категорий)
     category_counts = defaultdict(int)
     for e in events:
-        if e["category"]:
-            category_counts[e["category"]] += 1
-
+        if e["category"]: category_counts[e["category"]] += 1
     if len(category_counts) > 1:
         row = []
         for cat_key, cat_name in CATEGORY_NAMES.items():
             if cat_key in category_counts:
-                row.append(InlineKeyboardButton(
-                    f"{cat_name} ({category_counts[cat_key]})",
-                    callback_data=f"filter_{cat_key}"
-                ))
-                if len(row) == 2:
-                    keyboard.append(row)
-                    row = []
-        if row:
-            keyboard.append(row)
-
-    # Навигация: ◀️  1/5  ▶️
+                row.append(InlineKeyboardButton(f"{cat_name} ({category_counts[cat_key]})", callback_data=f"filter_{cat_key}"))
+                if len(row) == 2: keyboard.append(row); row = []
+        if row: keyboard.append(row)
     if max_page > 0:
-        nav_row = []
-        if page > 0:
-            nav_row.append(InlineKeyboardButton("◀️ Пред", callback_data="page_prev"))
-        else:
-            nav_row.append(InlineKeyboardButton(" ", callback_data="page_noop"))
-        nav_row.append(InlineKeyboardButton(f"{page + 1}/{max_page + 1}", callback_data="page_noop"))
-        if page < max_page:
-            nav_row.append(InlineKeyboardButton("След ▶️", callback_data="page_next"))
-        else:
-            nav_row.append(InlineKeyboardButton(" ", callback_data="page_noop"))
-        keyboard.append(nav_row)
-
+        keyboard.append([
+            InlineKeyboardButton("◀️", callback_data="page_prev") if page > 0 else InlineKeyboardButton(" ", callback_data="page_noop"),
+            InlineKeyboardButton(f"{page + 1}/{max_page + 1}", callback_data="page_noop"),
+            InlineKeyboardButton("▶️", callback_data="page_next") if page < max_page else InlineKeyboardButton(" ", callback_data="page_noop"),
+        ])
     return InlineKeyboardMarkup(keyboard) if keyboard else None
-
-
 async def show_page(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     data = context.user_data.get("pagination")
     if not data:
@@ -438,7 +425,6 @@ async def show_page(update_or_query, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update_or_query.answer(msg, show_alert=True)
         return
-
     events, page, per_page = data["events"], data["page"], data["per_page"]
     total = len(events)
     if total == 0:
@@ -449,104 +435,64 @@ async def show_page(update_or_query, context: ContextTypes.DEFAULT_TYPE):
             await update_or_query.answer()
             await update_or_query.message.reply_text(msg)
         return
-
     max_page = (total - 1) // per_page
     page = max(0, min(page, max_page))
     data["page"] = page
     chunk = events[page * per_page:(page + 1) * per_page]
-
     if isinstance(update_or_query, Update):
         await update_or_query.message.chat.send_action(action="typing")
         send = update_or_query.message.reply_text
     else:
         await update_or_query.answer()
         send = update_or_query.message.reply_text
-
-    # Собираем все события страницы в одно сообщение
     lines = []
-    if data["title"]:
-        lines.append(data["title"])
-    if data.get("date_info"):
-        lines.append(data["date_info"])
+    if data.get("title"): lines.append(data["title"])
+    if data.get("date_info"): lines.append(data["date_info"])
     lines.append(f"Найдено: {total} | Стр. {page + 1}/{max_page + 1}")
     lines.append("")
-
     cinema_events = [e for e in chunk if e["category"] == "cinema"]
     other_events = [e for e in chunk if e["category"] != "cinema"]
-
     if cinema_events:
-        for text in format_grouped_cinema_events(group_cinema_events(cinema_events)):
-            lines.append(text)
-            lines.append(f"🔗 afisha.relax.by/kino/minsk/")
-            lines.append("")
-
-    for i, event in enumerate(other_events, start=len(cinema_events) + 1):
+        for t in format_grouped_cinema_events(group_cinema_events(cinema_events)):
+            lines.append(t); lines.append("🔗 afisha.relax.by/kino/minsk/"); lines.append("")
+    for event in other_events:
         lines.append(format_event_text(event))
-        if event.get("source_url"):
-            lines.append(f"🔗 {event['source_url']}")
+        url = event["source_url"]
+        if url: lines.append(f"🔗 {url}")
         lines.append("")
-
     text = "\n".join(lines).strip()
-
-    # Разбиваем если > 4096 символов (лимит Telegram)
     keyboard = build_page_keyboard(data)
-
-    if len(text) <= 4096:
-        await send(text, reply_markup=keyboard, parse_mode="Markdown",
-                   disable_web_page_preview=True)
+    if len(text) <= 4000:
+        await send(text, reply_markup=keyboard, parse_mode="Markdown", disable_web_page_preview=True)
     else:
-        # Слишком длинное — отправляем события по одному, кнопки к последнему
-        header = f"{data['title']}\nНайдено: {total} | Стр. {page + 1}/{max_page + 1}"
-        await send(header, parse_mode="Markdown")
-
+        await send(f"{data.get('title', '')}\nНайдено: {total} | Стр. {page + 1}/{max_page + 1}", parse_mode="Markdown")
         all_items = []
         if cinema_events:
             for t in format_grouped_cinema_events(group_cinema_events(cinema_events)):
                 all_items.append((t, "https://afisha.relax.by/kino/minsk/"))
         for event in other_events:
-            all_items.append((format_event_text(event), event.get("source_url", "")))
-
+            all_items.append((format_event_text(event), event["source_url"] or ""))
         for idx, (item_text, url) in enumerate(all_items):
-            msg_text = item_text
-            if url:
-                msg_text += f"\n🔗 {url}"
             is_last = idx == len(all_items) - 1
-            await send(msg_text,
+            await send(item_text + (f"\n🔗 {url}" if url else ""),
                        reply_markup=keyboard if is_last else None,
-                       parse_mode="Markdown",
-                       disable_web_page_preview=True)
-
-
+                       parse_mode="Markdown", disable_web_page_preview=True)
 
 
 # ---------------------- Календарь ----------------------
 
 
 def build_calendar_keyboard(year: int, month: int, available_dates: set) -> InlineKeyboardMarkup:
-    """Строит инлайн-клавиатуру с календарём на месяц."""
-    import calendar
-    MONTH_NAMES = [
-        "", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
-        "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"
+    import calendar as cal_module
+    MONTH_NAMES = ["", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+                   "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
+    keyboard = [
+        [InlineKeyboardButton("◀", callback_data=f"cal_prev_{year}_{month}"),
+         InlineKeyboardButton(f"{MONTH_NAMES[month]} {year}", callback_data="page_noop"),
+         InlineKeyboardButton("▶", callback_data=f"cal_next_{year}_{month}")],
+        [InlineKeyboardButton(d, callback_data="page_noop") for d in ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]]
     ]
-    keyboard = []
-
-    # Заголовок: ◀ Март 2026 ▶
-    keyboard.append([
-        InlineKeyboardButton("◀", callback_data=f"cal_prev_{year}_{month}"),
-        InlineKeyboardButton(f"{MONTH_NAMES[month]} {year}", callback_data="page_noop"),
-        InlineKeyboardButton("▶", callback_data=f"cal_next_{year}_{month}"),
-    ])
-
-    # Дни недели
-    keyboard.append([
-        InlineKeyboardButton(d, callback_data="page_noop")
-        for d in ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-    ])
-
-    # Дни месяца
-    cal = calendar.monthcalendar(year, month)
-    for week in cal:
+    for week in cal_module.monthcalendar(year, month):
         row = []
         for day in week:
             if day == 0:
@@ -558,30 +504,23 @@ def build_calendar_keyboard(year: int, month: int, available_dates: set) -> Inli
                 else:
                     row.append(InlineKeyboardButton(f"·{day}", callback_data="page_noop"))
         keyboard.append(row)
-
     return InlineKeyboardMarkup(keyboard)
 
 
-def get_available_dates(months_ahead: int = 3) -> set:
-    """Возвращает множество дат из БД на ближайшие N месяцев."""
+def get_available_dates() -> set:
     today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT DISTINCT event_date FROM events WHERE event_date >= ? ORDER BY event_date", (today,))
+        cursor.execute("SELECT DISTINCT event_date FROM events WHERE event_date >= ?", (today,))
         return {row["event_date"] for row in cursor.fetchall()}
 
 
 async def show_calendar(update_or_query, context: ContextTypes.DEFAULT_TYPE, year: int = None, month: int = None):
     now = datetime.now(MINSK_TZ)
-    if year is None:
-        year = now.year
-    if month is None:
-        month = now.month
-
-    available = get_available_dates()
-    keyboard = build_calendar_keyboard(year, month, available)
-
-    text = "🗓 Выберите дату:"
+    year = year or now.year
+    month = month or now.month
+    keyboard = build_calendar_keyboard(year, month, get_available_dates())
+    text = "🗓 Выберите дату (активны даты с событиями):"
     if isinstance(update_or_query, Update):
         await update_or_query.message.reply_text(text, reply_markup=keyboard)
     else:
@@ -590,6 +529,7 @@ async def show_calendar(update_or_query, context: ContextTypes.DEFAULT_TYPE, yea
             await update_or_query.edit_message_text(text, reply_markup=keyboard)
         except Exception:
             await update_or_query.message.reply_text(text, reply_markup=keyboard)
+
 
 # ---------------------- UI-хелперы ----------------------
 
@@ -652,18 +592,21 @@ async def send_subscription_prompt(query_or_update, category: str, date_type: st
 
 
 async def show_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    subs = get_user_subscriptions(update.effective_user.id)
+    user_id = update.effective_user.id
+    subs = get_user_subscriptions(user_id)
     if not subs:
-        await update.message.reply_text("У вас пока нет активных подписок 🔔")
+        await update.message.reply_text("У вас пока нет активных подписок 🔔\n\nПодписаться можно через меню 🎯 Категории")
         return
     dt_names = {"today": "на сегодня", "tomorrow": "на завтра", "upcoming": "на ближайшие дни", "weekend": "на выходные"}
-    lines = ["🔔 **Ваши подписки:**"] + [
-        f"• {CATEGORY_NAMES.get(s['category'], s['category'])} {dt_names.get(s['date_type'], s['date_type'])}"
-        for s in subs
-    ]
-    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-
+    keyboard = []
+    lines = ["🔔 Ваши подписки:"]
+    for s in subs:
+        cat_name = CATEGORY_NAMES.get(s["category"], s["category"])
+        dt_name = dt_names.get(s["date_type"], s["date_type"])
+        lines.append(f"• {cat_name} {dt_name}")
+        keyboard.append([InlineKeyboardButton(f"🔕 Отписаться: {cat_name} {dt_name}",
+                                               callback_data=f"unsub_{s['category']}_{s['date_type']}")])
+    await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard))
 async def send_subscriptions_digest(bot, date_type: str):
     """Рассылает дайджест подписчикам после обновления парсеров."""
     logger.info(f"📬 Рассылка дайджеста: {date_type}")
@@ -713,12 +656,16 @@ async def send_subscriptions_digest(bot, date_type: str):
 
         message_text = "\n".join(lines)
 
+        unsubscribe_keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔕 Отписаться", callback_data=f"unsub_{category}_{date_type}")
+        ]])
         for user_id in user_ids:
             try:
                 await bot.send_message(chat_id=user_id, text=message_text,
+                                       reply_markup=unsubscribe_keyboard,
                                        parse_mode="Markdown", disable_web_page_preview=True)
                 sent_count += 1
-                await asyncio.sleep(0.05)  # защита от flood limit
+                await asyncio.sleep(0.05)
             except Exception as e:
                 error_count += 1
                 logger.warning(f"Не удалось отправить подписчику {user_id}: {e}")
@@ -759,7 +706,8 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ])
     
     for row in stats["top_actions"]:
-        lines.append(f"  {row['action']} — {row['cnt']}")
+        import html
+        lines.append(f"  {html.escape(str(row['action']))} — {row['cnt']}")
     
     await update.message.reply_text(
         "\n".join(lines), 
@@ -846,21 +794,14 @@ async def update_parsers(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Формируем ответ
             response = [
                 f"✅ Обновление завершено! ⏱ {elapsed:.0f} сек",
-                f"📊 **Статистика парсеров:**",
-                f"   • Всего запущено: {parsers_stats['total']}",
-                f"   • ✅ Успешно: {parsers_stats['success']}",
-                f"   • ❌ Ошибок: {parsers_stats['failed']}",
+                f"📊 Статистика: запущено {parsers_stats['total']}, ✅ {parsers_stats['success']}, ❌ {parsers_stats['failed']}",
                 "",
-                "📋 **Детали:**"
+                "📋 Детали:"
             ]
-            
-            # Добавляем результаты (максимум 15 строк)
             response.extend(unique_lines[:15])
-            
             if len(unique_lines) > 15:
                 response.append(f"...и ещё {len(unique_lines) - 15} строк")
-            
-            await update.message.reply_text("\n".join(response), parse_mode="Markdown")
+            await update.message.reply_text("\n".join(response))
             
         else:
             error_msg = stderr.decode()[:500] if stderr else "неизвестная ошибка"
@@ -1296,14 +1237,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "page_noop":
         await query.answer()
         return
-    if data == "page_next":
-        if "pagination" in context.user_data:
-            context.user_data["pagination"]["page"] += 1
-        await show_page(query, context)
-        return
     if data == "page_prev":
         if "pagination" in context.user_data:
             context.user_data["pagination"]["page"] = max(0, context.user_data["pagination"]["page"] - 1)
+        await show_page(query, context)
+        return
+    if data == "page_next":
+        if "pagination" in context.user_data:
+            context.user_data["pagination"]["page"] += 1
         await show_page(query, context)
         return
     if data.startswith("sub_"):
@@ -1311,7 +1252,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = query.from_user
         add_subscription(user.id, category, date_type)
         log_user_action(user.id, user.username, user.first_name, "subscribe", f"{category}_{date_type}")
+        try:
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔕 Отписаться", callback_data=f"unsub_{category}_{date_type}")
+            ]]))
+        except Exception: pass
         await query.answer("Подписка оформлена 🔔", show_alert=False)
+        return
+    if data.startswith("unsub_"):
+        _, category, date_type = data.split("_", 2)
+        user = query.from_user
+        remove_subscription(user.id, category, date_type)
+        log_user_action(user.id, user.username, user.first_name, "unsubscribe", f"{category}_{date_type}")
+        try:
+            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔔 Подписаться", callback_data=f"sub_{category}_{date_type}")
+            ]]))
+        except Exception: pass
+        await query.answer("Подписка отменена 🔕", show_alert=False)
         return
     if data.startswith("cal_"):
         parts = data.split("_")
@@ -1319,26 +1277,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         year, month = int(parts[2]), int(parts[3])
         if action == "prev":
             month -= 1
-            if month < 1:
-                month = 12
-                year -= 1
+            if month < 1: month = 12; year -= 1
         elif action == "next":
             month += 1
-            if month > 12:
-                month = 1
-                year += 1
+            if month > 12: month = 1; year += 1
         elif action == "day":
             day = int(parts[4])
             date_obj = datetime(year, month, day, tzinfo=MINSK_TZ)
-            events = get_events_by_date_and_category(date_obj)
-            formatted = f"{day:02d}.{month:02d}.{year}"
             user = query.from_user
-            log_user_action(user.id, user.username, user.first_name, "calendar_day", formatted)
+            log_user_action(user.id, user.username, user.first_name, "calendar_day", f"{day:02d}.{month:02d}.{year}")
+            events = get_events_by_date_and_category(date_obj)
             if events:
-                set_pagination(context, events, f"📅 События на {formatted}:")
+                set_pagination(context, events, f"📅 События на {day:02d}.{month:02d}.{year}:")
                 await show_page(query, context)
             else:
-                await query.answer(f"На {formatted} событий нет", show_alert=True)
+                await query.answer(f"На {day:02d}.{month:02d}.{year} событий нет", show_alert=True)
             return
         await show_calendar(query, context, year, month)
         return
