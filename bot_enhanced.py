@@ -768,7 +768,7 @@ async def update_parsers(update: Update, context: ContextTypes.DEFAULT_TYPE):
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
-        elapsed = (datetime.now(MINSK_TZ) - update.message.date.replace(tzinfo=None)).total_seconds()
+        elapsed = (datetime.now(MINSK_TZ) - update.message.date.astimezone(MINSK_TZ)).total_seconds()
         
         if process.returncode == 0:
             output = stdout.decode("utf-8", errors="replace")
@@ -1378,3 +1378,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
