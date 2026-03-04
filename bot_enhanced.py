@@ -83,6 +83,7 @@ CATEGORY_NAMES = {
 def get_db_connection():
     conn = sqlite3.connect(DB_NAME)
     conn.row_factory = sqlite3.Row
+    conn.create_function("pylow", 1, lambda s: s.lower() if s else "")
     try:
         yield conn
     finally:
@@ -192,7 +193,7 @@ def search_events_by_title(query: str, limit: int = 20):
             SELECT id, title, details, description, event_date, show_time,
                    place, location, price, category, source_url
             FROM events
-            WHERE (LOWER(title) LIKE ? OR LOWER(details) LIKE ? OR LOWER(place) LIKE ?)
+            WHERE (pylow(title) LIKE ? OR pylow(details) LIKE ? OR pylow(place) LIKE ?)
               AND event_date >= ?
             ORDER BY event_date, show_time, title
             LIMIT ?
