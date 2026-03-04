@@ -211,72 +211,53 @@ class TicketproParser:
         
         return norm
 
-    def event_exists_in_db(self, title: str, event_date: Optional[str], 
-                          category: str, place: str, show_time: str) -> bool:
-        """Проверяет, есть ли похожее событие в базе (с учётом дубликатов Relax)."""
-        if not title or not event_date:
-            return False
-        
-        # 1. Проверка по дата+категория+место+время (самый точный метод)
-        if place and show_time:
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT id FROM events 
-                WHERE event_date = ? AND category = ? AND place = ? AND show_time = ?
-                AND source_name != 'ticketpro.by'
-                LIMIT 1
-            """, (event_date, category, place, show_time))
-            exists = cursor.fetchone() is not None
-            conn.close()
-            if exists:
-                logger.debug(f"🎯 Точный дубликат по месту+времени: {title}")
-                self.stats['duplicates_with_relax'] += 1
-                return True
-        
-        # 2. Если точного совпадения нет, проверяем по нормализованному названию
-        norm_title = self.normalize_title(title)
-        
+    def load_relax_index(self) -> dict:
+        """Загружает все non-Ticketpro события одним запросом.
+        Возвращает dict: {event_date: [(norm_title, place, show_time), ...]}
+        """
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        
         cursor.execute("""
-            SELECT title, source_name, place, show_time FROM events 
-            WHERE event_date = ? AND source_name != 'ticketpro.by'
-        """, (event_date,))
-        
-        existing = cursor.fetchall()
+            SELECT title, event_date, place, show_time
+            FROM events
+            WHERE source_name != 'ticketpro.by'
+        """)
+        rows = cursor.fetchall()
         conn.close()
-        
-        for existing_title, source, existing_place, existing_time in existing:
-            norm_existing = self.normalize_title(existing_title)
-            
-            # Если нормализованные названия совпадают
+
+        index = {}
+        for title, date, place, show_time in rows:
+            norm = self.normalize_title(title)
+            index.setdefault(date, []).append((norm, place or "", show_time or ""))
+        return index
+
+    def is_duplicate(self, title: str, event_date: str, place: str,
+                     show_time: str, relax_index: dict) -> bool:
+        """Проверяет дубликат по индексу в памяти — без запросов к БД."""
+        if not title or not event_date:
+            return False
+
+        candidates = relax_index.get(event_date, [])
+        if not candidates:
+            return False
+
+        norm_title = self.normalize_title(title)
+        place = place or ""
+        show_time = show_time or ""
+
+        for norm_existing, ex_place, ex_time in candidates:
+            # Точное совпадение место+время
+            if place and show_time and ex_place == place and ex_time == show_time:
+                self.stats['duplicates_with_relax'] += 1
+                return True
+            # Точное совпадение нормализованного названия
             if norm_title == norm_existing:
-                logger.debug(f"🔄 Дубликат с {source}: {title} == {existing_title}")
                 self.stats['duplicates_with_relax'] += 1
                 return True
-            
-            # Проверяем частичное совпадение для длинных названий
-            if len(norm_title) > 10 and len(norm_existing) > 10:
-                if norm_title in norm_existing or norm_existing in norm_title:
-                    if abs(len(norm_title) - len(norm_existing)) < 30:
-                        logger.debug(f"⚠️ Похожее с {source}: {title} ~ {existing_title}")
-                        self.stats['duplicates_with_relax'] += 1
-                        return True
-            
-            # Извлекаем базовое имя (до первого разделителя)
-            base_title = re.split(r'[—–\-:«]', norm_title)[0].strip()
-            base_existing = re.split(r'[—–\-:«]', norm_existing)[0].strip()
-            
-            if base_title == base_existing and len(base_title) > 8:
-                logger.debug(f"🎯 База совпадает с {source}: {title} ~ {existing_title}")
-                self.stats['duplicates_with_relax'] += 1
-                return True
-        
+
         return False
 
-    def parse_event_from_html(self, event_html, category: str, display_name: str) -> Optional[Dict]:
+    def parse_event_from_html(self, event_html, category: str, display_name: str, relax_index: dict = None) -> Optional[Dict]:
         try:
             title_tag = event_html.find('div', class_='event-box__title')
             if not title_tag:
@@ -315,8 +296,8 @@ class TicketproParser:
             link_tag = event_html.find('a', class_='btn-pink', href=True)
             event_url = self.base_url + link_tag['href'] if link_tag and link_tag.get('href') else self.base_url
 
-            # Проверка на дубликат с Relax (теперь с местом и временем)
-            if self.event_exists_in_db(title, event_date, category, place, show_time):
+            # Проверка на дубликат с Relax (в памяти, без SQL)
+            if relax_index is not None and self.is_duplicate(title, event_date, place, show_time, relax_index):
                 return None
 
             description = f"🎫 {title}"
@@ -357,6 +338,8 @@ class TicketproParser:
         base_url = self.base_url + category_url
         max_pages = 50
         
+        relax_index = self.load_relax_index()
+        logger.info(f"📋 Загружено {sum(len(v) for v in relax_index.values())} событий из БД для проверки дублей")
         while page <= max_pages:
             url = f"{base_url}?page={page}" if page > 1 else base_url
             
@@ -381,7 +364,7 @@ class TicketproParser:
             
             for event_box in event_boxes:
                 self.stats['total_events_found'] += 1
-                event = self.parse_event_from_html(event_box, category, display_name)
+                event = self.parse_event_from_html(event_box, category, display_name, relax_index)
                 if event:
                     events.append(event)
             
@@ -422,7 +405,7 @@ class TicketproParser:
         unique_events = []
         
         for event in all_events:
-            key = (event['title'], event['event_date'])
+            key = (event['title'], event['event_date'], event.get('show_time', ''))
             if key in seen:
                 self.stats['duplicates_within_run'] += 1
                 logger.debug(f"🔄 Дубликат в этом запуске: {event['title'][:50]}...")
@@ -486,3 +469,4 @@ class TicketproParser:
 if __name__ == "__main__":
     parser = TicketproParser()
     parser.run()
+
