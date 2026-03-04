@@ -158,7 +158,7 @@ class RelaxBaseParser:
     # ---------------------- Парсинг страницы ----------------------
 
     def parse_page(self, url: str) -> list:
-        event_dict = {}
+        events_raw = []  # все сеансы по порядку, без дедупликации
 
         html = self.fetch_page(url)
         if not html:
@@ -180,6 +180,9 @@ class RelaxBaseParser:
         # Стоп-слова для названий
         stop_titles = {"Купить билет", "Подробнее", "Афиша", "Выставки",
                        "Концерты", "Детям", "Театр", "Кино"}
+
+        # seen — только для точных дублей (title+date+place+time)
+        seen = set()
 
         for block in event_blocks:
             try:
@@ -238,10 +241,8 @@ class RelaxBaseParser:
                     if loc_elem:
                         last_location = loc_elem.get_text(strip=True)
                 elif last_place:
-                    # Используем последнее известное место
                     place = last_place
                 else:
-                    # Место не известно совсем — пропускаем
                     continue
 
                 # Жанр/описание
@@ -255,27 +256,22 @@ class RelaxBaseParser:
 
                 source_url = self.build_url(title_elem.get("href", ""))
 
-                # Дедупликация по ключу (название + дата + место)
-                key = f"{title}_{event_date}_{place}"
-                if key in event_dict:
-                    existing = event_dict[key]
-                    if show_time and not existing["show_time"]:
-                        existing["show_time"] = show_time
-                    if price and not existing["price"]:
-                        existing["price"] = price
-                    if details and not existing["details"]:
-                        existing["details"] = details
-                else:
-                    event_dict[key] = {
-                        "title": title,
-                        "details": details,
-                        "event_date": event_date,
-                        "show_time": show_time,
-                        "place": place,
-                        "location": last_location,
-                        "price": price,
-                        "source_url": source_url,
-                    }
+                # Пропускаем только точные дубли (одинаковый сеанс)
+                dedup_key = (title, event_date, place, show_time)
+                if dedup_key in seen:
+                    continue
+                seen.add(dedup_key)
+
+                events_raw.append({
+                    "title": title,
+                    "details": details,
+                    "event_date": event_date,
+                    "show_time": show_time,
+                    "place": place,
+                    "location": last_location,
+                    "price": price,
+                    "source_url": source_url,
+                })
 
             except Exception as e:
                 logger.error(f"Ошибка при обработке блока: {e}")
@@ -283,7 +279,7 @@ class RelaxBaseParser:
 
         # Собираем итоговый список
         events = []
-        for data in event_dict.values():
+        for data in events_raw:
             description = f"{self.emoji} {data['title']}"
             if data["details"]:
                 description += f"\n📖 {data['details']}"
