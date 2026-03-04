@@ -238,7 +238,9 @@ def get_events_by_date_and_category(target_date: datetime, category: str | None 
             FROM events WHERE event_date = ?
         """
         params = [date_str]
-        if category and category != "all":
+        if category == "free":
+            query += " AND (price = '' OR price IS NULL OR LOWER(price) LIKE '%бесплатн%' OR LOWER(price) LIKE '%свободн%')"
+        elif category and category != "all":
             query += " AND category = ?"
             params.append(category)
         if date_str == today_str:
@@ -253,7 +255,15 @@ def get_upcoming_events(limit: int = 20, category: str | None = None):
     today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        if category and category != "all":
+        if category == "free":
+            cursor.execute("""
+                SELECT id, title, details, description, event_date, show_time,
+                       place, location, price, category, source_url
+                FROM events WHERE event_date >= ?
+                  AND (price = '' OR price IS NULL OR LOWER(price) LIKE '%бесплатн%' OR LOWER(price) LIKE '%свободн%')
+                ORDER BY event_date, show_time, title LIMIT ?
+            """, (today, limit * SEARCH_MULTIPLIER))
+        elif category and category != "all":
             cursor.execute("""
                 SELECT id, title, details, description, event_date, show_time,
                        place, location, price, category, source_url
@@ -278,7 +288,15 @@ def get_weekend_events(category: str | None = None):
     saturday_str, sunday_str = saturday.strftime("%Y-%m-%d"), sunday.strftime("%Y-%m-%d")
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        if category and category != "all":
+        if category == "free":
+            cursor.execute("""
+                SELECT id, title, details, description, event_date, show_time,
+                       place, location, price, category, source_url
+                FROM events WHERE event_date IN (?, ?)
+                  AND (price = '' OR price IS NULL OR LOWER(price) LIKE '%бесплатн%' OR LOWER(price) LIKE '%свободн%')
+                ORDER BY event_date, show_time, title
+            """, (saturday_str, sunday_str))
+        elif category and category != "all":
             cursor.execute("""
                 SELECT id, title, details, description, event_date, show_time,
                        place, location, price, category, source_url
@@ -890,7 +908,7 @@ def setup_scheduler(application):
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         run_parsers_job,
-        trigger=CronTrigger(hour=3, minute=0),  # UTC = 6:00 Минск
+        trigger=CronTrigger(hour=5, minute=0),  # UTC+3 = 8:00 Минск
         kwargs={"bot": application.bot},
         id="daily_parsers",
         replace_existing=True,
@@ -1237,89 +1255,96 @@ async def handle_simple_buttons(query, context: ContextTypes.DEFAULT_TYPE, data:
 
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    data = query.data
+    try:
+        query = update.callback_query
+        data = query.data
 
-    if data == "show_donate":
-        await query.answer()
-        user = query.from_user
-        log_user_action(user.id, user.username, user.first_name, "donate_menu")
-        await query.message.reply_text(DONATE_TEXT, reply_markup=InlineKeyboardMarkup(_build_donate_keyboard()), parse_mode=ParseMode.MARKDOWN)
-        return
-    if data.startswith("donate_"):
-        await query.answer()
-        await send_star_invoice(update, context, int(data.replace("donate_", "")))
-        return
-    if data.startswith("filter_"):
-        await handle_filter_buttons(query, context, data.replace("filter_", ""))
-        return
-    if data.startswith("date_"):
-        parts = data.split("_")
-        await handle_date_category_buttons(query, context, parts[1], parts[2])
-        return
-    if data == "page_noop":
-        await query.answer()
-        return
-    if data == "page_prev":
-        if "pagination" in context.user_data:
-            context.user_data["pagination"]["page"] = max(0, context.user_data["pagination"]["page"] - 1)
-        await show_page(query, context)
-        return
-    if data == "page_next":
-        if "pagination" in context.user_data:
-            context.user_data["pagination"]["page"] += 1
-        await show_page(query, context)
-        return
-    if data.startswith("sub_"):
-        _, category, date_type = data.split("_", 2)
-        user = query.from_user
-        add_subscription(user.id, category, date_type)
-        log_user_action(user.id, user.username, user.first_name, "subscribe", f"{category}_{date_type}")
-        try:
-            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔕 Отписаться", callback_data=f"unsub_{category}_{date_type}")
-            ]]))
-        except Exception: pass
-        await query.answer("Подписка оформлена 🔔", show_alert=False)
-        return
-    if data.startswith("unsub_"):
-        _, category, date_type = data.split("_", 2)
-        user = query.from_user
-        remove_subscription(user.id, category, date_type)
-        log_user_action(user.id, user.username, user.first_name, "unsubscribe", f"{category}_{date_type}")
-        try:
-            await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔔 Подписаться", callback_data=f"sub_{category}_{date_type}")
-            ]]))
-        except Exception: pass
-        await query.answer("Подписка отменена 🔕", show_alert=False)
-        return
-    if data.startswith("cal_"):
-        parts = data.split("_")
-        action = parts[1]
-        year, month = int(parts[2]), int(parts[3])
-        if action == "prev":
-            month -= 1
-            if month < 1: month = 12; year -= 1
-        elif action == "next":
-            month += 1
-            if month > 12: month = 1; year += 1
-        elif action == "day":
-            day = int(parts[4])
-            date_obj = datetime(year, month, day, tzinfo=MINSK_TZ)
+        if data == "show_donate":
+            await query.answer()
             user = query.from_user
-            log_user_action(user.id, user.username, user.first_name, "calendar_day", f"{day:02d}.{month:02d}.{year}")
-            events = get_events_by_date_and_category(date_obj)
-            if events:
-                set_pagination(context, events, f"📅 События на {day:02d}.{month:02d}.{year}:")
-                await show_page(query, context)
-            else:
-                await query.answer(f"На {day:02d}.{month:02d}.{year} событий нет", show_alert=True)
+            log_user_action(user.id, user.username, user.first_name, "donate_menu")
+            await query.message.reply_text(DONATE_TEXT, reply_markup=InlineKeyboardMarkup(_build_donate_keyboard()), parse_mode=ParseMode.MARKDOWN)
             return
-        await show_calendar(query, context, year, month)
-        return
-    await handle_simple_buttons(query, context, data)
+        if data.startswith("donate_"):
+            await query.answer()
+            await send_star_invoice(update, context, int(data.replace("donate_", "")))
+            return
+        if data.startswith("filter_"):
+            await handle_filter_buttons(query, context, data.replace("filter_", ""))
+            return
+        if data.startswith("date_"):
+            parts = data.split("_")
+            await handle_date_category_buttons(query, context, parts[1], parts[2])
+            return
+        if data == "page_noop":
+            await query.answer()
+            return
+        if data == "page_prev":
+            if "pagination" in context.user_data:
+                context.user_data["pagination"]["page"] = max(0, context.user_data["pagination"]["page"] - 1)
+            await show_page(query, context)
+            return
+        if data == "page_next":
+            if "pagination" in context.user_data:
+                context.user_data["pagination"]["page"] += 1
+            await show_page(query, context)
+            return
+        if data.startswith("sub_"):
+            _, category, date_type = data.split("_", 2)
+            user = query.from_user
+            add_subscription(user.id, category, date_type)
+            log_user_action(user.id, user.username, user.first_name, "subscribe", f"{category}_{date_type}")
+            try:
+                await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔕 Отписаться", callback_data=f"unsub_{category}_{date_type}")
+                ]]))
+            except Exception: pass
+            await query.answer("Подписка оформлена 🔔", show_alert=False)
+            return
+        if data.startswith("unsub_"):
+            _, category, date_type = data.split("_", 2)
+            user = query.from_user
+            remove_subscription(user.id, category, date_type)
+            log_user_action(user.id, user.username, user.first_name, "unsubscribe", f"{category}_{date_type}")
+            try:
+                await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔔 Подписаться", callback_data=f"sub_{category}_{date_type}")
+                ]]))
+            except Exception: pass
+            await query.answer("Подписка отменена 🔕", show_alert=False)
+            return
+        if data.startswith("cal_"):
+            parts = data.split("_")
+            action = parts[1]
+            year, month = int(parts[2]), int(parts[3])
+            if action == "prev":
+                month -= 1
+                if month < 1: month = 12; year -= 1
+            elif action == "next":
+                month += 1
+                if month > 12: month = 1; year += 1
+            elif action == "day":
+                day = int(parts[4])
+                date_obj = datetime(year, month, day, tzinfo=MINSK_TZ)
+                user = query.from_user
+                log_user_action(user.id, user.username, user.first_name, "calendar_day", f"{day:02d}.{month:02d}.{year}")
+                events = get_events_by_date_and_category(date_obj)
+                if events:
+                    set_pagination(context, events, f"📅 События на {day:02d}.{month:02d}.{year}:")
+                    await show_page(query, context)
+                else:
+                    await query.answer(f"На {day:02d}.{month:02d}.{year} событий нет", show_alert=True)
+                return
+            await show_calendar(query, context, year, month)
+            return
+        await handle_simple_buttons(query, context, data)
 
+    except Exception as e:
+        logger.error(f"button_handler error: {e}", exc_info=True)
+        try:
+            await query.answer("Произошла ошибка, попробуйте ещё раз", show_alert=True)
+        except Exception:
+            pass
 
 # ---------------------- main ----------------------
 
