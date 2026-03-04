@@ -456,11 +456,12 @@ async def show_page(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     other_events = [e for e in chunk if e["category"] != "cinema"]
     if cinema_events:
         for t in format_grouped_cinema_events(group_cinema_events(cinema_events)):
-            lines.append(t); lines.append("🔗 afisha.relax.by/kino/minsk/"); lines.append("")
+            lines.append(t + "\n🔗 [Подробнее](https://afisha.relax.by/kino/minsk/)")
+            lines.append("")
     for event in other_events:
-        lines.append(format_event_text(event))
         url = event["source_url"]
-        if url: lines.append(f"🔗 {url}")
+        suffix = f"\n🔗 [Подробнее]({url})" if url else ""
+        lines.append(format_event_text(event) + suffix)
         lines.append("")
     text = "\n".join(lines).strip()
     keyboard = build_page_keyboard(data)
@@ -471,13 +472,13 @@ async def show_page(update_or_query, context: ContextTypes.DEFAULT_TYPE):
         all_items = []
         if cinema_events:
             for t in format_grouped_cinema_events(group_cinema_events(cinema_events)):
-                all_items.append((t, "https://afisha.relax.by/kino/minsk/"))
+                all_items.append((t + "\n🔗 [Подробнее](https://afisha.relax.by/kino/minsk/)", ""))
         for event in other_events:
-            all_items.append((format_event_text(event), event["source_url"] or ""))
-        for idx, (item_text, url) in enumerate(all_items):
+            url = event["source_url"] or ""
+            all_items.append((format_event_text(event) + (f"\n🔗 [Подробнее]({url})" if url else ""), ""))
+        for idx, (item_text, _) in enumerate(all_items):
             is_last = idx == len(all_items) - 1
-            await send(item_text + (f"\n🔗 {url}" if url else ""),
-                       reply_markup=keyboard if is_last else None,
+            await send(item_text, reply_markup=keyboard if is_last else None,
                        parse_mode="Markdown", disable_web_page_preview=True)
 
 
@@ -494,17 +495,23 @@ def build_calendar_keyboard(year: int, month: int, available_dates: set) -> Inli
          InlineKeyboardButton("▶", callback_data=f"cal_next_{year}_{month}")],
         [InlineKeyboardButton(d, callback_data="page_noop") for d in ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]]
     ]
+    from datetime import date as date_cls
+    today_date = date_cls.today()
     for week in cal_module.monthcalendar(year, month):
         row = []
         for day in week:
             if day == 0:
                 row.append(InlineKeyboardButton(" ", callback_data="page_noop"))
             else:
-                date_str = f"{year}-{month:02d}-{day:02d}"
-                if date_str in available_dates:
-                    row.append(InlineKeyboardButton(str(day), callback_data=f"cal_day_{year}_{month}_{day}"))
+                this_date = date_cls(year, month, day)
+                if this_date < today_date:
+                    row.append(InlineKeyboardButton(" ", callback_data="page_noop"))
                 else:
-                    row.append(InlineKeyboardButton(f"·{day}", callback_data="page_noop"))
+                    date_str = f"{year}-{month:02d}-{day:02d}"
+                    if date_str in available_dates:
+                        row.append(InlineKeyboardButton(str(day), callback_data=f"cal_day_{year}_{month}_{day}"))
+                    else:
+                        row.append(InlineKeyboardButton(f"·{day}", callback_data="page_noop"))
         keyboard.append(row)
     return InlineKeyboardMarkup(keyboard)
 
@@ -556,11 +563,16 @@ async def show_main_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE | None
 
 async def show_categories_menu(query, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
+    counts = get_events_count_by_category()
+    def btn(emoji, name, cat):
+        n = counts.get(cat, 0)
+        label = f"{emoji} {name} ({n})" if n else f"{emoji} {name}"
+        return InlineKeyboardButton(label, callback_data=f"cat_{cat}")
     keyboard = [
-        [InlineKeyboardButton("🎬 Кино", callback_data="cat_cinema"), InlineKeyboardButton("🎵 Концерты", callback_data="cat_concert")],
-        [InlineKeyboardButton("🎭 Театр", callback_data="cat_theater"), InlineKeyboardButton("🖼️ Выставки", callback_data="cat_exhibition")],
-        [InlineKeyboardButton("🧸 Детям", callback_data="cat_kids"), InlineKeyboardButton("⚽ Спорт", callback_data="cat_sport")],
-        [InlineKeyboardButton("🆓 Бесплатно", callback_data="cat_free"), InlineKeyboardButton("◀️ Назад", callback_data="back_to_main")],
+        [btn("🎬", "Кино", "cinema"), btn("🎵", "Концерты", "concert")],
+        [btn("🎭", "Театр", "theater"), btn("🖼️", "Выставки", "exhibition")],
+        [btn("🧸", "Детям", "kids"), btn("⚽", "Спорт", "sport")],
+        [btn("🆓", "Бесплатно", "free"), InlineKeyboardButton("◀️ Назад", callback_data="back_to_main")],
     ]
     await query.edit_message_text("🎯 **Выберите категорию:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
@@ -1112,13 +1124,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if text == "🎯 Категории":
         log_user_action(user.id, user.username, user.first_name, "menu_categories")
+        counts = get_events_count_by_category()
+        def btn(emoji, name, cat):
+            n = counts.get(cat, 0)
+            label = f"{emoji} {name} ({n})" if n else f"{emoji} {name}"
+            return InlineKeyboardButton(label, callback_data=f"cat_{cat}")
         await update.message.reply_text(
             "🎯 **Выберите категорию:**",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🎬 Кино", callback_data="cat_cinema"), InlineKeyboardButton("🎵 Концерты", callback_data="cat_concert")],
-                [InlineKeyboardButton("🎭 Театр", callback_data="cat_theater"), InlineKeyboardButton("🖼️ Выставки", callback_data="cat_exhibition")],
-                [InlineKeyboardButton("🧸 Детям", callback_data="cat_kids"), InlineKeyboardButton("⚽ Спорт", callback_data="cat_sport")],
-                [InlineKeyboardButton("🆓 Бесплатно", callback_data="cat_free"), InlineKeyboardButton("◀️ Назад", callback_data="back_to_main")],
+                [btn("🎬", "Кино", "cinema"), btn("🎵", "Концерты", "concert")],
+                [btn("🎭", "Театр", "theater"), btn("🖼️", "Выставки", "exhibition")],
+                [btn("🧸", "Детям", "kids"), btn("⚽", "Спорт", "sport")],
+                [btn("🆓", "Бесплатно", "free"), InlineKeyboardButton("◀️ Назад", callback_data="back_to_main")],
             ]),
             parse_mode="Markdown",
         )
