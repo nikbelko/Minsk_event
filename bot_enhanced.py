@@ -8,7 +8,7 @@ import re
 import sqlite3
 from contextlib import contextmanager
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 from telegram import (
@@ -28,6 +28,8 @@ from telegram.ext import (
 )
 
 load_dotenv()
+
+MINSK_TZ = timezone(timedelta(hours=3))  # UTC+3
 
 import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
