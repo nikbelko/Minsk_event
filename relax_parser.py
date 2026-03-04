@@ -158,163 +158,100 @@ class RelaxBaseParser:
     # ---------------------- Парсинг страницы ----------------------
 
     def parse_page(self, url: str) -> list:
-        event_dict = {}  # дедупликация: один спектакль/событие = одна запись (как в оригинале)
-
         html = self.fetch_page(url)
         if not html:
             return []
 
         soup = BeautifulSoup(html, "lxml")
+        events = []
+        skip_no_place = skip_no_title = skip_no_date = 0
 
-        # Ищем блоки событий
-        event_blocks = soup.find_all("div", class_=re.compile(r"event|schema|item"))
-        if not event_blocks:
-            event_blocks = soup.find_all("a", href=re.compile(r"/event/|" + self.path.rstrip("/")))
+        # Структура relax.by: schedule__list (день) > schedule__table--movie__item (место+событие)
+        day_blocks = soup.find_all("div", class_="schedule__list")
+        logger.info(f"Найдено дней: {len(day_blocks)}")
 
-        logger.info(f"Найдено блоков: {len(event_blocks)}")
-
-        last_place = None
-        last_location = "Минск"
-        last_date = None
-
-        # Стоп-слова для названий
-        stop_titles = {"Купить билет", "Подробнее", "Афиша", "Выставки",
-                       "Концерты", "Детям", "Театр", "Кино"}
-
-        path_pattern = self.path.rstrip("/").replace("/minsk", "")  # /theatre, /conserts и т.д.
-
-        for block in event_blocks:
-            try:
-                # Находим ссылку с названием
-                if block.name == "a":
-                    title_elem = block
-                else:
-                    title_elem = block.find("a", href=re.compile(r"/event/|" + self.path.rstrip("/")))
-                if not title_elem:
-                    continue
-
-                title = title_elem.get_text(strip=True)
-                if not title or len(title) < 3 or title in stop_titles:
-                    continue
-
-                # Ищем дату через h5 заголовок
-                event_date = None
-                parent = block.find_parent()
-                for _ in range(5):
-                    if not parent:
-                        break
-                    date_header = parent.find_previous("h5")
-                    if date_header:
-                        event_date = self.parse_date_from_header(date_header.get_text())
-                        if event_date:
-                            break
-                    parent = parent.parent
-                if not event_date:
-                    continue
-
-                # Сбрасываем last_place при смене даты
-                if last_date != event_date:
-                    last_place = None
-                    last_location = "Минск"
-                    last_date = event_date
-
-                block_text = block.get_text()
-                show_time = self.extract_time(block_text)
-                price = self.extract_price(block_text)
-
-                # Ищем место в текущем блоке
-                place = None
-                place_elem = block.find(
-                    ["a", "span", "div"],
-                    class_=re.compile(r"place|theatre|venue|location")
-                )
-                if place_elem:
-                    place = self.normalize_place(place_elem.get_text(strip=True))
-
-                if place:
-                    last_place = place
-                    loc_elem = block.find(
-                        ["span", "div"],
-                        class_=re.compile(r"address|street|metro")
-                    )
-                    if loc_elem:
-                        last_location = loc_elem.get_text(strip=True)
-                elif last_place:
-                    place = last_place
-                else:
-                    continue
-
-                # Жанр/описание
-                details = ""
-                details_elem = block.find(
-                    ["div", "span"],
-                    class_=re.compile(r"genre|dscr|desc|type")
-                )
-                if details_elem:
-                    details = details_elem.get_text(strip=True)
-
-                source_url = self.build_url(title_elem.get("href", ""))
-
-                # Дедупликация как в оригинале: один спектакль/событие в день = одна запись
-                event_key = f"{title}_{event_date}_{place}"
-                if event_key in event_dict:
-                    existing = event_dict[event_key]
-                    if show_time and not existing["show_time"]:
-                        existing["show_time"] = show_time
-                    if price and not existing["price"]:
-                        existing["price"] = price
-                    if details and not existing["details"]:
-                        existing["details"] = details
-                else:
-                    event_dict[event_key] = {
-                        "title": title,
-                        "details": details,
-                        "event_date": event_date,
-                        "show_time": show_time,
-                        "place": place,
-                        "location": last_location,
-                        "price": price,
-                        "source_url": source_url,
-                    }
-
-            except Exception as e:
-                logger.error(f"Ошибка при обработке блока: {e}")
+        for day_block in day_blocks:
+            # Дата из h5
+            h5 = day_block.find("h5")
+            if not h5:
+                skip_no_date += 1
+                continue
+            event_date = self.parse_date_from_header(h5.get_text())
+            if not event_date:
+                skip_no_date += 1
                 continue
 
-        # Собираем итоговый список из event_dict
-        events = []
-        for data in event_dict.values():
-            description = f"{self.emoji} {data['title']}"
-            if data["details"]:
-                description += f"\n📖 {data['details']}"
-            if data["location"]:
-                description += f"\n📍 {data['location']}"
-            if data["price"]:
-                description += f"\n💰 {data['price']}"
+            # Каждый movie__item = одно место + одно событие
+            for movie_item in day_block.find_all("div", class_="schedule__table--movie__item"):
+                # Место
+                place_div = movie_item.find("div", class_="schedule__place--fill")
+                if not place_div:
+                    skip_no_place += 1
+                    continue
+                place_a = place_div.find("a", class_="js-schedule__place-link")
+                place = place_a.get_text(strip=True) if place_a else None
+                if not place:
+                    skip_no_place += 1
+                    continue
+                addr_span = place_div.find("span", class_="schedule__place-link")
+                location = addr_span.get_text(strip=True) if addr_span else "Минск"
 
-            events.append({
-                "title": data["title"],
-                "details": data["details"],
-                "description": description,
-                "event_date": data["event_date"],
-                "show_time": data["show_time"],
-                "place": data["place"],
-                "location": data["location"],
-                "price": data["price"],
-                "category": self.category,
-                "source_url": data["source_url"],
-                "source_name": self.source_name,
-            })
+                # Событие
+                item = movie_item.find("div", class_="schedule__item")
+                if not item:
+                    skip_no_title += 1
+                    continue
+                title_a = item.find("a", class_="js-schedule__event-link")
+                if not title_a:
+                    skip_no_title += 1
+                    continue
+                title = title_a.get_text(strip=True)
+                if not title or len(title) < 3:
+                    skip_no_title += 1
+                    continue
 
-            t = data["show_time"] or "     "
-            p = data["price"] or "без цены"
-            logger.info(
-                f"  ✅ {data['event_date']} | {t:5} | "
-                f"{data['title'][:25]:25} | {data['place'][:20]:20} | {p}"
-            )
+                href = title_a.get("href", "")
+                source_url = self.build_url(href)
+
+                details_a = item.find("a", class_="schedule__event-dscr")
+                details = details_a.get_text(strip=True) if details_a else ""
+
+                time_span = item.find("span", class_="schedule__seance-time")
+                show_time = time_span.get_text(strip=True) if time_span else ""
+
+                price_span = item.find("span", class_="seance-price")
+                price = price_span.get_text(strip=True) if price_span else ""
+
+                description = f"{self.emoji} {title}"
+                if details:
+                    description += f"\n📖 {details}"
+                if location:
+                    description += f"\n📍 {location}"
+                if price:
+                    description += f"\n💰 {price}"
+
+                events.append({
+                    "title": title,
+                    "details": details,
+                    "description": description,
+                    "event_date": event_date,
+                    "show_time": show_time,
+                    "place": place,
+                    "location": location,
+                    "price": price,
+                    "category": self.category,
+                    "source_url": source_url,
+                    "source_name": self.source_name,
+                })
+
+                t = show_time or "     "
+                p = price or "без цены"
+                logger.info(f"  ✅ {event_date} | {t:5} | {title[:25]:25} | {place[:20]:20} | {p}")
 
         logger.info(f"Всего найдено {self.clear_label}: {len(events)}")
+        logger.info(f"Пропущено: нет даты={skip_no_date}, нет места={skip_no_place}, нет названия={skip_no_title}")
         return events
+
 
     # ---------------------- Сохранение ----------------------
 

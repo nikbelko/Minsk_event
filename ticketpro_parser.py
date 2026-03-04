@@ -282,7 +282,12 @@ class TicketproParser:
             price_tag = event_html.find('div', class_='event-box__price')
             price_text = price_tag.get_text(strip=True) if price_tag else ''
             price_match = re.search(r'от\s*(\d+[.,]?\d*)\s*BYN', price_text)
-            price = f"от {price_match.group(1)} BYN" if price_match else ""
+            if not price_match:
+                # формат без пробела: "от55,00 BYN"
+                price_match = re.search(r'(\d+[.,]\d*)\s*BYN', price_text)
+                price = f"от {price_match.group(1)} BYN" if price_match else ""
+            else:
+                price = f"от {price_match.group(1)} BYN"
             
             link_tag = event_html.find('a', class_='btn-pink', href=True)
             event_url = self.base_url + link_tag['href'] if link_tag and link_tag.get('href') else self.base_url
@@ -452,8 +457,13 @@ class TicketproParser:
             for cat, count in self.stats['by_category'].items():
                 logger.info(f"     {cat}: {count}")
             logger.info(f"\n   💾 Сохранено в БД: {saved}")
+            print(f"   📊 Результаты:")
+            print(f"      ✅ Добавлено новых событий: {saved}")
+            print(f"      🔁 Дубликатов с Relax: {self.stats['duplicates_with_relax']}")
+            print(f"      ❌ Не Минск: {self.stats['filtered_out']}")
         else:
             logger.warning("❌ События не найдены")
+            print("   ⚠️ Ticketpro: события не найдены")
         logger.info("="*60)
 
 if __name__ == "__main__":
