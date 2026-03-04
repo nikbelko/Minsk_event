@@ -183,6 +183,7 @@ class RelaxBaseParser:
 
         # seen — только для точных дублей (title+date+place+time)
         seen = set()
+        path_pattern = self.path.rstrip("/").replace("/minsk", "")  # /theatre, /conserts и т.д.
 
         for block in event_blocks:
             try:

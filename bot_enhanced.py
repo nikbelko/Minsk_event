@@ -800,7 +800,7 @@ async def update_parsers(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     result_lines.append(clean)
                 
                 # Ищем успешные завершения
-                elif "✅" in clean and "завершен успешно" in clean:
+                elif "✅" in clean and ("завершен успешно" in clean or "завершён успешно" in clean):
                     parsers_stats['success'] += 1
                     result_lines.append(clean)
                 
@@ -815,6 +815,14 @@ async def update_parsers(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if len(result_lines) < 20:  # Лимит на количество строк
                         result_lines.append(clean)
                 
+                # PARSER_STATS итоговая строка из run_all_parsers
+                elif clean.startswith("PARSER_STATS:"):
+                    parts = clean.split(":")
+                    if len(parts) == 4:
+                        parsers_stats['success'] = int(parts[1])
+                        parsers_stats['failed'] = int(parts[2])
+                        parsers_stats['total'] = int(parts[3])
+
                 # Показываем важные предупреждения
                 elif "⚠️" in clean:
                     result_lines.append(clean)
@@ -1378,4 +1386,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
