@@ -158,7 +158,7 @@ class RelaxBaseParser:
     # ---------------------- Парсинг страницы ----------------------
 
     def parse_page(self, url: str) -> list:
-        events_raw = []  # все сеансы по порядку, без дедупликации
+        event_dict = {}  # дедупликация: один спектакль/событие = одна запись (как в оригинале)
 
         html = self.fetch_page(url)
         if not html:
@@ -181,8 +181,6 @@ class RelaxBaseParser:
         stop_titles = {"Купить билет", "Подробнее", "Афиша", "Выставки",
                        "Концерты", "Детям", "Театр", "Кино"}
 
-        # seen — только для точных дублей (title+date+place+time)
-        seen = set()
         path_pattern = self.path.rstrip("/").replace("/minsk", "")  # /theatre, /conserts и т.д.
 
         for block in event_blocks:
@@ -257,30 +255,35 @@ class RelaxBaseParser:
 
                 source_url = self.build_url(title_elem.get("href", ""))
 
-                # Пропускаем только точные дубли (одинаковый сеанс)
-                dedup_key = (title, event_date, place, show_time)
-                if dedup_key in seen:
-                    continue
-                seen.add(dedup_key)
-
-                events_raw.append({
-                    "title": title,
-                    "details": details,
-                    "event_date": event_date,
-                    "show_time": show_time,
-                    "place": place,
-                    "location": last_location,
-                    "price": price,
-                    "source_url": source_url,
-                })
+                # Дедупликация как в оригинале: один спектакль/событие в день = одна запись
+                event_key = f"{title}_{event_date}_{place}"
+                if event_key in event_dict:
+                    existing = event_dict[event_key]
+                    if show_time and not existing["show_time"]:
+                        existing["show_time"] = show_time
+                    if price and not existing["price"]:
+                        existing["price"] = price
+                    if details and not existing["details"]:
+                        existing["details"] = details
+                else:
+                    event_dict[event_key] = {
+                        "title": title,
+                        "details": details,
+                        "event_date": event_date,
+                        "show_time": show_time,
+                        "place": place,
+                        "location": last_location,
+                        "price": price,
+                        "source_url": source_url,
+                    }
 
             except Exception as e:
                 logger.error(f"Ошибка при обработке блока: {e}")
                 continue
 
-        # Собираем итоговый список
+        # Собираем итоговый список из event_dict
         events = []
-        for data in events_raw:
+        for data in event_dict.values():
             description = f"{self.emoji} {data['title']}"
             if data["details"]:
                 description += f"\n📖 {data['details']}"

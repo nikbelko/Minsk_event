@@ -212,23 +212,20 @@ class TicketproParser:
         return norm
 
     def load_relax_index(self) -> dict:
-        """Загружает все non-Ticketpro события одним запросом.
-        Возвращает dict: {event_date: [(norm_title, place, show_time), ...]}
-        """
+        """Загружает все non-Ticketpro события одним запросом в память."""
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("""
             SELECT title, event_date, place, show_time
-            FROM events
-            WHERE source_name != 'ticketpro.by'
+            FROM events WHERE source_name != 'ticketpro.by'
         """)
         rows = cursor.fetchall()
         conn.close()
-
         index = {}
         for title, date, place, show_time in rows:
             norm = self.normalize_title(title)
             index.setdefault(date, []).append((norm, place or "", show_time or ""))
+        logger.info(f"📋 Загружено {sum(len(v) for v in index.values())} событий из БД для проверки дублей")
         return index
 
     def is_duplicate(self, title: str, event_date: str, place: str,
@@ -236,25 +233,19 @@ class TicketproParser:
         """Проверяет дубликат по индексу в памяти — без запросов к БД."""
         if not title or not event_date:
             return False
-
         candidates = relax_index.get(event_date, [])
         if not candidates:
             return False
-
         norm_title = self.normalize_title(title)
         place = place or ""
         show_time = show_time or ""
-
         for norm_existing, ex_place, ex_time in candidates:
-            # Точное совпадение место+время
             if place and show_time and ex_place == place and ex_time == show_time:
                 self.stats['duplicates_with_relax'] += 1
                 return True
-            # Точное совпадение нормализованного названия
             if norm_title == norm_existing:
                 self.stats['duplicates_with_relax'] += 1
                 return True
-
         return False
 
     def parse_event_from_html(self, event_html, category: str, display_name: str, relax_index: dict = None) -> Optional[Dict]:
@@ -339,7 +330,6 @@ class TicketproParser:
         max_pages = 50
         
         relax_index = self.load_relax_index()
-        logger.info(f"📋 Загружено {sum(len(v) for v in relax_index.values())} событий из БД для проверки дублей")
         while page <= max_pages:
             url = f"{base_url}?page={page}" if page > 1 else base_url
             
@@ -469,4 +459,3 @@ class TicketproParser:
 if __name__ == "__main__":
     parser = TicketproParser()
     parser.run()
-
