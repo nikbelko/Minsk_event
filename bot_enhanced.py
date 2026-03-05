@@ -419,6 +419,8 @@ def format_grouped_cinema_events(grouped):
 def pre_group_for_pagination(events: list) -> list:
     """Группирует кино ДО пагинации — один фильм в один день = одна запись.
     Остальные категории остаются как есть."""
+    # sqlite3.Row не поддерживает .get() — конвертируем в dict
+    events = [dict(e) if not isinstance(e, dict) else e for e in events]
     cinema = [e for e in events if e.get("category") == "cinema"]
     other  = [e for e in events if e.get("category") != "cinema"]
     if not cinema:
