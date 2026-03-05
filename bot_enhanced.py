@@ -426,9 +426,8 @@ def pre_group_for_pagination(events: list) -> list:
     other  = [e for e in events if e.get("category") != "cinema"]
     if not cinema:
         return events
-    grouped_items = format_grouped_cinema_events(group_cinema_events(cinema))
-    result = [{"_pre_formatted": True, "text": t, "url": u, "category": "cinema"}
-              for t, u in grouped_items]
+    grouped_texts = format_grouped_cinema_events(group_cinema_events(cinema))
+    result = [{"_pre_formatted": True, "text": t, "category": "cinema"} for t in grouped_texts]
     result.extend(other)
     return result
 
@@ -504,8 +503,7 @@ async def show_page(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     lines.append("")
     for item in chunk:
         if item.get("_pre_formatted"):
-            film_url = item.get("url") or "https://afisha.relax.by/kino/minsk/"
-            lines.append(item["text"] + f"\n🔗 <a href=\"{film_url}\">Подробнее</a>")
+            lines.append(item["text"] + "\n🔗 <a href=\"https://afisha.relax.by/kino/minsk/\">Подробнее</a>")
         else:
             url = item.get("source_url", "")
             suffix = f"\n🔗 <a href=\"{url}\">Подробнее</a>" if url else ""
@@ -521,8 +519,7 @@ async def show_page(update_or_query, context: ContextTypes.DEFAULT_TYPE):
         all_texts = []
         for item in chunk:
             if item.get("_pre_formatted"):
-                film_url = item.get("url") or "https://afisha.relax.by/kino/minsk/"
-                all_texts.append(item["text"] + f"\n🔗 <a href=\"{film_url}\">Подробнее</a>")
+                all_texts.append(item["text"] + "\n🔗 <a href=\"https://afisha.relax.by/kino/minsk/\">Подробнее</a>")
             else:
                 url = item.get("source_url", "") or ""
                 suffix = f"\n🔗 <a href=\"{url}\">Подробнее</a>" if url else ""
@@ -722,9 +719,8 @@ async def send_subscriptions_digest(bot, date_type: str):
         lines = [f"🔔 **{display_name} на {period_label}** — {len(events)} событий\n"]
 
         if category == "cinema":
-            for text, url in format_grouped_cinema_events(group_cinema_events(preview)):
-                link = f"\n🔗 <a href=\"{url}\">Подробнее</a>" if url else ""
-                lines.append(text + link + "\n")
+            for text in format_grouped_cinema_events(group_cinema_events(preview)):
+                lines.append(text + "\n")
         else:
             for event in preview:
                 lines.append(format_event_text(event) + "\n")
