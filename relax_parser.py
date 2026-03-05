@@ -467,91 +467,84 @@ class RelaxKinoParser(RelaxBaseParser):
             return []
 
         soup = BeautifulSoup(html, "lxml")
-        current_date = datetime.now().strftime("%Y-%m-%d")
         movies = []
+        seen = set()  # дедупликация (title, date, time, place)
 
-        cinema_blocks = soup.find_all("div", class_="schedule__place--fill")
-        cinema_blocks += soup.find_all("div", class_="schedule__place--empty")
-        logger.info(f"Найдено кинотеатров: {len(cinema_blocks)}")
-
-        for cinema_block in cinema_blocks:
-            # Название кинотеатра
-            name_elem = cinema_block.find("a", class_="js-schedule__place-link")
-            place = name_elem.get_text(strip=True) if name_elem else None
-            if not place or place == "Кинотеатр":
+        # Структура: schedule__list (день) > schedule__table--movie >
+        #   schedule__table--movie__item (FILL|EMPTY + schedule__item)
+        # Один FILL задаёт кинотеатр, следующие EMPTY наследуют его — last_place в рамках таблицы
+        for day_block in soup.find_all("div", class_="schedule__list"):
+            h5 = day_block.find("h5")
+            if not h5:
+                continue
+            event_date = self.parse_date_from_header(h5.get_text())
+            if not event_date:
                 continue
 
-            addr_elem = cinema_block.find("span", class_="schedule__place-link")
-            location = addr_elem.get_text(strip=True) if addr_elem else ""
+            for table in day_block.find_all("div", class_="schedule__table--movie"):
+                last_place = None
+                last_location = "Минск"
 
-            # Идём по следующим элементам до следующего кинотеатра
-            current = cinema_block.find_next()
-            while current:
-                classes = current.get("class", [])
-                if current.name == "div" and (
-                    "schedule__place--fill" in classes or
-                    "schedule__place--empty" in classes
-                ):
-                    break  # следующий кинотеатр
+                for movie_item in table.find_all("div", class_="schedule__table--movie__item"):
+                    # Обновляем кинотеатр если FILL
+                    place_fill = movie_item.find("div", class_="schedule__place--fill")
+                    if place_fill:
+                        place_a = place_fill.find("a", class_="js-schedule__place-link")
+                        if place_a:
+                            last_place = place_a.get_text(strip=True)
+                        addr = place_fill.find("span", class_="schedule__place-link")
+                        last_location = addr.get_text(strip=True) if addr else "Минск"
 
-                if current.name == "div" and "schedule__item" in classes and "table_by_place" in classes:
-                    try:
-                        title_elem = current.find("a", class_="js-schedule__event-link")
-                        if not title_elem:
-                            current = current.find_next()
+                    if not last_place:
+                        continue
+
+                    item = movie_item.find("div", class_="schedule__item")
+                    if not item:
+                        continue
+
+                    title_a = item.find("a", class_="js-schedule__event-link")
+                    if not title_a:
+                        continue
+                    title = title_a.get_text(strip=True)
+                    if not title or len(title) < 3 or title in self.SKIP_TITLES:
+                        continue
+
+                    source_url = self.build_url(title_a.get("href", ""))
+                    details_a = item.find("a", class_="schedule__event-dscr")
+                    details = details_a.get_text(strip=True) if details_a else ""
+
+                    for seance in item.find_all("div", class_="schedule__seance"):
+                        time_span = seance.find("span", class_="schedule__seance-time")
+                        show_time = time_span.get_text(strip=True) if time_span else ""
+                        price_span = seance.find("span", class_="seance-price")
+                        price = price_span.get_text(strip=True) if price_span else ""
+
+                        key = (title, event_date, show_time, last_place)
+                        if key in seen:
                             continue
+                        seen.add(key)
 
-                        title = title_elem.get_text(strip=True)
-                        if not title or len(title) < 3 or title in self.SKIP_TITLES:
-                            current = current.find_next()
-                            continue
+                        description = f"🎬 {title}"
+                        if details:
+                            description += f"\n🎭 {details}"
+                        if last_location:
+                            description += f"\n📍 {last_location}"
+                        if price:
+                            description += f"\n💰 {price}"
 
-                        source_url = self.build_url(title_elem.get("href", ""))
-
-                        details_elem = current.find("a", class_="schedule__event-dscr")
-                        details = details_elem.get_text(strip=True) if details_elem else ""
-
-                        for seance in current.find_all("div", class_="schedule__seance"):
-                            time_elem = seance.find("a", class_="schedule__seance-time")
-                            if not time_elem:
-                                continue
-                            show_time = time_elem.get_text(strip=True)
-                            if not show_time:
-                                continue
-
-                            price_elem = seance.find("span", class_="seance-price")
-                            price = price_elem.get_text(strip=True) if price_elem else ""
-
-                            event_date = (
-                                self._parse_date_attr(time_elem.get("data-date-format", ""))
-                                or current_date
-                            )
-
-                            description = f"🎬 {title}"
-                            if details:
-                                description += f"\n🎭 {details}"
-                            if location:
-                                description += f"\n📍 {location}"
-                            if price:
-                                description += f"\n💰 {price}"
-
-                            movies.append({
-                                "title": title,
-                                "details": details,
-                                "description": description,
-                                "event_date": event_date,
-                                "show_time": show_time,
-                                "place": place,
-                                "location": location,
-                                "price": price,
-                                "category": self.category,
-                                "source_url": source_url,
-                                "source_name": self.source_name,
-                            })
-                    except Exception as e:
-                        logger.error(f"Ошибка при обработке сеанса: {e}")
-
-                current = current.find_next()
+                        movies.append({
+                            "title": title,
+                            "details": details,
+                            "description": description,
+                            "event_date": event_date,
+                            "show_time": show_time,
+                            "place": last_place,
+                            "location": last_location,
+                            "price": price,
+                            "category": self.category,
+                            "source_url": source_url,
+                            "source_name": self.source_name,
+                        })
 
         logger.info(f"Всего найдено сеансов: {len(movies)}")
         return movies

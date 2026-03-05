@@ -916,7 +916,7 @@ def setup_scheduler(application):
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         run_parsers_job,
-        trigger=CronTrigger(hour=5, minute=0),  # UTC+3 = 8:00 Минск
+        trigger=CronTrigger(hour=3, minute=0),  # UTC+3 = 6:00 Минск
         kwargs={"bot": application.bot},
         id="daily_parsers",
         replace_existing=True,
