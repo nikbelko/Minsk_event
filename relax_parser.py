@@ -181,20 +181,26 @@ class RelaxBaseParser:
                 skip_no_date += 1
                 continue
 
+            last_place = None
+            last_location = "Минск"
+
             # Каждый movie__item = одно место + одно событие
             for movie_item in day_block.find_all("div", class_="schedule__table--movie__item"):
-                # Место
+                # Обновляем место только при FILL; EMPTY наследует last_place
                 place_div = movie_item.find("div", class_="schedule__place--fill")
-                if not place_div:
+                if place_div:
+                    place_a = place_div.find("a", class_="js-schedule__place-link")
+                    if place_a:
+                        last_place = place_a.get_text(strip=True)
+                    addr_span = place_div.find("span", class_="schedule__place-link")
+                    last_location = addr_span.get_text(strip=True) if addr_span else "Минск"
+
+                if not last_place:
                     skip_no_place += 1
                     continue
-                place_a = place_div.find("a", class_="js-schedule__place-link")
-                place = place_a.get_text(strip=True) if place_a else None
-                if not place:
-                    skip_no_place += 1
-                    continue
-                addr_span = place_div.find("span", class_="schedule__place-link")
-                location = addr_span.get_text(strip=True) if addr_span else "Минск"
+
+                place = last_place
+                location = last_location
 
                 # Событие
                 item = movie_item.find("div", class_="schedule__item")
@@ -514,10 +520,16 @@ class RelaxKinoParser(RelaxBaseParser):
                     details = details_a.get_text(strip=True) if details_a else ""
 
                     for seance in item.find_all("div", class_="schedule__seance"):
-                        time_span = seance.find("span", class_="schedule__seance-time")
-                        show_time = time_span.get_text(strip=True) if time_span else ""
+                        # время — <a> для активных сеансов, <span> для закрытых (buy-timeout)
+                        time_elem = seance.find("a", class_="schedule__seance-time") or                                     seance.find("span", class_="schedule__seance-time")
+                        show_time = time_elem.get_text(strip=True) if time_elem else ""
+                        # цена — сначала в data-summ, иначе в span
                         price_span = seance.find("span", class_="seance-price")
-                        price = price_span.get_text(strip=True) if price_span else ""
+                        if price_span:
+                            price = price_span.get_text(strip=True)
+                        else:
+                            data_summ = seance.get("data-summ", "").strip()
+                            price = data_summ if data_summ else ""
 
                         key = (title, event_date, show_time, last_place)
                         if key in seen:
