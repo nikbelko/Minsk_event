@@ -416,6 +416,19 @@ def format_grouped_cinema_events(grouped):
 # ---------------------- Пагинация + категории ----------------------
 
 
+def pre_group_for_pagination(events: list) -> list:
+    """Группирует кино ДО пагинации — один фильм в один день = одна запись.
+    Остальные категории остаются как есть."""
+    cinema = [e for e in events if e.get("category") == "cinema"]
+    other  = [e for e in events if e.get("category") != "cinema"]
+    if not cinema:
+        return events
+    grouped_texts = format_grouped_cinema_events(group_cinema_events(cinema))
+    result = [{"_pre_formatted": True, "text": t, "category": "cinema"} for t in grouped_texts]
+    result.extend(other)
+    return result
+
+
 def set_pagination(context: ContextTypes.DEFAULT_TYPE, events, title: str, date_info: str | None = None):
     context.user_data["pagination"] = {
         "events": pre_group_for_pagination(list(events)), "page": 0, "per_page": PER_PAGE,
