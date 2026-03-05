@@ -12,7 +12,6 @@ from collections import defaultdict
 
 import requests
 from bs4 import BeautifulSoup
-from venues import normalize_venue
 
 # ---------------------- Путь к БД ----------------------
 
