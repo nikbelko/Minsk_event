@@ -402,13 +402,14 @@ def format_grouped_cinema_events(grouped):
                     break
             text = f"🎬 <b>{title}</b>"
             if details:
-                details = details[:177] + "..." if len(details) > 180 else details
+                details = details[:100] + "..." if len(details) > 100 else details
                 text += f"\n🎭 {details}"
             text += f"\n📅 {datetime.strptime(date, '%Y-%m-%d').strftime('%d.%m.%Y')}"
+            # Компактный формат: "📍 Кинотеатр: 11:10, 14:30"
             for place, seances in cinemas.items():
                 times = sorted([s["time"] for s in seances if s["time"]])
-                if times:
-                    text += f"\n   ⏰ {', '.join(times)} — {place}"
+                times_str = ", ".join(times) if times else "—"
+                text += f"\n📍 {place}: {times_str}"
             result.append(text)
     return result
 
@@ -513,18 +514,32 @@ async def show_page(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     if len(text) <= 4000:
         await send(text, reply_markup=keyboard, parse_mode="HTML", disable_web_page_preview=True)
     else:
-        await send(f"{data.get('title', '')}\nНайдено: {total} | Стр. {page + 1}/{max_page + 1}", parse_mode="HTML")
-        all_items = []
+        # Текст >4000 — делим на части, склеивая события в блоки до 4000 символов
+        header = f"{data.get('title', '')}\nНайдено: {total} | Стр. {page + 1}/{max_page + 1}\n"
+        all_texts = []
         for item in chunk:
             if item.get("_pre_formatted"):
-                all_items.append((item["text"] + "\n🔗 <a href=\"https://afisha.relax.by/kino/minsk/\">Подробнее</a>", ""))
+                all_texts.append(item["text"] + "\n🔗 <a href=\"https://afisha.relax.by/kino/minsk/\">Подробнее</a>")
             else:
                 url = item.get("source_url", "") or ""
-                all_items.append((format_event_text(item) + (f"\n🔗 <a href=\"{url}\">Подробнее</a>" if url else ""), ""))
-        for idx, (item_text, _) in enumerate(all_items):
-            is_last = idx == len(all_items) - 1
-            await send(item_text, reply_markup=keyboard if is_last else None,
-                       parse_mode="Markdown", disable_web_page_preview=True)
+                suffix = f"\n🔗 <a href=\"{url}\">Подробнее</a>" if url else ""
+                all_texts.append(format_event_text(item) + suffix)
+        # Склеиваем в сообщения до 4000 символов
+        parts = []
+        current = header
+        for t in all_texts:
+            candidate = current + "\n" + t + "\n"
+            if len(candidate) > 4000 and current != header:
+                parts.append(current.strip())
+                current = header + t + "\n"
+            else:
+                current = candidate
+        if current.strip() != header.strip():
+            parts.append(current.strip())
+        for idx, part in enumerate(parts):
+            is_last = idx == len(parts) - 1
+            await send(part, reply_markup=keyboard if is_last else None,
+                       parse_mode="HTML", disable_web_page_preview=True)
 
 
 # ---------------------- Календарь ----------------------
