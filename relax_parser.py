@@ -229,10 +229,15 @@ class RelaxBaseParser:
                 details_a = item.find("a", class_="schedule__event-dscr")
                 details = details_a.get_text(strip=True) if details_a else ""
 
-                # Фикс 2, 4: время — <a> для активных сеансов, <span> для закрытых
+                # Время — <a> для активных сеансов, <span> для закрытых
                 time_elem = (item.find("a", class_="schedule__seance-time") or
                              item.find("span", class_="schedule__seance-time"))
-                show_time = time_elem.get_text(strip=True) if time_elem else ""
+                if time_elem:
+                    raw_time = time_elem.get_text(strip=True)
+                    # Только формат HH:MM — отбрасываем "Купить", "Билеты" и т.п.
+                    show_time = raw_time if re.match(r"^\d{1,2}:\d{2}$", raw_time) else ""
+                else:
+                    show_time = ""
 
                 # Цена: span.seance-price или data-summ на div.schedule__seance
                 price_span = item.find("span", class_="seance-price")
@@ -288,8 +293,20 @@ class RelaxBaseParser:
             deleted = cursor.rowcount
             logger.info(f"Удалено старых записей: {deleted}")
 
-            new_count = 0
+            # Загружаем ключи других relax-категорий чтобы не дублировать
+            # (выставка для детей может попасть и в exhibition и в kids)
+            cursor.execute("""
+                SELECT title, event_date, place FROM events
+                WHERE category != ? AND source_name = 'relax.by'
+            """, (self.category,))
+            existing_other = set((r[0], r[1], r[2]) for r in cursor.fetchall())
+
+            new_count = skip_dup = 0
             for event in events:
+                dup_key = (event["title"], event["event_date"], event["place"])
+                if dup_key in existing_other:
+                    skip_dup += 1
+                    continue
                 try:
                     cursor.execute("""
                         INSERT INTO events (
@@ -308,7 +325,7 @@ class RelaxBaseParser:
 
             conn.commit()
             conn.close()
-            logger.info(f"Сохранено: {new_count}")
+            logger.info(f"Сохранено: {new_count}, пропущено дублей: {skip_dup}")
             return new_count
 
         except Exception as e:

@@ -394,41 +394,86 @@ def format_grouped_cinema_events(grouped):
     result = []
     for title, dates in grouped.items():
         for date, cinemas in dates.items():
-            # Детали берём из первого сеанса
             details = ""
+            film_url = ""
             for seances in cinemas.values():
-                if seances and seances[0]["details"]:
-                    details = seances[0]["details"]
-                    break
+                for s in seances:
+                    if not details and s.get("details"):
+                        details = s["details"]
+                    if not film_url and s.get("url"):
+                        film_url = s["url"]
             text = f"🎬 <b>{title}</b>"
             if details:
                 details = details[:100] + "..." if len(details) > 100 else details
                 text += f"\n🎭 {details}"
             text += f"\n📅 {datetime.strptime(date, '%Y-%m-%d').strftime('%d.%m.%Y')}"
-            # Компактный формат: "📍 Кинотеатр: 11:10, 14:30"
             for place, seances in cinemas.items():
                 times = sorted([s["time"] for s in seances if s["time"]])
                 times_str = ", ".join(times) if times else "—"
                 text += f"\n📍 {place}: {times_str}"
-            result.append(text)
+            result.append((text, film_url))
     return result
 
 
 # ---------------------- Пагинация + категории ----------------------
 
 
+def group_other_events(events: list) -> list:
+    """Группировка для театра/концертов/выставок/детей:
+    title + place → все даты и времена вместе (одна запись в пагинации)."""
+    from collections import OrderedDict
+    EMOJI_MAP = {"theater": "🎭", "concert": "🎵", "exhibition": "🖼️",
+                 "kids": "🧸", "cinema": "🎬"}
+    grouped = OrderedDict()
+    for e in events:
+        key = (e.get("title", ""), e.get("place", ""))
+        if key not in grouped:
+            grouped[key] = {
+                "title": e.get("title", ""), "details": e.get("details", ""),
+                "place": e.get("place", ""), "price": e.get("price", ""),
+                "category": e.get("category", ""), "source_url": e.get("source_url", ""),
+                "dates": []
+            }
+        grouped[key]["dates"].append((e.get("event_date", ""), e.get("show_time", "")))
+        if not grouped[key]["price"] and e.get("price"):
+            grouped[key]["price"] = e["price"]
+
+    result = []
+    for g in grouped.values():
+        cat_emoji = EMOJI_MAP.get(g["category"], "🎉")
+        text = f"{cat_emoji} <b>{g['title']}</b>"
+        if g["details"]:
+            d = g["details"][:100] + "..." if len(g["details"]) > 100 else g["details"]
+            text += f"\n🎭 {d}"
+        if g["place"]:
+            text += f"\n🏢 {g['place']}"
+        if g["price"]:
+            text += f"\n💰 {g['price']}"
+        for date, time in sorted(set(g["dates"])):
+            try:
+                d_fmt = datetime.strptime(date, "%Y-%m-%d").strftime("%d.%m.%Y")
+            except Exception:
+                d_fmt = date
+            text += f"\n📅 {d_fmt}" + (f" ⏰ {time}" if time else "")
+        result.append({"_pre_formatted": True, "text": text,
+                        "url": g["source_url"], "category": g["category"]})
+    return result
+
+
 def pre_group_for_pagination(events: list) -> list:
-    """Группирует кино ДО пагинации — один фильм в один день = одна запись.
-    Остальные категории остаются как есть."""
-    # sqlite3.Row не поддерживает .get() — конвертируем в dict
+    """Группирует события ДО пагинации:
+    - кино: title+date → все кинотеатры/сеансы
+    - остальные: title+place → все даты/времена"""
     events = [dict(e) if not isinstance(e, dict) else e for e in events]
     cinema = [e for e in events if e.get("category") == "cinema"]
     other  = [e for e in events if e.get("category") != "cinema"]
-    if not cinema:
-        return events
-    grouped_texts = format_grouped_cinema_events(group_cinema_events(cinema))
-    result = [{"_pre_formatted": True, "text": t, "category": "cinema"} for t in grouped_texts]
-    result.extend(other)
+    result = []
+    if cinema:
+        grouped_items = format_grouped_cinema_events(group_cinema_events(cinema))
+        result.extend([{"_pre_formatted": True, "text": t, "url": u, "category": "cinema"}
+                       for t, u in grouped_items])
+    if other:
+        result.extend(group_other_events(other))
     return result
 
 
@@ -503,7 +548,8 @@ async def show_page(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     lines.append("")
     for item in chunk:
         if item.get("_pre_formatted"):
-            lines.append(item["text"] + "\n🔗 <a href=\"https://afisha.relax.by/kino/minsk/\">Подробнее</a>")
+            film_url = item.get("url") or "https://afisha.relax.by/kino/minsk/"
+            lines.append(item["text"] + f"\n🔗 <a href=\"{film_url}\">Подробнее</a>")
         else:
             url = item.get("source_url", "")
             suffix = f"\n🔗 <a href=\"{url}\">Подробнее</a>" if url else ""
@@ -519,7 +565,8 @@ async def show_page(update_or_query, context: ContextTypes.DEFAULT_TYPE):
         all_texts = []
         for item in chunk:
             if item.get("_pre_formatted"):
-                all_texts.append(item["text"] + "\n🔗 <a href=\"https://afisha.relax.by/kino/minsk/\">Подробнее</a>")
+                film_url = item.get("url") or "https://afisha.relax.by/kino/minsk/"
+                all_texts.append(item["text"] + f"\n🔗 <a href=\"{film_url}\">Подробнее</a>")
             else:
                 url = item.get("source_url", "") or ""
                 suffix = f"\n🔗 <a href=\"{url}\">Подробнее</a>" if url else ""
@@ -719,11 +766,14 @@ async def send_subscriptions_digest(bot, date_type: str):
         lines = [f"🔔 **{display_name} на {period_label}** — {len(events)} событий\n"]
 
         if category == "cinema":
-            for text in format_grouped_cinema_events(group_cinema_events(preview)):
-                lines.append(text + "\n")
+            for text, url in format_grouped_cinema_events(group_cinema_events(preview)):
+                link = f"\n🔗 <a href=\"{url}\">Подробнее</a>" if url else ""
+                lines.append(text + link + "\n")
         else:
-            for event in preview:
-                lines.append(format_event_text(event) + "\n")
+            grouped_preview = group_other_events([dict(e) if not isinstance(e, dict) else e for e in preview])
+            for item in grouped_preview:
+                link = f"\n🔗 <a href=\"{item['url']}\">Подробнее</a>" if item.get("url") else ""
+                lines.append(item["text"] + link + "\n")
 
         if len(events) > 5:
             lines.append(f"_...и ещё {len(events) - 5} событий. Откройте бот для просмотра всех._")
