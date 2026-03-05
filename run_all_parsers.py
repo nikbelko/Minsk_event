@@ -20,18 +20,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Все Relax-парсеры через единый relax_parser.py, Ticketpro отдельно
 PARSERS = [
-    ("relax_parser.py kino",        "🎬 Кино (Relax)"),
-    ("relax_parser.py theatre",     "🎭 Театр (Relax)"),
-    ("relax_parser.py concert",     "🎵 Концерты (Relax)"),
-    ("relax_parser.py exhibition",  "🖼️ Выставки (Relax)"),
-    ("relax_parser.py kids",        "🧸 Детям (Relax)"),
-    ("ticketpro_parser.py",         "🎫 Ticketpro"),
+    ("relax_parser.py",    "🌐 Relax"),
+    ("ticketpro_parser.py", "🎫 Ticketpro"),
 ]
 
 
-def run_parser(cmd: str, parser_name: str) -> bool:
+def run_parser(cmd: str, parser_name: str) -> tuple[bool, list[str]]:
+    """Возвращает (success, result_lines) где result_lines — список RESULT:... строк."""
     try:
         logger.info(f"▶️ Запуск {parser_name} ({cmd})...")
         result = subprocess.run(
@@ -40,24 +36,28 @@ def run_parser(cmd: str, parser_name: str) -> bool:
         )
         if result.returncode == 0:
             logger.info(f"✅ {parser_name} завершён успешно")
+            result_lines = []
             if result.stdout:
                 for line in result.stdout.strip().split("\n"):
-                    if any(w in line for w in ["✅", "❌", "📊", "🧹", "⚠️", "Добавлено", "Найдено"]):
-                        logger.info(f"   {line.strip()}")
-            return True
+                    stripped = line.strip()
+                    if any(w in stripped for w in ["✅", "❌", "📊", "🧹", "⚠️", "Добавлено", "Найдено"]):
+                        logger.info(f"   {stripped}")
+                    if stripped.startswith("RESULT:"):
+                        result_lines.append(stripped)
+            return True, result_lines
         else:
             logger.error(f"❌ {parser_name} завершился с ошибкой (код {result.returncode})")
             if result.stderr:
                 for line in result.stderr.strip().split("\n")[-5:]:
                     if line.strip():
                         logger.error(f"   {line}")
-            return False
+            return False, []
     except subprocess.TimeoutExpired:
         logger.error(f"⏰ {parser_name} превысил время ожидания (10 мин)")
-        return False
+        return False, []
     except Exception as e:
         logger.error(f"💥 Ошибка при запуске {parser_name}: {e}")
-        return False
+        return False, []
 
 
 def main():
@@ -68,12 +68,18 @@ def main():
     logger.info("=" * 60)
 
     success = failed = 0
+    all_results: list[str] = []   # все RESULT:... строки
+    parser_status: list[tuple] = []  # (name, ok, result_lines)
+
     for cmd, name in PARSERS:
         logger.info("-" * 40)
-        if run_parser(cmd, name):
+        ok, result_lines = run_parser(cmd, name)
+        if ok:
             success += 1
         else:
             failed += 1
+        all_results.extend(result_lines)
+        parser_status.append((name, ok, result_lines))
         logger.info("-" * 40)
 
     duration = (datetime.now() - start_time).total_seconds()
@@ -85,9 +91,26 @@ def main():
     logger.info(f"⏱️  Время:    {duration:.1f} сек")
     logger.info("=" * 60)
     logger.info(f"PARSER_STATS:{success}:{failed}:{success + failed}")
+
+    # Машиночитаемый отчёт для бота
+    import json as _json
+    report = {
+        "success": success,
+        "failed": failed,
+        "duration": round(duration, 1),
+        "parsers": [
+            {
+                "name": name,
+                "ok": ok,
+                "results": result_lines,  # список RESULT:... строк
+            }
+            for name, ok, result_lines in parser_status
+        ],
+        "all_results": all_results,
+    }
+    print(f"PARSER_REPORT:{_json.dumps(report, ensure_ascii=False)}")
     return 1 if failed > 0 else 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
-

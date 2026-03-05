@@ -5,6 +5,7 @@
 import logging
 import os
 import re
+import json
 import sqlite3
 from contextlib import contextmanager
 from collections import defaultdict
@@ -170,6 +171,18 @@ def get_stats_data() -> dict:
             "events_count": events_count,
             "subscribers_count": subscribers_count,
         }
+
+
+def get_raw_events_count_by_category() -> dict:
+    """Полное кол-во строк в БД по категориям (для 'О проекте')."""
+    today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT category, COUNT(*) FROM events WHERE event_date >= ? GROUP BY category",
+            (today,),
+        )
+        return {row[0]: row[1] for row in cursor.fetchall()}
 
 
 def get_events_count_by_category() -> dict:
@@ -533,8 +546,14 @@ def group_other_events(events: list) -> list:
             for r in ranges:
                 text += f"\n📅 {r}" + (f" ⏰ {time}" if time else "")
 
+        # Сохраняем ключ сортировки: первая дата + первое время группы
+        first_date, first_time = min(g["dates"]) if g["dates"] else ("9999", "")
         result.append({"_pre_formatted": True, "text": text,
-                        "url": g["source_url"], "category": g["category"]})
+                        "url": g["source_url"], "category": g["category"],
+                        "_sort_key": (first_date, first_time)})
+
+    # Сортируем по первой дате и времени
+    result.sort(key=lambda x: x.get("_sort_key", ("9999", "")))
     return result
 
 
@@ -547,11 +566,25 @@ def pre_group_for_pagination(events: list) -> list:
     other  = [e for e in events if e.get("category") != "cinema"]
     result = []
     if cinema:
+        # Строим индекс title → (min_date, min_time) из сырых событий
+        cinema_sort: dict[str, tuple] = {}
+        for e in cinema:
+            key = e.get("title", "")
+            dt = (e.get("event_date", "9999-12-31"), e.get("show_time", ""))
+            if key not in cinema_sort or dt < cinema_sort[key]:
+                cinema_sort[key] = dt
         grouped_items = format_grouped_cinema_events(group_cinema_events(cinema))
-        result.extend([{"_pre_formatted": True, "text": t, "url": u, "category": "cinema"}
-                       for t, u in grouped_items])
+        for t, u in grouped_items:
+            # Заголовок фильма — первая жирная строка
+            m = re.search(r"<b>(.*?)</b>", t)
+            title_key = m.group(1) if m else ""
+            sort_key = cinema_sort.get(title_key, ("9999-12-31", ""))
+            result.append({"_pre_formatted": True, "text": t, "url": u,
+                           "category": "cinema", "_sort_key": sort_key})
     if other:
         result.extend(group_other_events(other))
+    # Сортируем всё вместе по дате/времени
+    result.sort(key=lambda x: x.get("_sort_key", ("9999", "")))
     return result
 
 
@@ -946,80 +979,12 @@ async def update_parsers(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if process.returncode == 0:
             output = stdout.decode("utf-8", errors="replace")
-            
-            # Собираем статистику по парсерам
-            parsers_stats = {
-                'total': 0,
-                'success': 0,
-                'failed': 0
-            }
-            
-            # Список для хранения строк с результатами
-            result_lines = []
-            
-            # Парсим вывод построчно
-            lines = output.split('\n')
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                
-                # Убираем логи (время и уровень)
-                clean = re.sub(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+ - [\w.]+ - \w+ - ", "", line)
-                clean = re.sub(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+ - \w+ - ", "", clean)
-                
-                # Ищем строки с запуском парсеров
-                if "▶️ Запуск" in clean:
-                    parsers_stats['total'] += 1
-                    result_lines.append(clean)
-                
-                # Ищем успешные завершения
-                elif "✅" in clean and ("завершен успешно" in clean or "завершён успешно" in clean):
-                    parsers_stats['success'] += 1
-                    result_lines.append(clean)
-                
-                # Ищем ошибки
-                elif "❌" in clean and ("ошибкой" in clean.lower() or "превысил" in clean.lower() or "ошибка" in clean.lower()):
-                    parsers_stats['failed'] += 1
-                    result_lines.append(clean)
-                
-                # Показываем статистику парсеров (добавлено новых и т.д.)
-                elif any(marker in clean for marker in ["✅ Добавлено", "📊 Результаты", "📊 Всего найдено"]):
-                    # Убираем дубликаты (первые 3 строки с результатами)
-                    if len(result_lines) < 20:  # Лимит на количество строк
-                        result_lines.append(clean)
-                
-                # PARSER_STATS итоговая строка из run_all_parsers
-                elif clean.startswith("PARSER_STATS:"):
-                    parts = clean.split(":")
-                    if len(parts) == 4:
-                        parsers_stats['success'] = int(parts[1])
-                        parsers_stats['failed'] = int(parts[2])
-                        parsers_stats['total'] = int(parts[3])
-
-                # Показываем важные предупреждения
-                elif "⚠️" in clean:
-                    result_lines.append(clean)
-            
-            # Убираем дубликаты строк
-            seen = set()
-            unique_lines = []
-            for line in result_lines:
-                if line not in seen:
-                    seen.add(line)
-                    unique_lines.append(line)
-            
-            # Формируем ответ
-            response = [
-                f"✅ Обновление завершено! ⏱ {elapsed:.0f} сек",
-                f"📊 Статистика: запущено {parsers_stats['total']}, ✅ {parsers_stats['success']}, ❌ {parsers_stats['failed']}",
-                "",
-                "📋 Детали:"
-            ]
-            response.extend(unique_lines[:15])
-            if len(unique_lines) > 15:
-                response.append(f"...и ещё {len(unique_lines) - 15} строк")
-            await update.message.reply_text("\n".join(response))
+            report = _parse_parser_report(output)
+            if report:
+                text = _format_parser_report(report, elapsed)
+            else:
+                text = f"✅ Обновление завершено за {elapsed:.0f} сек\n\nℹ️ Детальный отчёт недоступен"
+            await update.message.reply_text(text, parse_mode="Markdown")
             
         else:
             error_msg = stderr.decode()[:500] if stderr else "неизвестная ошибка"
@@ -1047,13 +1012,10 @@ async def run_parsers_job(bot=None):
         elapsed = (datetime.now(MINSK_TZ) - start_time).total_seconds()
         if process.returncode == 0:
             output = stdout.decode()
-            results = [
-                line.strip() for line in output.split('\n')
-                if ('✅' in line or '❌' in line) and ('добавлено' in line.lower() or 'ошибка' in line.lower())
-            ]
             logger.info(f"✅ Парсеры завершены за {elapsed:.0f} сек")
             if bot:
-                await _send_parser_report(bot, results, elapsed)
+                report = _parse_parser_report(output)
+                await _send_parser_report(bot, report or [], elapsed)
                 sent, errors = await send_subscriptions_digest(bot, "today")
                 logger.info(f"📬 Дайджест отправлен: {sent} польз., {errors} ошибок")
         else:
@@ -1071,17 +1033,61 @@ async def run_parsers_job(bot=None):
             await bot.send_message(chat_id=ADMIN_ID, text=f"💥 **Критическая ошибка**: {e}", parse_mode="Markdown")
 
 
-async def _send_parser_report(bot, results: list, elapsed: float):
+def _parse_parser_report(output: str) -> dict | None:
+    """Извлекает PARSER_REPORT:json из stdout парсеров."""
+    for line in output.split("\n"):
+        line = line.strip()
+        if line.startswith("PARSER_REPORT:"):
+            try:
+                return json.loads(line[len("PARSER_REPORT:"):])
+            except Exception:
+                pass
+    return None
+
+
+def _format_parser_report(report: dict, elapsed: float | None = None) -> str:
+    """Форматирует отчёт парсеров в читаемый текст для Telegram.
+    Relax-парсеры группируются под одной шапкой."""
+    dur = elapsed or report.get("duration", 0)
+    now = datetime.now(MINSK_TZ).strftime("%d.%m.%Y %H:%M")
     lines = [
-        "🤖 **Отчёт о запуске парсеров**",
-        f"🕐 {datetime.now(MINSK_TZ).strftime('%d.%m.%Y %H:%M')} | ⏱ {elapsed:.0f} сек", "",
+        "🤖 *Отчёт парсеров*",
+        f"🕐 {now}  ⏱ {dur:.0f} сек",
+        "",
     ]
-    lines.extend(results or ["ℹ️ Нет данных о результатах"])
-    success = sum(1 for r in results if '✅' in r)
-    failed = sum(1 for r in results if '❌' in r)
-    lines.extend(["", f"📊 Итого: ✅ {success} | ❌ {failed}"])
+
+    # Каждый парсер — отдельный блок
+    for p in report.get("parsers", []):
+        status = "✅" if p["ok"] else "❌"
+        lines.append(f"{status} *{p['name']}*")
+        if p["ok"]:
+            for r in p.get("results", []):
+                parts = r.split(":")
+                if len(parts) == 4:
+                    label, found, saved = parts[1], parts[2], parts[3]
+                    lines.append(f"   └ {label}: найдено {found}, добавлено {saved}")
+        else:
+            lines.append("   └ завершился с ошибкой")
+
+    # Итог
+    s = report.get("success", 0)
+    f = report.get("failed", 0)
+    lines += ["", f"📊 Итого: ✅ {s} успешно  ❌ {f} с ошибкой"]
+    return "\n".join(lines)
+
+
+async def _send_parser_report(bot, report_or_results, elapsed: float):
+    """Отправляет отчёт админу. Принимает dict (новый формат) или list (старый)."""
+    if isinstance(report_or_results, dict):
+        text = _format_parser_report(report_or_results, elapsed)
+    else:
+        # fallback: старый формат — просто список строк
+        lines = ["🤖 *Отчёт парсеров*",
+                 f"🕐 {datetime.now(MINSK_TZ).strftime('%d.%m.%Y %H:%M')} | ⏱ {elapsed:.0f} сек", ""]
+        lines.extend(report_or_results or ["ℹ️ Нет данных"])
+        text = "\n".join(lines)
     try:
-        await bot.send_message(chat_id=ADMIN_ID, text="\n".join(lines), parse_mode="Markdown")
+        await bot.send_message(chat_id=ADMIN_ID, text=text, parse_mode="Markdown")
     except Exception as e:
         logger.error(f"Не удалось отправить отчёт: {e}")
 
@@ -1216,7 +1222,7 @@ async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     log_user_action(user.id, user.username, user.first_name, "about")
-    counts = get_events_count_by_category()
+    counts = get_raw_events_count_by_category()
     total_events = sum(counts.values())
     cat_lines = [
         f"  {CATEGORY_NAMES[cat]} — {cnt}"

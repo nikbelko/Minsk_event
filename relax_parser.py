@@ -12,6 +12,7 @@ from collections import defaultdict
 
 import requests
 from bs4 import BeautifulSoup
+from venues import normalize_venue
 
 # ---------------------- Путь к БД ----------------------
 
@@ -347,6 +348,7 @@ class RelaxBaseParser:
             print(f"   🧹 Очищены старые записи ({self.clear_label})")
             print(f"   📊 Результаты:")
             print(f"      ✅ Добавлено новых {self.clear_label}: {saved}")
+            print(f"RESULT:{self.clear_label}:{len(events)}:{saved}")
         else:
             logger.warning(f"{self.clear_label.capitalize()} не найдены")
             print(f"   ⚠️ {self.clear_label.capitalize()} не найдено")

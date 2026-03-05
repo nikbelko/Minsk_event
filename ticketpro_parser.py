@@ -13,6 +13,7 @@ from typing import List, Dict, Optional
 
 import requests
 from bs4 import BeautifulSoup
+from venues import normalize_venue, is_minsk_venue
 # Определяем путь к БД (локально или на Railway)
 if os.path.exists('/data'):
     DB_PATH = '/data/events_final.db'  # Railway volume
@@ -281,11 +282,11 @@ class TicketproParser:
                 place_raw = place_tag.get_text(strip=True) if place_tag else ''
 
             # Проверка на Минск
-            if not self.is_minsk_event(place_raw):
+            if not is_minsk_venue(place_raw):
                 self.stats['filtered_out'] += 1
                 return None
 
-            place = self.clean_place(place_raw)
+            place = normalize_venue(place_raw)
 
             # === Дата и время ===
             date_tag = event_html.find('div', class_='event-box__date')
@@ -495,6 +496,9 @@ class TicketproParser:
             print(f"      ✅ Добавлено новых событий: {saved}")
             print(f"      🔁 Дубликатов с Relax: {self.stats['duplicates_with_relax']}")
             print(f"      ❌ Не Минск: {self.stats['filtered_out']}")
+            # По категориям ticketpro
+            for cat_name, cnt in self.stats['by_category'].items():
+                print(f"RESULT:{cat_name}:{cnt}:{cnt}")
         else:
             logger.warning("❌ События не найдены")
             print("   ⚠️ Ticketpro: события не найдены")
