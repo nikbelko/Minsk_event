@@ -1204,11 +1204,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user_action(user.id, user.username, user.first_name, "start")
     await update.message.reply_text(
         f"🎉 Привет, {user.first_name}!\n\n"
-        "Я бот-афиша Минска. Помогу найти интересные события в городе.\n\n"
+        "Я - 🌟**MinskDvizh**🌟, твой бот-афиша Минска. Помогу тебе найти самые интересные события в городе.\n\n"
         "🔍 **Как искать:**\n"
-        "• Отправьте **название** события (например: «концерт», «Дельфин»)\n"
+        "• Отправь **название** события (например: «концерт», «Дельфин»)\n"
         "• Или **дату** в формате ДД.ММ или ДД.ММ.ГГГГ\n\n"
-        "Используйте кнопки для быстрого поиска 👇",
+        "Используй кнопки для быстрого поиска 👇",
         reply_markup=get_reply_main_menu(), parse_mode="Markdown",
     )
 
@@ -1245,7 +1245,7 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "💼 **Добавить мероприятие / сотрудничество:**\n"
         "📱 @i354444\n\n"
         "⭐ Если бот полезен — поддержи проект!\n\n"
-        "#minskdvizh #афишаминск #минск"
+        "#minskdvizh #афишаминск #минск #минскафиша #минскконцерт"
     )
     await update.message.reply_text(
         text,

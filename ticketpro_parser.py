@@ -299,18 +299,52 @@ class TicketproParser:
                 if time_match:
                     show_time = time_match.group(1)
 
-            # Если даты нет в HTML — пробуем JSON-LD startDate
-            if not event_date and ld_url:
+            # Если даты или времени нет в HTML — берём из JSON-LD startDate
+            if (not event_date or not show_time) and script and script.string:
                 try:
                     raw = re.sub(r'[\x00-\x1f\x7f]', ' ', script.string)
                     ld = json.loads(raw)
                     sd = ld.get('startDate', '')  # "2026-03-05T19:00:00+0300"
-                    if sd:
+                    if sd and 'T' in sd:
                         dt = datetime.fromisoformat(sd)
-                        event_date = dt.strftime('%Y-%m-%d')
-                        show_time  = dt.strftime('%H:%M')
+                        if not event_date:
+                            event_date = dt.strftime('%Y-%m-%d')
+                        if not show_time and dt.hour != 0:
+                            show_time = dt.strftime('%H:%M')
                 except Exception:
                     pass
+
+            # Если времени всё ещё нет — пробуем страницу покупки /kupit-bilet/
+            if event_date and not show_time:
+                buy_link = event_html.find('a', class_='btn-pink', href=True)
+                if buy_link:
+                    buy_url = self.base_url + buy_link['href']
+                    try:
+                        buy_html = self.fetch_page(buy_url)
+                        if buy_html:
+                            buy_soup = BeautifulSoup(buy_html, 'lxml')
+                            # Ищем время в странице покупки
+                            for sel in ['div.event-time', 'span.time', '.schedule-time',
+                                        'div.ticket-time', 'span.event-time']:
+                                t = buy_soup.select_one(sel)
+                                if t:
+                                    m = re.search(r'\d{1,2}:\d{2}', t.get_text())
+                                    if m:
+                                        show_time = m.group(0)
+                                        break
+                            # Fallback: JSON-LD на странице покупки
+                            if not show_time:
+                                ld_script = buy_soup.find('script', type='application/ld+json')
+                                if ld_script and ld_script.string:
+                                    raw2 = re.sub(r'[\x00-\x1f\x7f]', ' ', ld_script.string)
+                                    ld2 = json.loads(raw2)
+                                    sd2 = ld2.get('startDate', '')
+                                    if sd2 and 'T' in sd2:
+                                        dt2 = datetime.fromisoformat(sd2)
+                                        if dt2.hour != 0:
+                                            show_time = dt2.strftime('%H:%M')
+                    except Exception:
+                        pass
 
             if not event_date:
                 return None
