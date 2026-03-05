@@ -217,16 +217,30 @@ class RelaxBaseParser:
                     continue
 
                 href = title_a.get("href", "")
+
+                # Фикс 3: пропускаем если URL содержит /kino/ а мы не кино-парсер
+                # (страница kids может содержать кино-блоки через last_place)
+                if "/kino/" in href and self.category != "cinema":
+                    skip_no_title += 1
+                    continue
+
                 source_url = self.build_url(href)
 
                 details_a = item.find("a", class_="schedule__event-dscr")
                 details = details_a.get_text(strip=True) if details_a else ""
 
-                time_span = item.find("span", class_="schedule__seance-time")
-                show_time = time_span.get_text(strip=True) if time_span else ""
+                # Фикс 2, 4: время — <a> для активных сеансов, <span> для закрытых
+                time_elem = (item.find("a", class_="schedule__seance-time") or
+                             item.find("span", class_="schedule__seance-time"))
+                show_time = time_elem.get_text(strip=True) if time_elem else ""
 
+                # Цена: span.seance-price или data-summ на div.schedule__seance
                 price_span = item.find("span", class_="seance-price")
-                price = price_span.get_text(strip=True) if price_span else ""
+                if price_span:
+                    price = price_span.get_text(strip=True)
+                else:
+                    seance_div = item.find("div", class_="schedule__seance")
+                    price = seance_div.get("data-summ", "").strip() if seance_div else ""
 
                 description = f"{self.emoji} {title}"
                 if details:
