@@ -173,15 +173,30 @@ def get_stats_data() -> dict:
 
 
 def get_events_count_by_category() -> dict:
-    """Реальное кол-во актуальных событий по категориям (для /about)."""
+    """Кол-во сгруппированных событий по категориям.
+    Кино: уникальных (title, date). Остальные: уникальных (title, place)."""
     today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            "SELECT category, COUNT(*) as cnt FROM events WHERE event_date >= ? GROUP BY category",
-            (today,),
-        )
-        return {row["category"]: row["cnt"] for row in cursor.fetchall()}
+        # Кино: считаем уникальные (title, event_date)
+        cursor.execute("""
+            SELECT COUNT(*) FROM (
+                SELECT DISTINCT title, event_date FROM events
+                WHERE category = 'cinema' AND event_date >= ?
+            )
+        """, (today,))
+        cinema_count = cursor.fetchone()[0]
+        # Остальные: считаем уникальные (title, place)
+        cursor.execute("""
+            SELECT category, COUNT(*) FROM (
+                SELECT DISTINCT category, title, place FROM events
+                WHERE category != 'cinema' AND event_date >= ?
+            ) GROUP BY category
+        """, (today,))
+        result = {row[0]: row[1] for row in cursor.fetchall()}
+        if cinema_count:
+            result["cinema"] = cinema_count
+        return result
 
 
 def search_events_by_title(query: str, limit: int = 20):
@@ -252,31 +267,38 @@ def get_events_by_date_and_category(target_date: datetime, category: str | None 
 
 
 def get_upcoming_events(limit: int = 20, category: str | None = None):
-    today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
+    now_minsk = datetime.now(MINSK_TZ)
+    today = now_minsk.strftime("%Y-%m-%d")
+    now_time = now_minsk.strftime("%H:%M")
+    # Для сегодняшних событий фильтруем прошедшие сеансы (как в get_events_by_date)
+    time_filter = " AND (event_date > ? OR show_time = '' OR show_time IS NULL OR show_time > ?)"
     with get_db_connection() as conn:
         cursor = conn.cursor()
         if category == "free":
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT id, title, details, description, event_date, show_time,
                        place, location, price, category, source_url
                 FROM events WHERE event_date >= ?
                   AND (price = '' OR price IS NULL OR LOWER(price) LIKE '%бесплатн%' OR LOWER(price) LIKE '%свободн%')
+                  {time_filter}
                 ORDER BY event_date, show_time, title LIMIT ?
-            """, (today, limit * SEARCH_MULTIPLIER))
+            """, (today, today, now_time, limit * SEARCH_MULTIPLIER))
         elif category and category != "all":
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT id, title, details, description, event_date, show_time,
                        place, location, price, category, source_url
                 FROM events WHERE event_date >= ? AND category = ?
+                  {time_filter}
                 ORDER BY event_date, show_time, title LIMIT ?
-            """, (today, category, limit * SEARCH_MULTIPLIER))
+            """, (today, category, today, now_time, limit * SEARCH_MULTIPLIER))
         else:
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT id, title, details, description, event_date, show_time,
                        place, location, price, category, source_url
                 FROM events WHERE event_date >= ?
+                  {time_filter}
                 ORDER BY event_date, show_time, title LIMIT ?
-            """, (today, limit * SEARCH_MULTIPLIER))
+            """, (today, today, now_time, limit * SEARCH_MULTIPLIER))
         return cursor.fetchall()
 
 
