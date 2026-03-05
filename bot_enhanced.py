@@ -449,12 +449,47 @@ def group_other_events(events: list) -> list:
             text += f"\n🏢 {g['place']}"
         if g["price"]:
             text += f"\n💰 {g['price']}"
-        for date, time in sorted(set(g["dates"])):
+
+        # Группируем смежные даты с одинаковым временем в диапазоны
+        dates_sorted = sorted(set(g["dates"]))  # [(date_str, time), ...]
+        # Группируем по времени: {time: [date, ...]}
+        by_time = defaultdict(list)
+        for date_str, time in dates_sorted:
+            by_time[time].append(date_str)
+
+        # Для каждого времени строим компактные диапазоны
+        def make_ranges(date_strs):
+            """Смежные даты → диапазон, несмежные — отдельно."""
             try:
-                d_fmt = datetime.strptime(date, "%Y-%m-%d").strftime("%d.%m.%Y")
+                ds = sorted(datetime.strptime(d, "%Y-%m-%d") for d in date_strs)
             except Exception:
-                d_fmt = date
-            text += f"\n📅 {d_fmt}" + (f" ⏰ {time}" if time else "")
+                return date_strs
+            ranges = []
+            start = end = ds[0]
+            for d in ds[1:]:
+                if (d - end).days == 1:
+                    end = d
+                else:
+                    ranges.append((start, end))
+                    start = end = d
+            ranges.append((start, end))
+            result = []
+            for s, e in ranges:
+                if s == e:
+                    result.append(s.strftime("%d.%m.%Y"))
+                elif s.month == e.month and s.year == e.year:
+                    result.append(f"{s.strftime('%d')}–{e.strftime('%d.%m.%Y')}")
+                else:
+                    result.append(f"{s.strftime('%d.%m')}–{e.strftime('%d.%m.%Y')}")
+            return result
+
+        # Выводим: сначала события без времени, потом с временем
+        time_groups = sorted(by_time.items(), key=lambda x: (x[0] == "", x[0]))
+        for time, date_strs in time_groups:
+            ranges = make_ranges(date_strs)
+            for r in ranges:
+                text += f"\n📅 {r}" + (f" ⏰ {time}" if time else "")
+
         result.append({"_pre_formatted": True, "text": text,
                         "url": g["source_url"], "category": g["category"]})
     return result
@@ -494,10 +529,9 @@ def build_page_keyboard(data: dict):
     keyboard = []
     category_counts = defaultdict(int)
     for e in events:
-        if e.get("_pre_formatted"):
-            category_counts["cinema"] += 1
-        elif e.get("category"):
-            category_counts[e["category"]] += 1
+        cat = e.get("category") if e.get("category") else ("cinema" if e.get("_pre_formatted") else None)
+        if cat:
+            category_counts[cat] += 1
     if len(category_counts) > 1:
         row = []
         for cat_key, cat_name in CATEGORY_NAMES.items():
