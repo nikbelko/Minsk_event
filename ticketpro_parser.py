@@ -255,38 +255,43 @@ class TicketproParser:
                 return None
             title = title_tag.get_text(strip=True)
 
-            # JSON-LD содержит url события и description
-            ld_url = ""
-            ld_desc = ""
+            # === JSON-LD — основной источник данных ===
+            ld_url = ld_desc = ld_place = ld_price = ""
             script = event_html.find('script', type='application/ld+json')
             if script and script.string:
                 try:
-                    ld = json.loads(script.string)
-                    ld_url = ld.get('url', '')
-                    ld_desc = ld.get('description', '').strip()
-                    # Обрезаем описание до разумного размера
-                    if ld_desc and len(ld_desc) > 300:
+                    raw = re.sub(r'[\x00-\x1f\x7f]', ' ', script.string)
+                    ld = json.loads(raw)
+                    ld_url   = ld.get('url', '')
+                    ld_desc  = ld.get('description', '').strip()
+                    if len(ld_desc) > 300:
                         ld_desc = ld_desc[:297] + '...'
+                    loc = ld.get('location', {})
+                    ld_place = loc.get('name', '')
+                    offers = ld.get('offers', {})
+                    if offers.get('price'):
+                        ld_price = f"от {offers['price']} {offers.get('priceCurrency', 'BYN')}"
                 except Exception:
                     pass
 
-            place_tag = event_html.find('div', class_='event-box__place')
-            place_raw = place_tag.get_text(strip=True) if place_tag else ''
+            # === Место: JSON-LD → HTML fallback ===
+            place_raw = ld_place
+            if not place_raw:
+                place_tag = event_html.find('div', class_='event-box__place')
+                place_raw = place_tag.get_text(strip=True) if place_tag else ''
 
-            # Очищаем и нормализуем место
-            place = self.clean_place(place_raw)
-
-            # Проверка на Минск (используем оригинальный текст)
+            # Проверка на Минск
             if not self.is_minsk_event(place_raw):
                 self.stats['filtered_out'] += 1
                 return None
 
+            place = self.clean_place(place_raw)
+
+            # === Дата и время ===
             date_tag = event_html.find('div', class_='event-box__date')
             date_text = date_tag.get_text(strip=True) if date_tag else ''
-
             date_match = re.search(r'(\d{2})\.(\d{2})\.(\d{4})', date_text)
-            event_date = None
-            show_time = ""
+            event_date = show_time = ""
             if date_match:
                 day, month, year = date_match.groups()
                 event_date = f"{year}-{month}-{day}"
@@ -294,24 +299,37 @@ class TicketproParser:
                 if time_match:
                     show_time = time_match.group(1)
 
-            price_tag = event_html.find('div', class_='event-box__price')
-            price_text = price_tag.get_text(strip=True) if price_tag else ''
-            price_match = re.search(r'от\s*(\d+[.,]?\d*)\s*BYN', price_text)
-            if not price_match:
-                price_match = re.search(r'(\d+[.,]\d*)\s*BYN', price_text)
-                price = f"от {price_match.group(1)} BYN" if price_match else ""
-            else:
-                price = f"от {price_match.group(1)} BYN"
+            # Если даты нет в HTML — пробуем JSON-LD startDate
+            if not event_date and ld_url:
+                try:
+                    raw = re.sub(r'[\x00-\x1f\x7f]', ' ', script.string)
+                    ld = json.loads(raw)
+                    sd = ld.get('startDate', '')  # "2026-03-05T19:00:00+0300"
+                    if sd:
+                        dt = datetime.fromisoformat(sd)
+                        event_date = dt.strftime('%Y-%m-%d')
+                        show_time  = dt.strftime('%H:%M')
+                except Exception:
+                    pass
 
-            # URL: предпочитаем ссылку на страницу события (JSON-LD или первый <a>),
-            # btn-pink ведёт на /kupit-bilet/ — страницу покупки, не события
-            if ld_url:
-                event_url = ld_url
-            else:
+            if not event_date:
+                return None
+
+            # === Цена: JSON-LD → HTML fallback ===
+            price = ld_price
+            if not price:
+                price_tag = event_html.find('div', class_='event-box__price')
+                price_text = price_tag.get_text(strip=True) if price_tag else ''
+                m = re.search(r'(\d+[.,]\d*)\s*BYN', price_text)
+                price = f"от {m.group(1)} BYN" if m else ""
+
+            # === URL: JSON-LD → первый <a> fallback ===
+            event_url = ld_url
+            if not event_url:
                 first_link = event_html.find('a', href=True)
                 event_url = self.base_url + first_link['href'] if first_link else self.base_url
 
-            # Проверка на дубликат с Relax (в памяти, без SQL)
+            # === Проверка дублей ===
             if relax_index is not None and self.is_duplicate(title, event_date, place, show_time, relax_index):
                 return None
 
@@ -320,17 +338,14 @@ class TicketproParser:
                 description += f"\n📍 {place}"
             if price:
                 description += f"\n💰 {price}"
-            if event_url:
-                description += f"\n🔗 [Купить билет]({event_url})"
 
             self.stats['minsk_events'] += 1
             self.stats['by_category'][display_name] = self.stats['by_category'].get(display_name, 0) + 1
-
-            logger.info(f"✅ {display_name}: {title[:50]}... - {place}")
+            logger.info(f"✅ {display_name}: {title[:40]} | {place[:25]} | {price}")
 
             return {
                 'title': title,
-                'details': ld_desc,   # описание из JSON-LD
+                'details': '',        # описание не нужно (по запросу пользователя)
                 'description': description,
                 'event_date': event_date,
                 'show_time': show_time,

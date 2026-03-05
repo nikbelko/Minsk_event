@@ -442,20 +442,43 @@ def format_grouped_cinema_events(grouped):
 
 def group_other_events(events: list) -> list:
     """Группировка для театра/концертов/выставок/детей:
-    title + place → все даты и времена вместе (одна запись в пагинации)."""
+    title + place → все даты и времена вместе (одна запись в пагинации).
+    Если у события нет place — объединяем с записью по тому же title."""
     from collections import OrderedDict
     EMOJI_MAP = {"theater": "🎭", "concert": "🎵", "exhibition": "🖼️",
                  "kids": "🧸", "cinema": "🎬"}
     grouped = OrderedDict()
+    # Индекс title → ключ первой записи с непустым place
+    title_to_key = {}
+
     for e in events:
-        key = (e.get("title", ""), e.get("place", ""))
+        title = e.get("title", "")
+        place = e.get("place", "")
+
+        if place:
+            key = (title, place)
+            title_to_key.setdefault(title, key)
+        else:
+            # Нет place — присоединяем к уже существующей записи по title
+            key = title_to_key.get(title, (title, ""))
+
         if key not in grouped:
             grouped[key] = {
-                "title": e.get("title", ""), "details": e.get("details", ""),
-                "place": e.get("place", ""), "price": e.get("price", ""),
-                "category": e.get("category", ""), "source_url": e.get("source_url", ""),
-                "dates": []
+                "title": title, "place": place,
+                "price": e.get("price", ""), "category": e.get("category", ""),
+                "source_url": e.get("source_url", ""), "dates": []
             }
+            if place:
+                title_to_key[title] = key
+        else:
+            # Обновляем place/price/url если у текущей записи они пустые
+            if not grouped[key]["place"] and place:
+                grouped[key]["place"] = place
+            if not grouped[key]["price"] and e.get("price"):
+                grouped[key]["price"] = e["price"]
+            if not grouped[key]["source_url"] and e.get("source_url"):
+                grouped[key]["source_url"] = e["source_url"]
+
         grouped[key]["dates"].append((e.get("event_date", ""), e.get("show_time", "")))
         if not grouped[key]["price"] and e.get("price"):
             grouped[key]["price"] = e["price"]
@@ -464,9 +487,7 @@ def group_other_events(events: list) -> list:
     for g in grouped.values():
         cat_emoji = EMOJI_MAP.get(g["category"], "🎉")
         text = f"{cat_emoji} <b>{g['title']}</b>"
-        if g["details"]:
-            d = g["details"][:100] + "..." if len(g["details"]) > 100 else g["details"]
-            text += f"\n🎭 {d}"
+        # details намеренно не показываем
         if g["place"]:
             text += f"\n🏢 {g['place']}"
         if g["price"]:
