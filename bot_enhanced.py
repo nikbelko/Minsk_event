@@ -988,9 +988,11 @@ async def update_parsers(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(text, parse_mode="Markdown")
             
         else:
-            error_msg = stderr.decode()[:500] if stderr else "неизвестная ошибка"
+            err = stderr.decode("utf-8", errors="replace").strip() if stderr else ""
+            out = stdout.decode("utf-8", errors="replace").strip() if stdout else ""
+            debug = err or out or "нет вывода"
             await update.message.reply_text(
-                f"❌ **Ошибка при выполнении парсеров**\n\n```\n{error_msg}\n```", 
+                f"❌ **Ошибка парсеров** (код {process.returncode})\n\n```\n{debug[:800]}\n```",
                 parse_mode="Markdown"
             )
             
