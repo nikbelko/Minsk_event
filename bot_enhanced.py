@@ -314,7 +314,7 @@ def get_weekend_events(category: str | None = None):
 
 
 def filter_events_by_category(events, category: str):
-    return [e for e in events if e["category"] == category]
+    return [e for e in events if e.get("category") == category]
 
 
 def add_subscription(user_id: int, category: str, date_type: str):
@@ -513,15 +513,16 @@ def pre_group_for_pagination(events: list) -> list:
 
 
 def set_pagination(context: ContextTypes.DEFAULT_TYPE, events, title: str, date_info: str | None = None):
+    raw = [dict(e) if not isinstance(e, dict) else e for e in events]
     context.user_data["pagination"] = {
-        "events": pre_group_for_pagination(list(events)), "page": 0, "per_page": PER_PAGE,
+        "events": raw, "page": 0, "per_page": PER_PAGE,
         "title": title, "date_info": date_info,
     }
 
 
 def build_page_keyboard(data: dict):
     """Клавиатура: фильтры категорий + навигация ◀ 1/5 ▶."""
-    events = data["events"]
+    events = data.get("_grouped", data["events"])
     page = data["page"]
     per_page = data["per_page"]
     total = len(events)
@@ -555,7 +556,15 @@ async def show_page(update_or_query, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update_or_query.answer(msg, show_alert=True)
         return
-    events, page, per_page = data["events"], data["page"], data["per_page"]
+    raw_events = data["events"]
+    # Группируем сырые события; кешируем чтобы не пересчитывать при листании
+    cache_key = len(raw_events)  # простой ключ — количество сырых событий
+    if data.get("_grouped_key") != cache_key or "_grouped" not in data:
+        data["_grouped"] = pre_group_for_pagination(raw_events)
+        data["_grouped_key"] = cache_key
+    events = data["_grouped"]
+
+    page, per_page = data["page"], data["per_page"]
     total = len(events)
     if total == 0:
         msg = "😕 Событий не найдено."
