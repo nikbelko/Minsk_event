@@ -5,6 +5,7 @@
 import logging
 import os
 import re
+import sys
 import json
 import sqlite3
 from contextlib import contextmanager
@@ -971,7 +972,7 @@ async def update_parsers(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         process = await asyncio.create_subprocess_exec(
-            "python", "run_all_parsers.py",
+            sys.executable, "run_all_parsers.py",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
@@ -1005,7 +1006,7 @@ async def run_parsers_job(bot=None):
     start_time = datetime.now(MINSK_TZ)
     try:
         process = await asyncio.create_subprocess_exec(
-            "python", "run_all_parsers.py",
+            sys.executable, "run_all_parsers.py",
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=600)
