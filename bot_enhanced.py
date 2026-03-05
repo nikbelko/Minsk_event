@@ -377,6 +377,8 @@ def format_event_text(event) -> str:
 
 
 def group_cinema_events(events):
+    """Группировка: title → date → place → [сеансы].
+    Ключ пагинации = (title, date) — один фильм в один день = одна запись."""
     grouped = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
     for event in events:
         if event["category"] == "cinema":
@@ -387,18 +389,24 @@ def group_cinema_events(events):
 
 
 def format_grouped_cinema_events(grouped):
+    """Каждый элемент result = один фильм в один день (все кинотеатры внутри).
+    Пагинация по этому списку даёт 10 фильмов на страницу."""
     result = []
     for title, dates in grouped.items():
         for date, cinemas in dates.items():
-            first_cinema = next(iter(cinemas.values()))
-            details = first_cinema[0]["details"] if first_cinema else ""
+            # Детали берём из первого сеанса
+            details = ""
+            for seances in cinemas.values():
+                if seances and seances[0]["details"]:
+                    details = seances[0]["details"]
+                    break
             text = f"🎬 <b>{title}</b>"
             if details:
                 details = details[:177] + "..." if len(details) > 180 else details
                 text += f"\n🎭 {details}"
             text += f"\n📅 {datetime.strptime(date, '%Y-%m-%d').strftime('%d.%m.%Y')}"
             for place, seances in cinemas.items():
-                times = [s["time"] for s in seances if s["time"]]
+                times = sorted([s["time"] for s in seances if s["time"]])
                 if times:
                     text += f"\n   ⏰ {', '.join(times)} — {place}"
             result.append(text)
@@ -410,7 +418,7 @@ def format_grouped_cinema_events(grouped):
 
 def set_pagination(context: ContextTypes.DEFAULT_TYPE, events, title: str, date_info: str | None = None):
     context.user_data["pagination"] = {
-        "events": list(events), "page": 0, "per_page": PER_PAGE,
+        "events": pre_group_for_pagination(list(events)), "page": 0, "per_page": PER_PAGE,
         "title": title, "date_info": date_info,
     }
 
@@ -425,7 +433,10 @@ def build_page_keyboard(data: dict):
     keyboard = []
     category_counts = defaultdict(int)
     for e in events:
-        if e["category"]: category_counts[e["category"]] += 1
+        if e.get("_pre_formatted"):
+            category_counts["cinema"] += 1
+        elif e.get("category"):
+            category_counts[e["category"]] += 1
     if len(category_counts) > 1:
         row = []
         for cat_key, cat_name in CATEGORY_NAMES.items():
@@ -474,16 +485,13 @@ async def show_page(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     if data.get("date_info"): lines.append(data["date_info"])
     lines.append(f"Найдено: {total} | Стр. {page + 1}/{max_page + 1}")
     lines.append("")
-    cinema_events = [e for e in chunk if e["category"] == "cinema"]
-    other_events = [e for e in chunk if e["category"] != "cinema"]
-    if cinema_events:
-        for t in format_grouped_cinema_events(group_cinema_events(cinema_events)):
-            lines.append(t + "\n🔗 <a href=\"https://afisha.relax.by/kino/minsk/\">Подробнее</a>")
-            lines.append("")
-    for event in other_events:
-        url = event["source_url"]
-        suffix = f"\n🔗 <a href=\"{url}\">Подробнее</a>" if url else ""
-        lines.append(format_event_text(event) + suffix)
+    for item in chunk:
+        if item.get("_pre_formatted"):
+            lines.append(item["text"] + "\n🔗 <a href=\"https://afisha.relax.by/kino/minsk/\">Подробнее</a>")
+        else:
+            url = item.get("source_url", "")
+            suffix = f"\n🔗 <a href=\"{url}\">Подробнее</a>" if url else ""
+            lines.append(format_event_text(item) + suffix)
         lines.append("")
     text = "\n".join(lines).strip()
     keyboard = build_page_keyboard(data)
@@ -492,12 +500,12 @@ async def show_page(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     else:
         await send(f"{data.get('title', '')}\nНайдено: {total} | Стр. {page + 1}/{max_page + 1}", parse_mode="HTML")
         all_items = []
-        if cinema_events:
-            for t in format_grouped_cinema_events(group_cinema_events(cinema_events)):
-                all_items.append((t + "\n🔗 <a href=\"https://afisha.relax.by/kino/minsk/\">Подробнее</a>", ""))
-        for event in other_events:
-            url = event["source_url"] or ""
-            all_items.append((format_event_text(event) + (f"\n🔗 <a href=\"{url}\">Подробнее</a>" if url else ""), ""))
+        for item in chunk:
+            if item.get("_pre_formatted"):
+                all_items.append((item["text"] + "\n🔗 <a href=\"https://afisha.relax.by/kino/minsk/\">Подробнее</a>", ""))
+            else:
+                url = item.get("source_url", "") or ""
+                all_items.append((format_event_text(item) + (f"\n🔗 <a href=\"{url}\">Подробнее</a>" if url else ""), ""))
         for idx, (item_text, _) in enumerate(all_items):
             is_last = idx == len(all_items) - 1
             await send(item_text, reply_markup=keyboard if is_last else None,
