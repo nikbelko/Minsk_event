@@ -152,9 +152,19 @@ def get_stats_data() -> dict:
         cursor.execute("SELECT COUNT(*) FROM user_stats WHERE created_at LIKE ?", (f"{today}%",))
         actions_today = cursor.fetchone()[0]
         cursor.execute("""
-            SELECT DATE(created_at) as day, COUNT(*) as cnt, COUNT(DISTINCT user_id) as users
-            FROM user_stats
-            WHERE created_at >= DATE('now', '-7 days')
+            SELECT
+                DATE(u.created_at) as day,
+                COUNT(*) as cnt,
+                COUNT(DISTINCT u.user_id) as users,
+                COUNT(DISTINCT CASE WHEN DATE(u.created_at) = first_visit.first_day
+                                    THEN u.user_id END) as new_users
+            FROM user_stats u
+            LEFT JOIN (
+                SELECT user_id, MIN(DATE(created_at)) as first_day
+                FROM user_stats
+                GROUP BY user_id
+            ) first_visit ON u.user_id = first_visit.user_id
+            WHERE u.created_at >= DATE('now', '-30 days')
             GROUP BY day ORDER BY day DESC
         """)
         daily_activity = cursor.fetchall()
@@ -168,12 +178,20 @@ def get_stats_data() -> dict:
         """, (today,))
         new_today = cursor.fetchone()[0]
         cursor.execute("""
-            SELECT strftime('%Y-%m', created_at) as month,
-                   COUNT(*) as cnt,
-                   COUNT(DISTINCT user_id) as users
-            FROM user_stats
-            WHERE created_at < DATE('now', '-7 days')
-            GROUP BY month ORDER BY month DESC LIMIT 6
+            SELECT
+                strftime('%Y-%m', u.created_at) as month,
+                COUNT(*) as cnt,
+                COUNT(DISTINCT u.user_id) as users,
+                COUNT(DISTINCT CASE
+                    WHEN strftime('%Y-%m', u.created_at) = strftime('%Y-%m', first_visit.first_day)
+                    THEN u.user_id END) as new_users
+            FROM user_stats u
+            LEFT JOIN (
+                SELECT user_id, MIN(DATE(created_at)) as first_day
+                FROM user_stats
+                GROUP BY user_id
+            ) first_visit ON u.user_id = first_visit.user_id
+            GROUP BY month ORDER BY month DESC LIMIT 12
         """)
         monthly_activity = cursor.fetchall()
         cursor.execute("SELECT action, COUNT(*) as cnt FROM user_stats GROUP BY action ORDER BY cnt DESC LIMIT 10")
@@ -961,24 +979,27 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔔 Подписчиков: <b>{stats['subscribers_count']}</b>",
         f"🗂 Событий в базе: <b>{stats['events_count']}</b>",
         "",
-        "<b>📅 Активность за 7 дней:</b>",
+        "<b>📅 Активность за 30 дней:</b>",
     ]
     
     for row in stats["daily_activity"]:
-        # daily_activity: (day, cnt, users) — нет отдельного unique_day, считаем users как уникальных
         day, cnt, users = row["day"], row["cnt"], row["users"]
-        lines.append(f"  {day} — {cnt} запр. {users} польз. ({users} ун)")
+        new_u = row["new_users"] if "new_users" in row.keys() else 0
+        new_str = f" (+{new_u} нов)" if new_u else ""
+        lines.append(f"  {day} — {cnt} запр. {users} польз.{new_str}")
 
     # Активность по прошлым месяцам
     if stats.get("monthly_activity"):
-        lines.extend(["", "<b>📅 Активность за пр. месяцы:</b>"])
+        lines.extend(["", "<b>📅 Активность по месяцам:</b>"])
         month_names = {"01":"янв","02":"фев","03":"мар","04":"апр","05":"май","06":"июн",
                        "07":"июл","08":"авг","09":"сен","10":"окт","11":"ноя","12":"дек"}
         for row in stats["monthly_activity"]:
             ym, cnt, users = row["month"], row["cnt"], row["users"]
+            new_u = row["new_users"] if "new_users" in row.keys() else 0
             year, mon = ym.split("-")
             label = f"{month_names.get(mon, mon)} {year}"
-            lines.append(f"  {label} — {cnt} запр. {users} польз. ({users} ун)")
+            new_str = f" (+{new_u} нов)" if new_u else ""
+            lines.append(f"  {label} — {cnt} запр. {users} польз.{new_str}")
 
     lines.extend([
         "",
