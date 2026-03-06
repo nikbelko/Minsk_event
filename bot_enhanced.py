@@ -308,7 +308,7 @@ def get_events_by_date_and_category(target_date: datetime, category: str | None 
         """
         params = [date_str]
         if category == "free":
-            query += " AND (price = '' OR price IS NULL OR LOWER(price) LIKE '%бесплатн%' OR LOWER(price) LIKE '%свободн%')"
+            query += " AND category = 'free'"
         elif category and category != "all":
             query += " AND category = ?"
             params.append(category)
@@ -333,7 +333,7 @@ def get_upcoming_events(limit: int = 20, category: str | None = None):
                 SELECT id, title, details, description, event_date, show_time,
                        place, location, price, category, source_url
                 FROM events WHERE event_date >= ?
-                  AND (price = '' OR price IS NULL OR LOWER(price) LIKE '%бесплатн%' OR LOWER(price) LIKE '%свободн%')
+                  AND category = 'free'
                   {time_filter}
                 ORDER BY event_date, show_time, title LIMIT ?
             """, (today, today, now_time, limit * SEARCH_MULTIPLIER))
@@ -369,7 +369,7 @@ def get_weekend_events(category: str | None = None):
                 SELECT id, title, details, description, event_date, show_time,
                        place, location, price, category, source_url
                 FROM events WHERE event_date IN (?, ?)
-                  AND (price = '' OR price IS NULL OR LOWER(price) LIKE '%бесплатн%' OR LOWER(price) LIKE '%свободн%')
+                  AND category = 'free'
                 ORDER BY event_date, show_time, title
             """, (saturday_str, sunday_str))
         elif category and category != "all":
@@ -500,7 +500,7 @@ def group_other_events(events: list) -> list:
     Если у события нет place — объединяем с записью по тому же title."""
     from collections import OrderedDict
     EMOJI_MAP = {"theater": "🎭", "concert": "🎵", "exhibition": "🖼️",
-                 "kids": "🧸", "cinema": "🎬"}
+                 "kids": "🧸", "cinema": "🎬", "party": "🌟", "free": "🆓", "sport": "⚽"}
     grouped = OrderedDict()
     # Индекс title → ключ первой записи с непустым place
     title_to_key = {}

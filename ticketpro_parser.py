@@ -127,7 +127,7 @@ class TicketproParser:
     def is_minsk_event(self, place_text: str) -> bool:
         """Проверяет, относится ли событие к Минску."""
         if not place_text or place_text == '':
-            return True
+            return False  # без города не берём — лучше пропустить, чем взять не-минское
         
         place_lower = place_text.lower()
         
@@ -140,7 +140,9 @@ class TicketproParser:
             'кобрин', 'kobrin', 'жодино', 'zhodino', 'речица', 'rechitsa',
             'берёза', 'bereza', 'мозырь', 'mozyr', 'борисов', 'borisov',
             'барановичи', 'baranovichi', 'несвиж', 'nesvizh', 'дзержинск', 'dzerzhinsk',
-            'пружаны', 'pruzhany'
+            'пружаны', 'pruzhany',
+            'гродна', 'grodna', 'слоним', 'slonim', 'волковыск', 'volkovysk',
+            'слуцк', 'slutsk', 'светлогорск', 'svetlogorsk', 'полоцк', 'polotsk'
         ]
         
         for city in other_cities:
