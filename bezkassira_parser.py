@@ -193,13 +193,11 @@ class BezkassiraParser:
                 lines = [l.strip() for l in hint_tag.get_text("\n").split("\n") if l.strip()]
                 hint_city = lines[-1] if lines else ""
 
-            if city_id != MINSK_CITY_ID and "Минск" not in hint_city:
+            # Главный критерий — текст города из hint ("Минск")
+            # city_id используем только как запасной вариант если hint пустой
+            is_minsk = "Минск" in hint_city if hint_city else (city_id == MINSK_CITY_ID)
+            if not is_minsk:
                 self.stats["non_minsk"] += 1
-                return None
-            # Двойная проверка: city_id совпадает, но город в тексте явно не Минск
-            if city_id == MINSK_CITY_ID and hint_city and "Минск" not in hint_city:
-                self.stats["non_minsk"] += 1
-                logger.debug(f"  ⚠ city_id=24811 но город='{hint_city}' — пропускаем")
                 return None
 
             caption = thumb.find("div", class_="caption")
