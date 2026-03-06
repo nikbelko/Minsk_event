@@ -191,7 +191,8 @@ class RelaxBaseParser:
                 if place_div:
                     place_a = place_div.find("a", class_="js-schedule__place-link")
                     if place_a:
-                        last_place = place_a.get_text(strip=True)
+                        raw_place = place_a.get_text(strip=True)
+                        last_place = self.normalize_place(raw_place) or raw_place
                     addr_span = place_div.find("span", class_="schedule__place-link")
                     last_location = addr_span.get_text(strip=True) if addr_span else "Минск"
 
@@ -556,7 +557,8 @@ class RelaxKinoParser(RelaxBaseParser):
                     if place_fill:
                         place_a = place_fill.find("a", class_="js-schedule__place-link")
                         if place_a:
-                            last_place = place_a.get_text(strip=True)
+                            raw_place = place_a.get_text(strip=True)
+                            last_place = self.normalize_place(raw_place) or raw_place
                         addr = place_fill.find("span", class_="schedule__place-link")
                         last_location = addr.get_text(strip=True) if addr else "Минск"
 

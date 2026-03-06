@@ -185,9 +185,21 @@ class BezkassiraParser:
     def parse_card(self, thumb: BeautifulSoup, category: str,
                    index: dict) -> Optional[Dict]:
         try:
-            # 1. Только Минск
-            if thumb.get("data-city_id") != MINSK_CITY_ID:
+            # 1. Только Минск — проверяем data-city_id И текст города из hint
+            city_id = thumb.get("data-city_id", "")
+            hint_tag = thumb.find("small", class_="hint")
+            hint_city = ""
+            if hint_tag:
+                lines = [l.strip() for l in hint_tag.get_text("\n").split("\n") if l.strip()]
+                hint_city = lines[-1] if lines else ""
+
+            if city_id != MINSK_CITY_ID and "Минск" not in hint_city:
                 self.stats["non_minsk"] += 1
+                return None
+            # Двойная проверка: city_id совпадает, но город в тексте явно не Минск
+            if city_id == MINSK_CITY_ID and hint_city and "Минск" not in hint_city:
+                self.stats["non_minsk"] += 1
+                logger.debug(f"  ⚠ city_id=24811 но город='{hint_city}' — пропускаем")
                 return None
 
             caption = thumb.find("div", class_="caption")
@@ -234,8 +246,8 @@ class BezkassiraParser:
             except ValueError:
                 return None
 
-            # 5. Место
-            hint = caption.find("small", class_="hint") or thumb.find("small", class_="hint")
+            # 5. Место (hint уже найден выше)
+            hint = hint_tag
             place = ""
             if hint:
                 lines = [l.strip() for l in hint.get_text('\n').split('\n') if l.strip()]
