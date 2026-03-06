@@ -158,8 +158,15 @@ def get_stats_data() -> dict:
             GROUP BY day ORDER BY day DESC
         """)
         daily_activity = cursor.fetchall()
-        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE created_at LIKE ?", (f"{today}%",))
-        unique_today = cursor.fetchone()[0]
+        # Новые пользователи сегодня — те у кого первая запись датирована сегодня
+        cursor.execute("""
+            SELECT COUNT(*) FROM (
+                SELECT user_id FROM user_stats
+                GROUP BY user_id
+                HAVING MIN(DATE(created_at)) = ?
+            )
+        """, (today,))
+        new_today = cursor.fetchone()[0]
         cursor.execute("""
             SELECT strftime('%Y-%m', created_at) as month,
                    COUNT(*) as cnt,
@@ -184,7 +191,7 @@ def get_stats_data() -> dict:
             "top_actions": top_actions,
             "events_count": events_count,
             "subscribers_count": subscribers_count,
-            "unique_today": unique_today,
+            "new_today": new_today,
             "monthly_activity": monthly_activity,
         }
 
@@ -949,7 +956,7 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "",
         f"👥 Всего пользователей: <b>{stats['total_users']}</b>",
         f"📨 Всего запросов: <b>{stats['total_actions']}</b>",
-        f"🟢 Пользователей сегодня: <b>{stats['users_today']}</b> ({stats['unique_today']} ун)",
+        f"🟢 Пользователей сегодня: <b>{stats['users_today']}</b> (+{stats['new_today']} новых)",
         f"📬 Запросов сегодня: <b>{stats['actions_today']}</b>",
         f"🔔 Подписчиков: <b>{stats['subscribers_count']}</b>",
         f"🗂 Событий в базе: <b>{stats['events_count']}</b>",

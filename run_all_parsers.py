@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 PARSERS = [
     ("relax_parser.py",    "🌐 Relax"),
     ("ticketpro_parser.py", "🎫 Ticketpro"),
+    ("bezkassira_parser.py",  "🎟 BezKassira"),
 ]
 
 
