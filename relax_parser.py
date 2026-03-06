@@ -473,6 +473,33 @@ class RelaxKidsParser(RelaxBaseParser):
 
 
 
+
+class RelaxPartyParser(RelaxBaseParser):
+    path = "/clubs/minsk/"
+    category = "party"
+    source_name = "relax.by/clubs"
+    emoji = "🎉"
+    clear_label = "вечеринок"
+    known_venues = [
+        "Prime Hall", "Re:Public", "Club Re:Public",
+        "ZAVOD", "Dozari", "DoZari Club",
+        "Falcon Club", "Zoccolo",
+        "Liberty Club", "Арт-центр Корпус",
+        "Граффити", "Ресторан Граффити",
+        "Лофт", "Стадион Локомотив",
+        "Harat's Pub", "Пианобар",
+    ]
+
+
+class RelaxFreeParser(RelaxBaseParser):
+    path = "/free/minsk/"
+    category = "free"
+    source_name = "relax.by/free"
+    emoji = "🆓"
+    clear_label = "бесплатных событий"
+    known_venues = []   # принимаем все места — бесплатные мероприятия везде
+
+
 class RelaxKinoParser(RelaxBaseParser):
     path = "/kino/minsk/"
     category = "cinema"
@@ -645,6 +672,8 @@ if __name__ == "__main__":
         "exhibition": RelaxExhibitionParser,
         "kids":       RelaxKidsParser,
         "kino":       RelaxKinoParser,
+        "party":      RelaxPartyParser,
+        "free":       RelaxFreeParser,
     }
 
     if len(sys.argv) > 1:

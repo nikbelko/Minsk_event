@@ -66,6 +66,7 @@ CATEGORY_EMOJI = {
     "kids": "🧸",
     "sport": "⚽",
     "free": "🆓",
+    "party": "🌟",
 }
 
 CATEGORY_NAMES = {
@@ -76,6 +77,7 @@ CATEGORY_NAMES = {
     "kids": "🧸 Детям",
     "sport": "⚽ Спорт",
     "free": "🆓 Бесплатно",
+    "party": "🌟 Движ",
 }
 
 # ---------------------- Работа с БД ----------------------
@@ -156,6 +158,17 @@ def get_stats_data() -> dict:
             GROUP BY day ORDER BY day DESC
         """)
         daily_activity = cursor.fetchall()
+        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE created_at LIKE ?", (f"{today}%",))
+        unique_today = cursor.fetchone()[0]
+        cursor.execute("""
+            SELECT strftime('%Y-%m', created_at) as month,
+                   COUNT(*) as cnt,
+                   COUNT(DISTINCT user_id) as users
+            FROM user_stats
+            WHERE created_at < DATE('now', '-7 days')
+            GROUP BY month ORDER BY month DESC LIMIT 6
+        """)
+        monthly_activity = cursor.fetchall()
         cursor.execute("SELECT action, COUNT(*) as cnt FROM user_stats GROUP BY action ORDER BY cnt DESC LIMIT 10")
         top_actions = cursor.fetchall()
         cursor.execute("SELECT COUNT(*) FROM events WHERE event_date >= ?", (today,))
@@ -171,6 +184,8 @@ def get_stats_data() -> dict:
             "top_actions": top_actions,
             "events_count": events_count,
             "subscribers_count": subscribers_count,
+            "unique_today": unique_today,
+            "monthly_activity": monthly_activity,
         }
 
 
@@ -799,7 +814,7 @@ async def show_categories_menu(query, context: ContextTypes.DEFAULT_TYPE):
         [btn("🎬", "Кино", "cinema"), btn("🎵", "Концерты", "concert")],
         [btn("🎭", "Театр", "theater"), btn("🖼️", "Выставки", "exhibition")],
         [btn("🧸", "Детям", "kids"), btn("⚽", "Спорт", "sport")],
-        [btn("🆓", "Бесплатно", "free"), InlineKeyboardButton("◀️ Назад", callback_data="back_to_main")],
+        [btn("🌟", "Движ", "party"), btn("🆓", "Бесплатно", "free")],
     ]
     await query.edit_message_text("🎯 **Выберите категорию:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
@@ -883,7 +898,8 @@ async def send_subscriptions_digest(bot, date_type: str):
 
         display_name = CATEGORY_NAMES.get(category, category)
         preview = list(events)[:5]
-        lines = [f"🔔 **{display_name} на {period_label}** — {len(events)} событий\n"]
+        greeting = "🔔 С добрым утром! Пора начинать новый 🌟 Dvizh!\n\n"
+        lines = [greeting + f"🔔 **{display_name} на {period_label}** — {len(events)} событий\n"]
 
         if category == "cinema":
             for text, url in format_grouped_cinema_events(group_cinema_events(preview)):
@@ -933,7 +949,7 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "",
         f"👥 Всего пользователей: <b>{stats['total_users']}</b>",
         f"📨 Всего запросов: <b>{stats['total_actions']}</b>",
-        f"🟢 Пользователей сегодня: <b>{stats['users_today']}</b>",
+        f"🟢 Пользователей сегодня: <b>{stats['users_today']}</b> ({stats['unique_today']} ун)",
         f"📬 Запросов сегодня: <b>{stats['actions_today']}</b>",
         f"🔔 Подписчиков: <b>{stats['subscribers_count']}</b>",
         f"🗂 Событий в базе: <b>{stats['events_count']}</b>",
@@ -942,8 +958,21 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     
     for row in stats["daily_activity"]:
-        lines.append(f"  {row['day']} — {row['cnt']} запр. {row['users']} польз.")
-    
+        # daily_activity: (day, cnt, users) — нет отдельного unique_day, считаем users как уникальных
+        day, cnt, users = row["day"], row["cnt"], row["users"]
+        lines.append(f"  {day} — {cnt} запр. {users} польз. ({users} ун)")
+
+    # Активность по прошлым месяцам
+    if stats.get("monthly_activity"):
+        lines.extend(["", "<b>📅 Активность за пр. месяцы:</b>"])
+        month_names = {"01":"янв","02":"фев","03":"мар","04":"апр","05":"май","06":"июн",
+                       "07":"июл","08":"авг","09":"сен","10":"окт","11":"ноя","12":"дек"}
+        for row in stats["monthly_activity"]:
+            ym, cnt, users = row["month"], row["cnt"], row["users"]
+            year, mon = ym.split("-")
+            label = f"{month_names.get(mon, mon)} {year}"
+            lines.append(f"  {label} — {cnt} запр. {users} польз. ({users} ун)")
+
     lines.extend([
         "",
         "<b>🔝 Топ действий:</b>"
@@ -1019,8 +1048,6 @@ async def run_parsers_job(bot=None):
             if bot:
                 report = _parse_parser_report(output)
                 await _send_parser_report(bot, report or [], elapsed)
-                sent, errors = await send_subscriptions_digest(bot, "today")
-                logger.info(f"📬 Дайджест отправлен: {sent} польз., {errors} ошибок")
         else:
             error_msg = stderr.decode()[:300] if stderr else "неизвестная ошибка"
             logger.error(f"❌ Парсеры упали: {error_msg}")
@@ -1073,9 +1100,15 @@ def _format_parser_report(report: dict, elapsed: float | None = None) -> str:
             lines.append("   └ завершился с ошибкой")
 
     # Итог
+    total_found = sum(
+        int(r.split(":")[2])
+        for p in report.get("parsers", [])
+        for r in p.get("results", [])
+        if len(r.split(":")) == 4
+    )
     s = report.get("success", 0)
     f = report.get("failed", 0)
-    lines += ["", f"📊 Итого: ✅ {s} успешно  ❌ {f} с ошибкой"]
+    lines += ["", f"📦 Всего найдено: {total_found}", f"📊 Итого: ✅ {s} успешно  ❌ {f} с ошибкой"]
     return "\n".join(lines)
 
 
@@ -1095,6 +1128,13 @@ async def _send_parser_report(bot, report_or_results, elapsed: float):
         logger.error(f"Не удалось отправить отчёт: {e}")
 
 
+async def send_digest_job(bot=None):
+    """Рассылает дайджест подписчикам в 8:00 (после обновления парсеров в 6:00)."""
+    if bot:
+        sent, errors = await send_subscriptions_digest(bot, "today")
+        logger.info(f"📬 Дайджест отправлен: {sent} польз., {errors} ошибок")
+
+
 def setup_scheduler(application):
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
@@ -1104,8 +1144,15 @@ def setup_scheduler(application):
         id="daily_parsers",
         replace_existing=True,
     )
+    scheduler.add_job(
+        send_digest_job,
+        trigger=CronTrigger(hour=5, minute=0),  # UTC+3 = 8:00 Минск
+        kwargs={"bot": application.bot},
+        id="daily_digest",
+        replace_existing=True,
+    )
     scheduler.start()
-    logger.info("⏰ Планировщик запущен. Парсеры + рассылка ежедневно в 6:00 (Минск)")
+    logger.info("⏰ Планировщик: парсеры в 6:00, дайджест в 8:00 (Минск)")
 
 
 # ---------------------- Донат ----------------------
@@ -1204,11 +1251,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user_action(user.id, user.username, user.first_name, "start")
     await update.message.reply_text(
         f"🎉 Привет, {user.first_name}!\n\n"
-        "Я - 🌟**MinskDvizh**🌟, твой бот-афиша Минска. Помогу тебе найти самые интересные события в городе.\n\n"
+        "Я бот-афиша Минска. Помогу найти интересные события в городе.\n\n"
         "🔍 **Как искать:**\n"
-        "• Отправь **название** события (например: «концерт», «Дельфин»)\n"
+        "• Отправьте **название** события (например: «концерт», «Дельфин»)\n"
         "• Или **дату** в формате ДД.ММ или ДД.ММ.ГГГГ\n\n"
-        "Используй кнопки для быстрого поиска 👇",
+        "Используйте кнопки для быстрого поиска 👇",
         reply_markup=get_reply_main_menu(), parse_mode="Markdown",
     )
 
@@ -1245,7 +1292,7 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "💼 **Добавить мероприятие / сотрудничество:**\n"
         "📱 @i354444\n\n"
         "⭐ Если бот полезен — поддержи проект!\n\n"
-        "#minskdvizh #афишаминск #минск #минскафиша #минскконцерт"
+        "#minskdvizh #афишаминск #минск"
     )
     await update.message.reply_text(
         text,
@@ -1348,7 +1395,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [btn("🎬", "Кино", "cinema"), btn("🎵", "Концерты", "concert")],
                 [btn("🎭", "Театр", "theater"), btn("🖼️", "Выставки", "exhibition")],
                 [btn("🧸", "Детям", "kids"), btn("⚽", "Спорт", "sport")],
-                [btn("🆓", "Бесплатно", "free"), InlineKeyboardButton("◀️ Назад", callback_data="back_to_main")],
+                [btn("🌟", "Движ", "party"), btn("🆓", "Бесплатно", "free")],
             ]),
             parse_mode="Markdown",
         )
