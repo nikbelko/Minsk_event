@@ -6,3 +6,7 @@ apscheduler==3.10.4
 requests==2.31.0
 beautifulsoup4==4.12.2
 lxml==4.9.3
+
+# API
+fastapi==0.111.0
+uvicorn==0.29.0
