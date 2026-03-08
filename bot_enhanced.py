@@ -923,8 +923,10 @@ async def send_subscriptions_digest(bot, date_type: str):
 
         display_name = CATEGORY_NAMES.get(category, category)
         preview = list(events)[:5]
-        greeting = "🔔 С добрым утром! Пора начинать новый 🌟 Dvizh!\n\n"
-        lines = [greeting + f"🔔 **{display_name} на {period_label}** — {len(events)} событий\n"]
+        lines = [
+            "🔔 С добрым утром! Пора начинать новый 🌟 Dvizh!\n",
+            f"🔔 <b>{display_name} на {period_label}</b> — {len(events)} событий\n",
+        ]
 
         if category == "cinema":
             for text, url in format_grouped_cinema_events(group_cinema_events(preview)):
@@ -937,7 +939,7 @@ async def send_subscriptions_digest(bot, date_type: str):
                 lines.append(item["text"] + link + "\n")
 
         if len(events) > 5:
-            lines.append(f"_...и ещё {len(events) - 5} событий. Откройте бот для просмотра всех._")
+            lines.append(f"<i>...и ещё {len(events) - 5} событий. Откройте бот для просмотра всех.</i>")
 
         message_text = "\n".join(lines)
 
@@ -948,7 +950,7 @@ async def send_subscriptions_digest(bot, date_type: str):
             try:
                 await bot.send_message(chat_id=user_id, text=message_text,
                                        reply_markup=unsubscribe_keyboard,
-                                       parse_mode="Markdown", disable_web_page_preview=True)
+                                       parse_mode="HTML", disable_web_page_preview=True)
                 sent_count += 1
                 await asyncio.sleep(0.05)
             except Exception as e:

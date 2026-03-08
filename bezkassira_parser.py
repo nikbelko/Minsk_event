@@ -48,6 +48,39 @@ CATEGORIES = [
     {"url": f"{BASE_URL}/events/party/",   "category": "party",    "label": "вечеринок"},
 ]
 
+# Нормализация названий площадок — приводим к единому виду как в ticketpro/relax
+PLACE_NORMALIZE = {
+    'кз «минск»':          'КЗ Минск',
+    'кз "минск"':          'КЗ Минск',
+    'кз минск':            'КЗ Минск',
+    'концертный зал минск': 'КЗ Минск',
+    'дворец республики':   'Дворец Республики',
+    'дворец профсоюзов':   'Дворец Профсоюзов',
+    'минск-арена':         'Минск-Арена',
+    'prime hall':          'Prime Hall',
+    'прайм холл':          'Prime Hall',
+    'falcon club':         'Falcon Club Arena',
+    'белгосфилармония':    'Белорусская государственная филармония',
+    'молодёжный театр':    'Молодёжный театр',
+    'молодежный театр':    'Молодёжный театр',
+    'дворец спорта':       'Дворец спорта',
+}
+
+
+def normalize_place(place: str) -> str:
+    """Приводит название площадки к каноническому виду."""
+    if not place:
+        return place
+    key = place.lower().strip()
+    # Убираем кавычки для поиска
+    key_clean = key.replace('«', '').replace('»', '').replace('"', '').strip()
+    for alias, canonical in PLACE_NORMALIZE.items():
+        alias_clean = alias.replace('«', '').replace('»', '').replace('"', '').strip()
+        if alias_clean in key_clean or key_clean in alias_clean:
+            return canonical
+    return place
+
+
 MONTHS_RU = {
     "января": "01", "февраля": "02", "марта": "03",   "апреля": "04",
     "мая":    "05", "июня":   "06", "июля":  "07",   "августа": "08",
@@ -249,7 +282,7 @@ class BezkassiraParser:
             place = ""
             if hint:
                 lines = [l.strip() for l in hint.get_text('\n').split('\n') if l.strip()]
-                place = lines[0] if lines else ""
+                place = normalize_place(lines[0]) if lines else ""
 
             # 6. URL
             a = caption.find("a", href=True)
@@ -354,15 +387,38 @@ class BezkassiraParser:
         today = date.today().isoformat()
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
+
+        # Удаляем устаревшие по дате
         cursor.execute(
             "DELETE FROM events WHERE source_name = ? AND event_date < ?",
             (SOURCE_NAME, today)
         )
-        deleted = cursor.rowcount
+        deleted_old = cursor.rowcount
+
+        # Удаляем не-минские записи (могли попасть до улучшения фильтра)
+        non_minsk_keywords = [
+            'гродн', 'гомель', 'витебск', 'могилев', 'брест', 'бобруйск',
+            'солигорск', 'борисов', 'орша', 'пинск', 'слуцк', 'полоцк',
+            'областная филармония', 'областной дворец',
+        ]
+        deleted_nonminsk = 0
+        cursor.execute(
+            "SELECT id, place FROM events WHERE source_name = ?", (SOURCE_NAME,)
+        )
+        rows = cursor.fetchall()
+        bad_ids = []
+        for row_id, place in rows:
+            if place and any(kw in place.lower() for kw in non_minsk_keywords):
+                bad_ids.append(row_id)
+        if bad_ids:
+            cursor.executemany("DELETE FROM events WHERE id = ?", [(i,) for i in bad_ids])
+            deleted_nonminsk = len(bad_ids)
+            logger.info(f"🗑 Удалено не-минских: {deleted_nonminsk} ({bad_ids})")
+
         conn.commit()
         conn.close()
-        if deleted:
-            logger.info(f"🗑 Удалено устаревших: {deleted}")
+        if deleted_old:
+            logger.info(f"🗑 Удалено устаревших: {deleted_old}")
 
     # ── Главный запуск ──
 
