@@ -1362,7 +1362,10 @@ async def handle_submit_step(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return True
 
 
-async def _send_next_submit_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, step_idx: int):
+async def _send_next_submit_prompt(update_or_message, context: ContextTypes.DEFAULT_TYPE, step_idx: int):
+    # Принимаем как Update так и Message напрямую
+    msg = update_or_message.message if isinstance(update_or_message, Update) else update_or_message
+
     if step_idx >= len(SUBMIT_STEPS):
         data = context.user_data["submit"]
         preview = format_pending_preview(data)
@@ -1370,18 +1373,18 @@ async def _send_next_submit_prompt(update: Update, context: ContextTypes.DEFAULT
             InlineKeyboardButton("✅ Отправить на модерацию", callback_data="submit_confirm"),
             InlineKeyboardButton("❌ Отмена", callback_data="submit_cancel"),
         ]])
-        await update.message.reply_text(
+        await msg.reply_text(
             preview + "\n\n<i>Проверьте данные и отправьте на модерацию:</i>",
             reply_markup=keyboard, parse_mode="HTML"
         )
     else:
         step_name = SUBMIT_STEPS[step_idx]
         if step_name == "category":
-            await update.message.reply_text(
+            await msg.reply_text(
                 SUBMIT_PROMPTS["category"], reply_markup=CATEGORY_KEYBOARD, parse_mode="HTML"
             )
         else:
-            await update.message.reply_text(SUBMIT_PROMPTS[step_name], parse_mode="HTML")
+            await msg.reply_text(SUBMIT_PROMPTS[step_name], parse_mode="HTML")
 
 
 def setup_scheduler(application):
