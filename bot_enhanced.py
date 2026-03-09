@@ -51,7 +51,8 @@ logger = logging.getLogger(__name__)
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 DB_NAME     = os.getenv("DB_PATH", "/data/events_final.db")  # Volume path
 WEB_APP_URL = os.getenv("WEB_APP_URL", "https://minskdvizh-web.up.railway.app")
-ADMIN_ID = 502917728
+ADMIN_ID   = 502917728
+CHANNEL_ID = os.getenv("CHANNEL_ID", "")   # @MinskDvizh или -100xxxxxxxxxx
 
 DONATION_ENABLED = True
 DONATION_SUGGESTIONS = [10, 50, 100, 500]
@@ -1048,17 +1049,13 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [
         "<b>📊 СТАТИСТИКА БОТА</b>",
         "",
-        f"👥 Всего пользователей: <b>{stats['total_users']}</b> (бот) + <b>{stats['webapp_users']}</b> (web)",
+        f"👥 Всего пользователей: <b>{stats['total_users'] + stats['webapp_users']}</b> ({stats['webapp_users']} 🌐)",
         f"📨 Всего запросов: <b>{stats['total_actions']}</b>",
-        f"🟢 Пользователей сегодня: <b>{stats['users_today']}</b> (+{stats['new_today']} новых) 🌐<b>{stats['webapp_today']}</b> web",
+        f"🟢 Пользователей сегодня: <b>{stats['users_today'] + stats['webapp_today']}</b> ({stats['webapp_today']} 🌐) +{stats['new_today']} нов",
         f"📬 Запросов сегодня: <b>{stats['actions_today']}</b>",
         f"🔔 Подписчиков: <b>{stats['subscribers_count']}</b>",
         f"🗂 Событий в базе: <b>{stats['events_count']}</b>",
-        "",
-        "<b>🌐 Telegram Web App:</b>",
-        f"  Открытий всего: <b>{stats['webapp_total']}</b>",
-        f"  Уникальных пользователей: <b>{stats['webapp_users']}</b>",
-        f"  Открытий сегодня: <b>{stats['webapp_today']}</b>",
+
         "",
         "<b>📅 Активность за 30 дней:</b>",
     ]
@@ -1066,10 +1063,12 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for row in stats["daily_activity"]:
         day, cnt, users = row["day"], row["cnt"], row["users"]
         new_u = row["new_users"] if "new_users" in row.keys() else 0
-        new_str = f" (+{new_u} нов)" if new_u else ""
+        new_str = f" +{new_u} нов" if new_u else ""
         wa = stats["webapp_by_day"].get(day, (0, 0))
-        wa_str = f" 🌐{wa[0]}({wa[1]}u)" if wa[0] else ""
-        lines.append(f"  {day} — {cnt} запр. {users} польз.{new_str}{wa_str}")
+        wa_u = wa[1] if isinstance(wa, tuple) else wa
+        total_u = users + wa_u
+        wa_str = f" ({wa_u} 🌐)" if wa_u else ""
+        lines.append(f"  {day} — {cnt} запр. {total_u} польз.{wa_str}{new_str}")
 
     # Активность по прошлым месяцам
     if stats.get("monthly_activity"):
@@ -1081,10 +1080,12 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             new_u = row["new_users"] if "new_users" in row.keys() else 0
             year, mon = ym.split("-")
             label = f"{month_names.get(mon, mon)} {year}"
-            new_str = f" (+{new_u} нов)" if new_u else ""
+            new_str = f" +{new_u} нов" if new_u else ""
             wa = stats["webapp_by_month"].get(ym, (0, 0))
-            wa_str = f" 🌐{wa[0]}({wa[1]}u)" if wa[0] else ""
-            lines.append(f"  {label} — {cnt} запр. {users} польз.{new_str}{wa_str}")
+            wa_u = wa[1] if isinstance(wa, tuple) else wa
+            total_u = users + wa_u
+            wa_str = f" ({wa_u} 🌐)" if wa_u else ""
+            lines.append(f"  {label} — {cnt} запр. {total_u} польз.{wa_str}{new_str}")
 
     lines.extend([
         "",
@@ -1470,6 +1471,89 @@ async def _send_next_submit_prompt(update_or_message, context: ContextTypes.DEFA
             await msg.reply_text(SUBMIT_PROMPTS[step_name], parse_mode="HTML")
 
 
+# ---------------------- Публикация в канал ----------------------
+
+async def post_to_channel(bot, post_type: str = "today"):
+    """Публикует подборку событий в Telegram канал."""
+    if not CHANNEL_ID:
+        logger.warning("CHANNEL_ID не задан — пропускаем публикацию в канал")
+        return
+
+    now = datetime.now(MINSK_TZ)
+
+    if post_type == "today":
+        events = get_events_by_date_and_category(now)
+        if not events:
+            return
+        date_label = now.strftime("%d.%m.%Y")
+        day_name = ["Понедельник","Вторник","Среда","Четверг","Пятница","Суббота","Воскресенье"][now.weekday()]
+        lines = [f"🗓 <b>{day_name}, {date_label} — афиша Минска</b>\n"]
+        from collections import defaultdict as _dd
+        by_cat = _dd(list)
+        for e in list(events)[:20]:
+            by_cat[e["category"]].append(e)
+        for cat, evs in by_cat.items():
+            cat_name = CATEGORY_NAMES.get(cat, cat)
+            lines.append(f"\n{cat_name}")
+            for e in evs[:4]:
+                title = e["title"]
+                time_str = f" {e['show_time']}" if e.get("show_time") else ""
+                place_str = f" • {e['place']}" if e.get("place") else ""
+                price_str = f" • {e['price']}" if e.get("price") else ""
+                url = e.get("source_url", "")
+                if url:
+                    lines.append(f"  • <a href=\"{url}\">{title}</a>{time_str}{place_str}{price_str}")
+                else:
+                    lines.append(f"  • {title}{time_str}{place_str}{price_str}")
+
+    elif post_type == "weekend":
+        saturday = now + timedelta(days=(5 - now.weekday()) % 7 or 7)
+        sunday = saturday + timedelta(days=1)
+        events_sat = get_events_by_date_and_category(saturday)
+        events_sun = get_events_by_date_and_category(sunday)
+        all_events = list(events_sat)[:10] + list(events_sun)[:10]
+        if not all_events:
+            return
+        sat_str = saturday.strftime("%d.%m")
+        sun_str = sunday.strftime("%d.%m")
+        lines = [f"🎉 <b>Выходные {sat_str}–{sun_str} — афиша Минска</b>\n"]
+        from collections import defaultdict as _dd
+        by_cat = _dd(list)
+        for e in all_events:
+            by_cat[e["category"]].append(e)
+        for cat, evs in by_cat.items():
+            cat_name = CATEGORY_NAMES.get(cat, cat)
+            lines.append(f"\n{cat_name}")
+            for e in evs[:3]:
+                title = e["title"]
+                date_str = datetime.strptime(e["event_date"], "%Y-%m-%d").strftime("%d.%m")
+                time_str = f" {e['show_time']}" if e.get("show_time") else ""
+                place_str = f" • {e['place']}" if e.get("place") else ""
+                url = e.get("source_url", "")
+                if url:
+                    lines.append(f"  • <a href=\"{url}\">{title}</a> ({date_str}{time_str}){place_str}")
+                else:
+                    lines.append(f"  • {title} ({date_str}{time_str}){place_str}")
+    else:
+        return
+
+    lines.append(f"\n\n👉 Все события: @MinskDvizhBot")
+    text = "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:4000] + "...\n\n👉 @MinskDvizhBot"
+
+    try:
+        await bot.send_message(
+            chat_id=CHANNEL_ID,
+            text=text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+        logger.info(f"📢 Пост в канал ({post_type}) опубликован")
+    except Exception as e:
+        logger.error(f"Ошибка публикации в канал: {e}")
+
+
 def setup_scheduler(application):
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
@@ -1486,8 +1570,26 @@ def setup_scheduler(application):
         id="daily_digest",
         replace_existing=True,
     )
+    async def channel_today_job(bot=None):
+        if bot:
+            await post_to_channel(bot, "today")
+    scheduler.add_job(
+        channel_today_job,
+        trigger=CronTrigger(hour=5, minute=5),  # UTC = 8:05 Минск
+        kwargs={"bot": application.bot},
+        id="channel_today", replace_existing=True,
+    )
+    async def channel_weekend_job(bot=None):
+        if bot:
+            await post_to_channel(bot, "weekend")
+    scheduler.add_job(
+        channel_weekend_job,
+        trigger=CronTrigger(day_of_week="fri", hour=8, minute=0),  # UTC = 11:00 Минск
+        kwargs={"bot": application.bot},
+        id="channel_weekend", replace_existing=True,
+    )
     scheduler.start()
-    logger.info("⏰ Планировщик: парсеры в 6:00, дайджест в 8:00 (Минск)")
+    logger.info("⏰ Планировщик: парсеры 6:00, дайджест 8:00, канал 8:05, выходные пятница 11:00 (Минск)")
 
 
 # ---------------------- Донат ----------------------
@@ -1614,6 +1716,21 @@ async def app_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🌐 <b>MinskDvizh — веб-версия</b>\n\nОткрой полную афишу Минска прямо в Telegram:",
         reply_markup=keyboard, parse_mode="HTML",
     )
+
+
+async def post_channel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ручная публикация в канал (только для админа)."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Нет доступа.")
+        return
+    args = context.args
+    post_type = args[0] if args else "today"
+    if post_type not in ("today", "weekend"):
+        await update.message.reply_text("Использование: /post_channel [today|weekend]")
+        return
+    await update.message.reply_text(f"📢 Публикую в канал ({post_type})...")
+    await post_to_channel(context.bot, post_type)
+    await update.message.reply_text("✅ Готово!")
 
 
 async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2065,6 +2182,7 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("donate", custom_donate))
     application.add_handler(CommandHandler("support", donate_command))
     application.add_handler(CommandHandler("app", app_command))
+    application.add_handler(CommandHandler("post_channel", post_channel_command))
     application.add_handler(CommandHandler("about", about))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(PreCheckoutQueryHandler(precheckout_callback))
