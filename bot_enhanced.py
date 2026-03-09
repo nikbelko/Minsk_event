@@ -130,6 +130,8 @@ def init_db():
                 category TEXT,
                 description TEXT,
                 price TEXT,
+                address TEXT DEFAULT '',
+                source_url TEXT DEFAULT '',
                 status TEXT DEFAULT 'pending',
                 created_at TEXT NOT NULL
             )
@@ -1251,7 +1253,7 @@ async def send_digest_job(bot=None):
 
 # ---------------------- Добавление событий (модерация) ----------------------
 
-SUBMIT_STEPS = ["title", "event_date", "show_time", "place", "category", "price", "description"]
+SUBMIT_STEPS = ["title", "event_date", "show_time", "place", "address", "category", "price", "description", "source_url"]
 
 SUBMIT_PROMPTS = {
     "title":       "📝 Введите <b>название</b> события:",
@@ -1261,6 +1263,8 @@ SUBMIT_PROMPTS = {
     "category":    "🎯 Выберите <b>категорию</b>:",
     "price":       "💰 Введите <b>цену</b> (например: от 20 BYN, Бесплатно)\nИли нажмите /skip чтобы пропустить:",
     "description": "📖 Введите <b>описание</b> события (до 500 символов)\nИли нажмите /skip чтобы пропустить:",
+    "address":     "📍 Введите <b>адрес</b> (например: ул. Притыцкого, 62)\nИли нажмите /skip чтобы пропустить:",
+    "source_url":  "🔗 Введите <b>ссылку</b> на событие (сайт, соцсети)\nИли нажмите /skip чтобы пропустить:",
 }
 
 CATEGORY_KEYBOARD = InlineKeyboardMarkup([
@@ -1282,23 +1286,48 @@ CATEGORY_KEYBOARD = InlineKeyboardMarkup([
 ])
 
 
+
+def get_pending_event(pending_id: int) -> dict | None:
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT * FROM pending_events WHERE id=?", (pending_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def update_pending_event(pending_id: int, data: dict):
+    with get_db_connection() as conn:
+        conn.execute("""
+            UPDATE pending_events
+            SET title=?, event_date=?, show_time=?, place=?, address=?,
+                category=?, price=?, description=?, source_url=?, status='edited'
+            WHERE id=?
+        """, (
+            data.get("title", ""), data.get("event_date", ""),
+            data.get("show_time", ""), data.get("place", ""),
+            data.get("address", ""), data.get("category", "other"),
+            data.get("price", ""), data.get("description", ""),
+            data.get("source_url", ""), pending_id,
+        ))
+        conn.commit()
+
 def save_pending_event(user_id, username, first_name, data: dict) -> int:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO pending_events
               (user_id, username, first_name, title, event_date, show_time,
-               place, category, description, price, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+               place, address, category, description, price, source_url, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             user_id, username, first_name,
             data.get("title", ""),
             data.get("event_date", ""),
             data.get("show_time", ""),
             data.get("place", ""),
+            data.get("address", ""),
             data.get("category", "other"),
             data.get("description", ""),
             data.get("price", ""),
+            data.get("source_url", ""),
             datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"),
         ))
         conn.commit()
@@ -1312,6 +1341,10 @@ def approve_pending_event(pending_id: int) -> bool:
         row = cursor.fetchone()
         if not row:
             return False
+        try:
+            address = row["address"] or ""
+        except Exception:
+            address = ""
         cursor.execute("""
             INSERT INTO events
               (title, details, description, event_date, show_time,
@@ -1321,10 +1354,10 @@ def approve_pending_event(pending_id: int) -> bool:
             row["title"], "",
             row["description"] or "",
             row["event_date"], row["show_time"] or "",
-            row["place"] or "", "Минск",
+            row["place"] or "", address or "Минск",
             row["price"] or "",
             row["category"] or "other",
-            "user_submitted", "",
+            "user_submitted", row["source_url"] or "",
         ))
         cursor.execute("UPDATE pending_events SET status = 'approved' WHERE id = ?", (pending_id,))
         conn.commit()
@@ -1363,6 +1396,10 @@ def format_pending_preview(data: dict, user=None) -> str:
         lines.append(f"💰 {_html.escape(data['price'])}")
     if data.get("description"):
         lines.append(f"📖 {_html.escape(data['description'][:300])}")
+    if data.get("address"):
+        lines.append(f"📍 {_html.escape(data['address'])}")
+    if data.get("source_url"):
+        lines.append(f"🔗 {_html.escape(data['source_url'])}")
     return "\n".join(lines)
 
 
@@ -1384,6 +1421,20 @@ async def start_submit(update_or_query, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_submit_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    if context.user_data.get("mod_edit_id") and update.effective_user.id == ADMIN_ID:
+        text = update.message.text.strip()
+        if ":" in text:
+            field, _, value = text.partition(":")
+            field = field.strip().lower()
+            value = value.strip()
+            EDITABLE = {"title", "event_date", "show_time", "place", "address", "category", "price", "description", "source_url"}
+            if field in EDITABLE:
+                context.user_data["mod_edit_data"][field] = value
+                await update.message.reply_text(f"✅ <b>{field}</b>: <code>{value}</code>", parse_mode="HTML")
+            else:
+                await update.message.reply_text(f"⚠️ Неизвестное поле. Доступные: {', '.join(sorted(EDITABLE))}")
+        return True
+
     if not context.user_data.get("in_submit"):
         return False
 
@@ -2001,10 +2052,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             log_user_action(user.id, user.username, user.first_name, "submit_event_sent", data_form.get("title"))
             # Уведомление админу
             preview = format_pending_preview(data_form, user)
-            admin_keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ Одобрить", callback_data=f"mod_approve_{pending_id}"),
-                InlineKeyboardButton("❌ Отклонить", callback_data=f"mod_reject_{pending_id}"),
-            ]])
+            admin_keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Одобрить", callback_data=f"mod_approve_{pending_id}"),
+                    InlineKeyboardButton("❌ Отклонить", callback_data=f"mod_reject_{pending_id}"),
+                ],
+                [InlineKeyboardButton("✏️ Редактировать и согласовать", callback_data=f"mod_edit_{pending_id}")],
+            ])
             try:
                 await context.bot.send_message(
                     chat_id=ADMIN_ID, text=preview,
@@ -2067,6 +2121,106 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 except Exception:
                     pass
+            return
+
+        if data.startswith("mod_edit_") and not data.startswith("mod_edit_cancel_"):
+            if query.from_user.id != ADMIN_ID:
+                await query.answer("⛔ Нет доступа", show_alert=True)
+                return
+            pending_id = int(data.split("_")[-1])
+            event = get_pending_event(pending_id)
+            if not event:
+                await query.answer("Событие не найдено", show_alert=True)
+                return
+            context.user_data["mod_edit_id"] = pending_id
+            context.user_data["mod_edit_user_id"] = event["user_id"]
+            context.user_data["mod_edit_data"] = {k: event.get(k) or "" for k in
+                ["title","event_date","show_time","place","address","category","price","description","source_url"]}
+            context.user_data["mod_edit_data"].setdefault("category", "other")
+            await query.answer()
+            d = context.user_data["mod_edit_data"]
+            await query.message.reply_text(
+                f"✏️ <b>Редактирование события #{pending_id}</b>\n\n"
+                + "\n".join(f"• {k}: <code>{v or '—'}</code>" for k, v in d.items()) +
+                "\n\nВведите <b>поле: значение</b>, например:\n"
+                "<code>place: Prime Hall</code>\n\n"
+                "Когда закончите — нажмите кнопку:",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📤 Отправить пользователю", callback_data=f"mod_send_edit_{pending_id}"),
+                    InlineKeyboardButton("❌ Отмена", callback_data=f"mod_edit_cancel_{pending_id}"),
+                ]]),
+                parse_mode="HTML"
+            )
+            return
+
+        if data.startswith("mod_send_edit_"):
+            if query.from_user.id != ADMIN_ID:
+                await query.answer("⛔ Нет доступа", show_alert=True)
+                return
+            pending_id = int(data.split("_")[-1])
+            edit_data = context.user_data.get("mod_edit_data", {})
+            user_id = context.user_data.get("mod_edit_user_id")
+            if not edit_data or not user_id:
+                await query.answer("Нет данных", show_alert=True)
+                return
+            update_pending_event(pending_id, edit_data)
+            await query.answer("📤 Отправлено")
+            preview = format_pending_preview(edit_data)
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"✏️ <b>Модератор внёс изменения в ваше событие</b>\n\n{preview}\n\n<i>Вы согласны?</i>",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("✅ Принять", callback_data=f"user_accept_edit_{pending_id}"),
+                        InlineKeyboardButton("❌ Отклонить", callback_data=f"user_reject_edit_{pending_id}"),
+                    ]]),
+                    parse_mode="HTML"
+                )
+                await query.message.reply_text(f"✅ Событие #{pending_id} отправлено пользователю на согласование.")
+            except Exception as e:
+                await query.message.reply_text(f"⚠️ Не удалось отправить: {e}")
+            for k in ["mod_edit_id", "mod_edit_user_id", "mod_edit_data"]:
+                context.user_data.pop(k, None)
+            return
+
+        if data.startswith("mod_edit_cancel_"):
+            for k in ["mod_edit_id", "mod_edit_user_id", "mod_edit_data"]:
+                context.user_data.pop(k, None)
+            await query.answer("Редактирование отменено")
+            await query.edit_message_reply_markup(reply_markup=None)
+            return
+
+        if data.startswith("user_accept_edit_"):
+            pending_id = int(data.split("_")[-1])
+            ok = approve_pending_event(pending_id)
+            await query.answer()
+            if ok:
+                await query.edit_message_text(
+                    query.message.text + "\n\n✅ <b>Вы приняли изменения. Событие добавлено в афишу!</b>",
+                    parse_mode="HTML"
+                )
+                try:
+                    await context.bot.send_message(chat_id=ADMIN_ID,
+                        text=f"✅ Пользователь принял правки события #{pending_id} — добавлено в афишу.")
+                except Exception:
+                    pass
+            else:
+                await query.edit_message_text("⚠️ Ошибка при добавлении.", parse_mode="HTML")
+            return
+
+        if data.startswith("user_reject_edit_"):
+            pending_id = int(data.split("_")[-1])
+            reject_pending_event(pending_id)
+            await query.answer()
+            await query.edit_message_text(
+                query.message.text + "\n\n❌ <b>Вы отклонили изменения. Событие не добавлено.</b>",
+                parse_mode="HTML"
+            )
+            try:
+                await context.bot.send_message(chat_id=ADMIN_ID,
+                    text=f"❌ Пользователь отклонил правки события #{pending_id}.")
+            except Exception:
+                pass
             return
 
         if data == "show_submit":
