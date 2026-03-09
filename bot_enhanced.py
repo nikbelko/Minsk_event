@@ -156,17 +156,6 @@ def init_db():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_stats_user_id ON user_stats(user_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_stats_created_at ON user_stats(created_at)")
         conn.commit()
-        # Миграции — добавляем новые колонки если их нет
-        migrations = [
-            "ALTER TABLE pending_events ADD COLUMN address TEXT DEFAULT ''",
-            "ALTER TABLE pending_events ADD COLUMN source_url TEXT DEFAULT ''",
-        ]
-        for migration in migrations:
-            try:
-                cursor.execute(migration)
-                conn.commit()
-            except Exception:
-                pass  # колонка уже существует
 
 
 def log_user_action(user_id: int, username: str | None, first_name: str | None, action: str, detail: str | None = None):
@@ -249,19 +238,19 @@ def get_stats_data() -> dict:
         """)
         webapp_total = cursor.fetchone()[0]
         cursor.execute("""
-            SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE action = 'open_webapp'
+            SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE action IN ('open_webapp', 'webapp_ping')
         """)
         webapp_users = cursor.fetchone()[0]
         cursor.execute("""
             SELECT COUNT(*) FROM user_stats
-            WHERE action = 'open_webapp' AND created_at LIKE ?
+            WHERE action IN ('open_webapp', 'webapp_ping') AND created_at LIKE ?
         """, (f"{today}%",))
         webapp_today = cursor.fetchone()[0]
         # Webapp по дням (за 30 дней)
         cursor.execute("""
             SELECT DATE(created_at) as day, COUNT(*) as cnt, COUNT(DISTINCT user_id) as users
             FROM user_stats
-            WHERE action = 'open_webapp' AND created_at >= DATE('now', '-30 days')
+            WHERE action IN ('open_webapp', 'webapp_ping') AND created_at >= DATE('now', '-30 days')
             GROUP BY day
         """)
         webapp_by_day = {r["day"]: (r["cnt"], r["users"]) for r in cursor.fetchall()}
@@ -1395,6 +1384,58 @@ async def start_submit(update_or_query, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_submit_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    # Пользователь редактирует поле перед отправкой
+    if context.user_data.get("in_submit_edit"):
+        field = context.user_data.get("submit_edit_field")
+        text = update.message.text.strip()
+        data_form = context.user_data.get("submit", {})
+
+        if text == "/cancel":
+            context.user_data.pop("in_submit_edit", None)
+            context.user_data.pop("submit_edit_field", None)
+            await update.message.reply_text("↩️ Редактирование поля отменено.")
+            return True
+
+        if text == "/skip":
+            data_form[field] = ""
+        else:
+            if field == "event_date":
+                import re as _re; from datetime import date as _date
+                m = _re.match(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})$", text)
+                if not m:
+                    await update.message.reply_text("❌ Формат: ДД.ММ.ГГГГ"); return True
+                day, month, year = m.groups()
+                try:
+                    ev = _date(int(year), int(month), int(day))
+                except ValueError:
+                    await update.message.reply_text("❌ Такой даты не существует."); return True
+                if ev < _date.today():
+                    await update.message.reply_text("❌ Дата не может быть в прошлом."); return True
+                data_form[field] = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+            elif field == "show_time":
+                import re as _re
+                if not _re.match(r"^(\d{1,2}):(\d{2})$", text):
+                    await update.message.reply_text("❌ Формат: ЧЧ:ММ"); return True
+                data_form[field] = text
+            elif field == "description":
+                data_form[field] = text[:500]
+            else:
+                data_form[field] = text
+
+        context.user_data.pop("in_submit_edit", None)
+        context.user_data.pop("submit_edit_field", None)
+        preview = format_pending_preview(data_form)
+        await update.message.reply_text(
+            preview + "\n\n<i>Проверьте данные и отправьте на модерацию:</i>",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Отправить на модерацию", callback_data="submit_confirm")],
+                [InlineKeyboardButton("✏️ Редактировать", callback_data="submit_edit")],
+                [InlineKeyboardButton("❌ Отмена", callback_data="submit_cancel")],
+            ]),
+            parse_mode="HTML"
+        )
+        return True
+
     if not context.user_data.get("in_submit"):
         return False
 
@@ -1464,10 +1505,11 @@ async def _send_next_submit_prompt(update_or_message, context: ContextTypes.DEFA
     if step_idx >= len(SUBMIT_STEPS):
         data = context.user_data["submit"]
         preview = format_pending_preview(data)
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Отправить на модерацию", callback_data="submit_confirm"),
-            InlineKeyboardButton("❌ Отмена", callback_data="submit_cancel"),
-        ]])
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Отправить на модерацию", callback_data="submit_confirm")],
+            [InlineKeyboardButton("✏️ Редактировать", callback_data="submit_edit")],
+            [InlineKeyboardButton("❌ Отмена", callback_data="submit_cancel")],
+        ])
         await msg.reply_text(
             preview + "\n\n<i>Проверьте данные и отправьте на модерацию:</i>",
             reply_markup=keyboard, parse_mode="HTML"
@@ -1985,7 +2027,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Выбор категории в форме добавления события
         if data.startswith("sc_"):
             category = data[3:]
-            if context.user_data.get("in_submit"):
+            if context.user_data.get("in_submit_edit"):
+                context.user_data["submit"]["category"] = category
+                context.user_data.pop("in_submit_edit", None)
+                context.user_data.pop("submit_edit_field", None)
+                await query.answer(f"Выбрано: {CATEGORY_NAMES.get(category, category)}")
+                data_form = context.user_data.get("submit", {})
+                preview = format_pending_preview(data_form)
+                await query.message.reply_text(
+                    preview + "\n\n<i>Проверьте данные и отправьте на модерацию:</i>",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("✅ Отправить на модерацию", callback_data="submit_confirm")],
+                        [InlineKeyboardButton("✏️ Редактировать", callback_data="submit_edit")],
+                        [InlineKeyboardButton("❌ Отмена", callback_data="submit_cancel")],
+                    ]),
+                    parse_mode="HTML"
+                )
+            elif context.user_data.get("in_submit"):
                 context.user_data["submit"]["category"] = category
                 step_idx = context.user_data.get("submit_step", 0) + 1
                 context.user_data["submit_step"] = step_idx
@@ -2025,10 +2083,81 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"Не удалось отправить событие админу: {e}")
             return
 
+        if data == "submit_edit":
+            await query.answer()
+            data_form = context.user_data.get("submit", {})
+            field_labels = {
+                "title":       "📝 Название",
+                "event_date":  "📅 Дата",
+                "show_time":   "⏰ Время",
+                "place":       "🏢 Место",
+                "address":     "📍 Адрес",
+                "category":    "🎯 Категория",
+                "price":       "💰 Цена",
+                "description": "📖 Описание",
+                "source_url":  "🔗 Ссылка",
+            }
+            rows = []
+            row = []
+            for field, label in field_labels.items():
+                mark = " ✓" if data_form.get(field) else ""
+                row.append(InlineKeyboardButton(f"{label}{mark}", callback_data=f"submit_edit_field_{field}"))
+                if len(row) == 2:
+                    rows.append(row); row = []
+            if row:
+                rows.append(row)
+            rows.append([InlineKeyboardButton("◀️ Назад", callback_data="submit_back_preview")])
+            await query.edit_message_text(
+                "✏️ <b>Что хотите изменить?</b>\nВыберите поле:",
+                reply_markup=InlineKeyboardMarkup(rows), parse_mode="HTML"
+            )
+            return
+
+        if data.startswith("submit_edit_field_"):
+            field = data.replace("submit_edit_field_", "")
+            context.user_data["submit_edit_field"] = field
+            context.user_data["in_submit_edit"] = True
+            await query.answer()
+            prompts = {
+                "title":       "📝 Введите новое <b>название</b>:",
+                "event_date":  "📅 Введите новую <b>дату</b> (ДД.ММ.ГГГГ):",
+                "show_time":   "⏰ Введите новое <b>время</b> (ЧЧ:ММ) или /skip:",
+                "place":       "🏢 Введите новое <b>место</b> или /skip:",
+                "address":     "📍 Введите новый <b>адрес</b> или /skip:",
+                "category":    "🎯 Выберите новую <b>категорию</b>:",
+                "price":       "💰 Введите новую <b>цену</b> или /skip:",
+                "description": "📖 Введите новое <b>описание</b> или /skip:",
+                "source_url":  "🔗 Введите новую <b>ссылку</b> или /skip:",
+            }
+            if field == "category":
+                await query.message.reply_text(prompts[field], reply_markup=CATEGORY_KEYBOARD, parse_mode="HTML")
+            else:
+                await query.message.reply_text(prompts.get(field, "Введите новое значение:"), parse_mode="HTML")
+            return
+
+        if data == "submit_back_preview":
+            await query.answer()
+            context.user_data.pop("in_submit_edit", None)
+            context.user_data.pop("submit_edit_field", None)
+            data_form = context.user_data.get("submit", {})
+            preview = format_pending_preview(data_form)
+            await query.edit_message_text(
+                preview + "\n\n<i>Проверьте данные и отправьте на модерацию:</i>",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Отправить на модерацию", callback_data="submit_confirm")],
+                    [InlineKeyboardButton("✏️ Редактировать", callback_data="submit_edit")],
+                    [InlineKeyboardButton("❌ Отмена", callback_data="submit_cancel")],
+                ]),
+                parse_mode="HTML"
+            )
+            return
+
         if data == "submit_cancel":
             context.user_data.pop("in_submit", None)
             context.user_data.pop("submit", None)
             context.user_data.pop("submit_step", None)
+            context.user_data.pop("in_submit_edit", None)
+            context.user_data.pop("submit_edit_field", None)
             await query.answer()
             await query.edit_message_text("❌ Добавление отменено.")
             return
