@@ -2522,7 +2522,7 @@ def main():
     application = build_application()
     setup_scheduler(application)
     logger.info("🚀 Бот запущен (polling)")
-    application.run_polling()
+    application.run_polling(allowed_updates=["message", "callback_query", "inline_query", "chosen_inline_result", "pre_checkout_query"])
 
 
 if __name__ == "__main__":
