@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 DB_NAME     = os.getenv("DB_PATH", "/data/events_final.db")  # Volume path
-WEB_APP_URL = os.getenv("WEB_APP_URL", "https://minskdvizh.lovable.app")
+WEB_APP_URL = os.getenv("WEB_APP_URL", "https://minskdvizh-web.up.railway.app")
 ADMIN_ID = 502917728
 
 DONATION_ENABLED = True
@@ -69,6 +69,12 @@ CATEGORY_EMOJI = {
     "sport": "⚽",
     "free": "🆓",
     "party": "🌟",
+    "excursion": "🗺️",
+    "market": "🛍️",
+    "masterclass": "🎨",
+    "boardgames": "🎲",
+    "broadcast": "📺",
+    "education": "📚",
 }
 
 CATEGORY_NAMES = {
@@ -80,6 +86,12 @@ CATEGORY_NAMES = {
     "sport": "⚽ Спорт",
     "free": "🆓 Бесплатно",
     "party": "🌟 Движ",
+    "excursion": "🗺️ Экскурсии",
+    "market": "🛍️ Маркеты",
+    "masterclass": "🎨 Мастер-классы",
+    "boardgames": "🎲 Настолки",
+    "broadcast": "📺 Трансляции",
+    "education": "📚 Обучение",
 }
 
 # ---------------------- Работа с БД ----------------------
@@ -219,6 +231,20 @@ def get_stats_data() -> dict:
         events_count = cursor.fetchone()[0]
         cursor.execute("SELECT COUNT(DISTINCT user_id) FROM subscriptions")
         subscribers_count = cursor.fetchone()[0]
+        # Webapp статистика
+        cursor.execute("""
+            SELECT COUNT(*) FROM user_stats WHERE action = 'open_webapp'
+        """)
+        webapp_total = cursor.fetchone()[0]
+        cursor.execute("""
+            SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE action = 'open_webapp'
+        """)
+        webapp_users = cursor.fetchone()[0]
+        cursor.execute("""
+            SELECT COUNT(*) FROM user_stats
+            WHERE action = 'open_webapp' AND created_at LIKE ?
+        """, (f"{today}%",))
+        webapp_today = cursor.fetchone()[0]
         return {
             "total_users": total_users,
             "total_actions": total_actions,
@@ -230,6 +256,9 @@ def get_stats_data() -> dict:
             "subscribers_count": subscribers_count,
             "new_today": new_today,
             "monthly_activity": monthly_activity,
+            "webapp_total": webapp_total,
+            "webapp_users": webapp_users,
+            "webapp_today": webapp_today,
         }
 
 
@@ -850,16 +879,23 @@ async def show_main_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE | None
 async def show_categories_menu(query, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     counts = get_events_count_by_category()
-    def btn(emoji, name, cat):
+    # Показываем только категории у которых есть события
+    keyboard = []
+    row = []
+    for cat, name in CATEGORY_NAMES.items():
         n = counts.get(cat, 0)
-        label = f"{emoji} {name} ({n})" if n else f"{emoji} {name}"
-        return InlineKeyboardButton(label, callback_data=f"cat_{cat}")
-    keyboard = [
-        [btn("🎬", "Кино", "cinema"), btn("🎵", "Концерты", "concert")],
-        [btn("🎭", "Театр", "theater"), btn("🖼️", "Выставки", "exhibition")],
-        [btn("🧸", "Детям", "kids"), btn("⚽", "Спорт", "sport")],
-        [btn("🌟", "Движ", "party"), btn("🆓", "Бесплатно", "free")],
-    ]
+        if n == 0:
+            continue  # пропускаем пустые категории
+        label = f"{name} ({n})"
+        row.append(InlineKeyboardButton(label, callback_data=f"cat_{cat}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    if not keyboard:
+        await query.edit_message_text("😔 Пока нет доступных событий.", parse_mode="Markdown")
+        return
     await query.edit_message_text("🎯 **Выберите категорию:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 
@@ -999,6 +1035,11 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📬 Запросов сегодня: <b>{stats['actions_today']}</b>",
         f"🔔 Подписчиков: <b>{stats['subscribers_count']}</b>",
         f"🗂 Событий в базе: <b>{stats['events_count']}</b>",
+        "",
+        "<b>🌐 Telegram Web App:</b>",
+        f"  Открытий всего: <b>{stats['webapp_total']}</b>",
+        f"  Уникальных пользователей: <b>{stats['webapp_users']}</b>",
+        f"  Открытий сегодня: <b>{stats['webapp_today']}</b>",
         "",
         "<b>📅 Активность за 30 дней:</b>",
     ]
@@ -1205,8 +1246,14 @@ CATEGORY_KEYBOARD = InlineKeyboardMarkup([
      InlineKeyboardButton("🖼️ Выставка", callback_data="sc_exhibition")],
     [InlineKeyboardButton("🧸 Детям", callback_data="sc_kids"),
      InlineKeyboardButton("⚽ Спорт", callback_data="sc_sport")],
-    [InlineKeyboardButton("🌟 Вечеринка", callback_data="sc_party"),
+    [InlineKeyboardButton("🌟 Движ", callback_data="sc_party"),
      InlineKeyboardButton("🆓 Бесплатно", callback_data="sc_free")],
+    [InlineKeyboardButton("🗺️ Экскурсия", callback_data="sc_excursion"),
+     InlineKeyboardButton("🛍️ Маркет", callback_data="sc_market")],
+    [InlineKeyboardButton("🎨 Мастер-класс", callback_data="sc_masterclass"),
+     InlineKeyboardButton("🎲 Настолки", callback_data="sc_boardgames")],
+    [InlineKeyboardButton("📺 Трансляция", callback_data="sc_broadcast"),
+     InlineKeyboardButton("📚 Обучение", callback_data="sc_education")],
     [InlineKeyboardButton("📌 Другое", callback_data="sc_other")],
 ])
 
