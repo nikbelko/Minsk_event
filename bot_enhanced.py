@@ -1048,9 +1048,9 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [
         "<b>📊 СТАТИСТИКА БОТА</b>",
         "",
-        f"👥 Всего пользователей: <b>{stats['total_users']}</b>",
+        f"👥 Всего пользователей: <b>{stats['total_users']}</b> (бот) + <b>{stats['webapp_users']}</b> (web)",
         f"📨 Всего запросов: <b>{stats['total_actions']}</b>",
-        f"🟢 Пользователей сегодня: <b>{stats['users_today']}</b> (+{stats['new_today']} новых)",
+        f"🟢 Пользователей сегодня: <b>{stats['users_today']}</b> (+{stats['new_today']} новых) 🌐<b>{stats['webapp_today']}</b> web",
         f"📬 Запросов сегодня: <b>{stats['actions_today']}</b>",
         f"🔔 Подписчиков: <b>{stats['subscribers_count']}</b>",
         f"🗂 Событий в базе: <b>{stats['events_count']}</b>",
