@@ -1856,44 +1856,51 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     """Inline режим — для кнопки Поделиться."""
     from telegram import InlineQueryResultArticle, InputTextMessageContent
     import uuid as _uuid
-    now = datetime.now(MINSK_TZ)
-    today = now.strftime("%Y-%m-%d")
-    query_text = update.inline_query.query or ""
-    with get_db_connection() as conn:
-        if query_text:
-            rows = conn.execute("""
-                SELECT title, event_date, show_time, place, price, category, source_url
-                FROM events WHERE event_date >= ? AND title LIKE ?
-                ORDER BY event_date, show_time LIMIT 5
-            """, (today, f"%{query_text}%")).fetchall()
-        else:
-            rows = conn.execute("""
-                SELECT title, event_date, show_time, place, price, category, source_url
-                FROM events WHERE event_date >= ?
-                ORDER BY event_date, show_time LIMIT 5
-            """, (today,)).fetchall()
-    results = []
-    for row in rows:
-        cat_emoji = CATEGORY_EMOJI.get(row["category"] or "", "🎉")
-        title = row["title"] or "Событие"
-        try:
-            date_str = datetime.strptime(row["event_date"], "%Y-%m-%d").strftime("%d.%m.%Y")
-        except Exception:
-            date_str = row["event_date"] or ""
-        time_str = f" ⏰ {row['show_time']}" if row["show_time"] else ""
-        place_str = f"\n🏢 {row['place']}" if row["place"] else ""
-        price_str = f"\n💰 {row['price']}" if row["price"] else ""
-        url_str = f"\n🔗 {row['source_url']}" if row["source_url"] else ""
-        msg = (f"{cat_emoji} <b>{title}</b>\n"
-               f"📅 {date_str}{time_str}{place_str}{price_str}{url_str}\n\n"
-               f"👉 @MinskDvizhBot")
-        results.append(InlineQueryResultArticle(
-            id=str(_uuid.uuid4()),
-            title=f"{cat_emoji} {title}",
-            description=f"📅 {date_str}{time_str}" + (f" | {row['place']}" if row["place"] else ""),
-            input_message_content=InputTextMessageContent(message_text=msg, parse_mode="HTML"),
-        ))
-    await update.inline_query.answer(results, cache_time=30)
+    logger.info(f"[inline] запрос от {update.inline_query.from_user.id}: '{update.inline_query.query}'")
+    try:
+        now = datetime.now(MINSK_TZ)
+        today = now.strftime("%Y-%m-%d")
+        query_text = update.inline_query.query or ""
+        with get_db_connection() as conn:
+            if query_text:
+                rows = conn.execute("""
+                    SELECT title, event_date, show_time, place, price, category, source_url
+                    FROM events WHERE event_date >= ? AND title LIKE ?
+                    ORDER BY event_date, show_time LIMIT 5
+                """, (today, f"%{query_text}%")).fetchall()
+            else:
+                rows = conn.execute("""
+                    SELECT title, event_date, show_time, place, price, category, source_url
+                    FROM events WHERE event_date >= ?
+                    ORDER BY event_date, show_time LIMIT 5
+                """, (today,)).fetchall()
+        logger.info(f"[inline] найдено строк: {len(rows)}")
+        results = []
+        for row in rows:
+            cat_emoji = CATEGORY_EMOJI.get(row["category"] or "", "🎉")
+            title = row["title"] or "Событие"
+            try:
+                date_str = datetime.strptime(row["event_date"], "%Y-%m-%d").strftime("%d.%m.%Y")
+            except Exception:
+                date_str = row["event_date"] or ""
+            time_str = f" ⏰ {row['show_time']}" if row["show_time"] else ""
+            place_str = f"\n🏢 {row['place']}" if row["place"] else ""
+            price_str = f"\n💰 {row['price']}" if row["price"] else ""
+            url_str = f"\n🔗 {row['source_url']}" if row["source_url"] else ""
+            msg = (f"{cat_emoji} <b>{title}</b>\n"
+                   f"📅 {date_str}{time_str}{place_str}{price_str}{url_str}\n\n"
+                   f"👉 @MinskDvizhBot")
+            results.append(InlineQueryResultArticle(
+                id=str(_uuid.uuid4()),
+                title=f"{cat_emoji} {title}",
+                description=f"📅 {date_str}{time_str}" + (f" | {row['place']}" if row["place"] else ""),
+                input_message_content=InputTextMessageContent(message_text=msg, parse_mode="HTML"),
+            ))
+        await update.inline_query.answer(results, cache_time=30)
+        logger.info(f"[inline] отправлено результатов: {len(results)}")
+    except Exception as e:
+        logger.error(f"[inline] ошибка: {e}", exc_info=True)
+        await update.inline_query.answer([], cache_time=5)
 
 
 async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
