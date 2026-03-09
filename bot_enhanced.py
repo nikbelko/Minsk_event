@@ -130,8 +130,6 @@ def init_db():
                 category TEXT,
                 description TEXT,
                 price TEXT,
-                address TEXT DEFAULT '',
-                source_url TEXT DEFAULT '',
                 status TEXT DEFAULT 'pending',
                 created_at TEXT NOT NULL
             )
@@ -1253,7 +1251,7 @@ async def send_digest_job(bot=None):
 
 # ---------------------- Добавление событий (модерация) ----------------------
 
-SUBMIT_STEPS = ["title", "event_date", "show_time", "place", "address", "category", "price", "description", "source_url"]
+SUBMIT_STEPS = ["title", "event_date", "show_time", "place", "category", "price", "description"]
 
 SUBMIT_PROMPTS = {
     "title":       "📝 Введите <b>название</b> события:",
@@ -1263,8 +1261,6 @@ SUBMIT_PROMPTS = {
     "category":    "🎯 Выберите <b>категорию</b>:",
     "price":       "💰 Введите <b>цену</b> (например: от 20 BYN, Бесплатно)\nИли нажмите /skip чтобы пропустить:",
     "description": "📖 Введите <b>описание</b> события (до 500 символов)\nИли нажмите /skip чтобы пропустить:",
-    "address":     "📍 Введите <b>адрес</b> (например: ул. Притыцкого, 62)\nИли нажмите /skip чтобы пропустить:",
-    "source_url":  "🔗 Введите <b>ссылку</b> на событие (сайт, соцсети)\nИли нажмите /skip чтобы пропустить:",
 }
 
 CATEGORY_KEYBOARD = InlineKeyboardMarkup([
@@ -1292,19 +1288,17 @@ def save_pending_event(user_id, username, first_name, data: dict) -> int:
         cursor.execute("""
             INSERT INTO pending_events
               (user_id, username, first_name, title, event_date, show_time,
-               place, address, category, description, price, source_url, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+               place, category, description, price, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?)
         """, (
             user_id, username, first_name,
             data.get("title", ""),
             data.get("event_date", ""),
             data.get("show_time", ""),
             data.get("place", ""),
-            data.get("address", ""),
             data.get("category", "other"),
             data.get("description", ""),
             data.get("price", ""),
-            data.get("source_url", ""),
             datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"),
         ))
         conn.commit()
@@ -1369,10 +1363,6 @@ def format_pending_preview(data: dict, user=None) -> str:
         lines.append(f"💰 {_html.escape(data['price'])}")
     if data.get("description"):
         lines.append(f"📖 {_html.escape(data['description'][:300])}")
-    if data.get("address"):
-        lines.append(f"📍 {_html.escape(data['address'])}")
-    if data.get("source_url"):
-        lines.append(f"🔗 {_html.escape(data['source_url'])}")
     return "\n".join(lines)
 
 
@@ -1506,11 +1496,11 @@ async def post_to_channel(bot, post_type: str = "today"):
             cat_name = CATEGORY_NAMES.get(cat, cat)
             lines.append(f"\n{cat_name}")
             for e in evs[:4]:
-                title = e["title"]
-                time_str = f" {e['show_time']}" if e.get("show_time") else ""
-                place_str = f" • {e['place']}" if e.get("place") else ""
-                price_str = f" • {e['price']}" if e.get("price") else ""
-                url = e.get("source_url", "")
+                title = e["title"] or ""
+                time_str = f" {e['show_time']}" if e["show_time"] else ""
+                place_str = f" • {e['place']}" if e["place"] else ""
+                price_str = f" • {e['price']}" if e["price"] else ""
+                url = e["source_url"] if e["source_url"] else ""
                 if url:
                     lines.append(f"  • <a href=\"{url}\">{title}</a>{time_str}{place_str}{price_str}")
                 else:
@@ -1535,11 +1525,11 @@ async def post_to_channel(bot, post_type: str = "today"):
             cat_name = CATEGORY_NAMES.get(cat, cat)
             lines.append(f"\n{cat_name}")
             for e in evs[:3]:
-                title = e["title"]
+                title = e["title"] or ""
                 date_str = datetime.strptime(e["event_date"], "%Y-%m-%d").strftime("%d.%m")
-                time_str = f" {e['show_time']}" if e.get("show_time") else ""
-                place_str = f" • {e['place']}" if e.get("place") else ""
-                url = e.get("source_url", "")
+                time_str = f" {e['show_time']}" if e["show_time"] else ""
+                place_str = f" • {e['place']}" if e["place"] else ""
+                url = e["source_url"] if e["source_url"] else ""
                 if url:
                     lines.append(f"  • <a href=\"{url}\">{title}</a> ({date_str}{time_str}){place_str}")
                 else:
