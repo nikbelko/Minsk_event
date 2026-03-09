@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # bot_enhanced.py
-# Бот-афиша Минска
+# Бот-афиша Минска 0903
 
 import logging
 import os
