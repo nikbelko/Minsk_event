@@ -27,6 +27,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     ContextTypes,
     MessageHandler,
+    InlineQueryHandler,
     filters,
 )
 
@@ -158,7 +159,6 @@ def init_db():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_stats_user_id ON user_stats(user_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_stats_created_at ON user_stats(created_at)")
         conn.commit()
-        # Автоочистка: удаляем события старше 7 дней (кроме добавленных пользователями)
         try:
             cursor.execute("""
                 DELETE FROM events
@@ -523,7 +523,8 @@ def get_all_subscribers() -> dict:
 def format_event_text(event) -> str:
     import html as _html
     title = _html.escape(event["title"] or "")
-    text = f"🎉 <b>{title}</b>"
+    _emoji = CATEGORY_EMOJI.get(event.get("category") or "", "🎉")
+    text = f"{_emoji} <b>{title}</b>"
     if event["details"]:
         details = event["details"][:177] + "..." if len(event["details"]) > 180 else event["details"]
         text += f"\n📝 {_html.escape(details)}"
@@ -535,8 +536,6 @@ def format_event_text(event) -> str:
         text += f"\n🏢 {event['place']}"
     if event["price"]:
         text += f"\n💰 {event['price']}"
-    if event["category"]:
-        text += f"\n{CATEGORY_EMOJI.get(event['category'], '📌')} {event['category'].capitalize()}"
     return text
 
 
@@ -751,6 +750,9 @@ def build_page_keyboard(data: dict):
             InlineKeyboardButton(f"{page + 1}/{max_page + 1}", callback_data="page_noop"),
             InlineKeyboardButton("▶️", callback_data="page_next") if page < max_page else InlineKeyboardButton(" ", callback_data="page_noop"),
         ])
+    keyboard.append([
+        InlineKeyboardButton("📤 Поделиться", switch_inline_query="")
+    ])
     return InlineKeyboardMarkup(keyboard) if keyboard else None
 async def show_page(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     data = context.user_data.get("pagination")
@@ -1850,6 +1852,50 @@ async def post_channel_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text("✅ Готово!")
 
 
+async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Inline режим — для кнопки Поделиться."""
+    from telegram import InlineQueryResultArticle, InputTextMessageContent
+    import uuid as _uuid
+    now = datetime.now(MINSK_TZ)
+    today = now.strftime("%Y-%m-%d")
+    query_text = update.inline_query.query or ""
+    with get_db_connection() as conn:
+        if query_text:
+            rows = conn.execute("""
+                SELECT title, event_date, show_time, place, price, category, source_url
+                FROM events WHERE event_date >= ? AND title LIKE ?
+                ORDER BY event_date, show_time LIMIT 5
+            """, (today, f"%{query_text}%")).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT title, event_date, show_time, place, price, category, source_url
+                FROM events WHERE event_date >= ?
+                ORDER BY event_date, show_time LIMIT 5
+            """, (today,)).fetchall()
+    results = []
+    for row in rows:
+        cat_emoji = CATEGORY_EMOJI.get(row["category"] or "", "🎉")
+        title = row["title"] or "Событие"
+        try:
+            date_str = datetime.strptime(row["event_date"], "%Y-%m-%d").strftime("%d.%m.%Y")
+        except Exception:
+            date_str = row["event_date"] or ""
+        time_str = f" ⏰ {row['show_time']}" if row["show_time"] else ""
+        place_str = f"\n🏢 {row['place']}" if row["place"] else ""
+        price_str = f"\n💰 {row['price']}" if row["price"] else ""
+        url_str = f"\n🔗 {row['source_url']}" if row["source_url"] else ""
+        msg = (f"{cat_emoji} <b>{title}</b>\n"
+               f"📅 {date_str}{time_str}{place_str}{price_str}{url_str}\n\n"
+               f"👉 @MinskDvizhBot")
+        results.append(InlineQueryResultArticle(
+            id=str(_uuid.uuid4()),
+            title=f"{cat_emoji} {title}",
+            description=f"📅 {date_str}{time_str}" + (f" | {row['place']}" if row["place"] else ""),
+            input_message_content=InputTextMessageContent(message_text=msg, parse_mode="HTML"),
+        ))
+    await update.inline_query.answer(results, cache_time=30)
+
+
 async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     log_user_action(user.id, user.username, user.first_name, "about")
@@ -2327,10 +2373,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if data == "submit_preview":
             data_form = context.user_data.get("submit", {})
-            preview = format_pending_preview(data_form)
             await query.answer()
             await query.message.reply_text(
-                "👁 <b>Предпросмотр вашего события:</b>\n\n" + preview,
+                "👁 <b>Предпросмотр вашего события:</b>\n\n" + format_pending_preview(data_form),
                 parse_mode="HTML"
             )
             return
@@ -2462,6 +2507,7 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("support", donate_command))
     application.add_handler(CommandHandler("app", app_command))
     application.add_handler(CommandHandler("post_channel", post_channel_command))
+    application.add_handler(InlineQueryHandler(inline_query_handler))
     application.add_handler(CommandHandler("about", about))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(PreCheckoutQueryHandler(precheckout_callback))
