@@ -245,6 +245,23 @@ def get_stats_data() -> dict:
             WHERE action = 'open_webapp' AND created_at LIKE ?
         """, (f"{today}%",))
         webapp_today = cursor.fetchone()[0]
+        # Webapp по дням (за 30 дней)
+        cursor.execute("""
+            SELECT DATE(created_at) as day, COUNT(*) as cnt, COUNT(DISTINCT user_id) as users
+            FROM user_stats
+            WHERE action = 'open_webapp' AND created_at >= DATE('now', '-30 days')
+            GROUP BY day
+        """)
+        webapp_by_day = {r["day"]: (r["cnt"], r["users"]) for r in cursor.fetchall()}
+        # Webapp по месяцам
+        cursor.execute("""
+            SELECT strftime('%Y-%m', created_at) as month,
+                   COUNT(*) as cnt, COUNT(DISTINCT user_id) as users
+            FROM user_stats
+            WHERE action = 'open_webapp'
+            GROUP BY month
+        """)
+        webapp_by_month = {r["month"]: (r["cnt"], r["users"]) for r in cursor.fetchall()}
         return {
             "total_users": total_users,
             "total_actions": total_actions,
@@ -259,6 +276,8 @@ def get_stats_data() -> dict:
             "webapp_total": webapp_total,
             "webapp_users": webapp_users,
             "webapp_today": webapp_today,
+            "webapp_by_day": webapp_by_day,
+            "webapp_by_month": webapp_by_month,
         }
 
 
@@ -1048,7 +1067,9 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         day, cnt, users = row["day"], row["cnt"], row["users"]
         new_u = row["new_users"] if "new_users" in row.keys() else 0
         new_str = f" (+{new_u} нов)" if new_u else ""
-        lines.append(f"  {day} — {cnt} запр. {users} польз.{new_str}")
+        wa = stats["webapp_by_day"].get(day, (0, 0))
+        wa_str = f" 🌐{wa[0]}({wa[1]}u)" if wa[0] else ""
+        lines.append(f"  {day} — {cnt} запр. {users} польз.{new_str}{wa_str}")
 
     # Активность по прошлым месяцам
     if stats.get("monthly_activity"):
@@ -1061,7 +1082,9 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             year, mon = ym.split("-")
             label = f"{month_names.get(mon, mon)} {year}"
             new_str = f" (+{new_u} нов)" if new_u else ""
-            lines.append(f"  {label} — {cnt} запр. {users} польз.{new_str}")
+            wa = stats["webapp_by_month"].get(ym, (0, 0))
+            wa_str = f" 🌐{wa[0]}({wa[1]}u)" if wa[0] else ""
+            lines.append(f"  {label} — {cnt} запр. {users} польз.{new_str}{wa_str}")
 
     lines.extend([
         "",
@@ -1384,11 +1407,22 @@ async def handle_submit_step(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if step_name == "event_date":
         import re as _re
+        from datetime import date as _date
         m = _re.match(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})$", text)
         if not m:
             await update.message.reply_text("❌ Неверный формат. Введите дату как ДД.ММ.ГГГГ:")
             return True
         day, month, year = m.groups()
+        try:
+            ev_date = _date(int(year), int(month), int(day))
+        except ValueError:
+            await update.message.reply_text("❌ Такой даты не существует. Введите корректную дату:")
+            return True
+        if ev_date < _date.today():
+            await update.message.reply_text(
+                f"❌ Дата не может быть в прошлом. Сегодня {_date.today().strftime('%d.%m.%Y')} — введите сегодня или позже:"
+            )
+            return True
         data["event_date"] = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
     elif step_name == "show_time":
         import re as _re
