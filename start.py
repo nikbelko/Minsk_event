@@ -30,7 +30,7 @@ async def run_bot_webhook(application: Application):
         webhook_full_url = WEBHOOK_URL.rstrip("/") + WEBHOOK_PATH
         await application.bot.set_webhook(
             url=webhook_full_url,
-            allowed_updates=["message", "callback_query", "pre_checkout_query"],
+            allowed_updates=["message", "callback_query", "inline_query", "chosen_inline_result", "pre_checkout_query"],
             drop_pending_updates=True,
         )
         logger.info(f"✅ Webhook установлен: {webhook_full_url}")
