@@ -158,6 +158,16 @@ def init_db():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_stats_user_id ON user_stats(user_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_stats_created_at ON user_stats(created_at)")
         conn.commit()
+        # Автоочистка: удаляем события старше 7 дней (кроме добавленных пользователями)
+        try:
+            cursor.execute("""
+                DELETE FROM events
+                WHERE event_date < DATE('now', '-7 days')
+                AND (source_name IS NULL OR source_name != 'user_submitted')
+            """)
+            conn.commit()
+        except Exception:
+            pass
         for _migration in [
             "ALTER TABLE pending_events ADD COLUMN address TEXT DEFAULT ''",
             "ALTER TABLE pending_events ADD COLUMN source_url TEXT DEFAULT ''",
@@ -1348,12 +1358,14 @@ def build_fields_keyboard(data: dict, mode: str = "submit") -> InlineKeyboardMar
     if row:
         rows.append(row)
     if mode == "submit":
+        rows.append([InlineKeyboardButton("👁 Предпросмотр", callback_data="submit_preview")])
         rows.append([
             InlineKeyboardButton("✅ Отправить на модерацию", callback_data="submit_confirm"),
             InlineKeyboardButton("❌ Отмена", callback_data="submit_cancel"),
         ])
     else:  # mod_edit
         pending_id = data.get("_pending_id", "")
+        rows.append([InlineKeyboardButton("👁 Предпросмотр", callback_data=f"mod_preview_{pending_id}")])
         rows.append([
             InlineKeyboardButton("📤 Отправить пользователю", callback_data=f"mod_send_edit_{pending_id}"),
             InlineKeyboardButton("❌ Отмена", callback_data=f"mod_edit_cancel_{pending_id}"),
@@ -2311,6 +2323,29 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text=f"❌ Пользователь отклонил правки события #{pending_id}.")
             except Exception:
                 pass
+            return
+
+        if data == "submit_preview":
+            data_form = context.user_data.get("submit", {})
+            preview = format_pending_preview(data_form)
+            await query.answer()
+            await query.message.reply_text(
+                "👁 <b>Предпросмотр вашего события:</b>\n\n" + preview,
+                parse_mode="HTML"
+            )
+            return
+
+        if data.startswith("mod_preview_"):
+            if query.from_user.id != ADMIN_ID:
+                await query.answer("⛔ Нет доступа", show_alert=True)
+                return
+            edit_data = context.user_data.get("mod_edit_data", {})
+            clean = {k: v for k, v in edit_data.items() if k != "_pending_id"}
+            await query.answer()
+            await query.message.reply_text(
+                "👁 <b>Предпросмотр после редактирования:</b>\n\n" + format_pending_preview(clean),
+                parse_mode="HTML"
+            )
             return
 
         if data == "show_submit":
