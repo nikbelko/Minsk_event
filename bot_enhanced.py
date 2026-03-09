@@ -130,6 +130,8 @@ def init_db():
                 category TEXT,
                 description TEXT,
                 price TEXT,
+                address TEXT DEFAULT '',
+                source_url TEXT DEFAULT '',
                 status TEXT DEFAULT 'pending',
                 created_at TEXT NOT NULL
             )
@@ -156,6 +158,14 @@ def init_db():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_stats_user_id ON user_stats(user_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_stats_created_at ON user_stats(created_at)")
         conn.commit()
+        for _migration in [
+            "ALTER TABLE pending_events ADD COLUMN address TEXT DEFAULT ''",
+            "ALTER TABLE pending_events ADD COLUMN source_url TEXT DEFAULT ''",
+        ]:
+            try:
+                cursor.execute(_migration); conn.commit()
+            except Exception:
+                pass
 
 
 def log_user_action(user_id: int, username: str | None, first_name: str | None, action: str, detail: str | None = None):
@@ -234,7 +244,7 @@ def get_stats_data() -> dict:
         subscribers_count = cursor.fetchone()[0]
         # Webapp статистика
         cursor.execute("""
-            SELECT COUNT(*) FROM user_stats WHERE action = 'open_webapp'
+            SELECT COUNT(*) FROM user_stats WHERE action IN ('open_webapp', 'webapp_ping')
         """)
         webapp_total = cursor.fetchone()[0]
         cursor.execute("""
@@ -259,7 +269,7 @@ def get_stats_data() -> dict:
             SELECT strftime('%Y-%m', created_at) as month,
                    COUNT(*) as cnt, COUNT(DISTINCT user_id) as users
             FROM user_stats
-            WHERE action = 'open_webapp'
+            WHERE action IN ('open_webapp', 'webapp_ping')
             GROUP BY month
         """)
         webapp_by_month = {r["month"]: (r["cnt"], r["users"]) for r in cursor.fetchall()}
@@ -1251,16 +1261,30 @@ async def send_digest_job(bot=None):
 
 # ---------------------- Добавление событий (модерация) ----------------------
 
-SUBMIT_STEPS = ["title", "event_date", "show_time", "place", "category", "price", "description"]
 
-SUBMIT_PROMPTS = {
+# Метаданные полей формы — используется везде (добавление, редактирование, модерация)
+FIELD_LABELS = {
+    "title":       ("📝", "Название",   True),   # (эмодзи, название, обязательное)
+    "event_date":  ("📅", "Дата",       True),
+    "show_time":   ("⏰", "Время",      False),
+    "place":       ("🏢", "Место",      False),
+    "address":     ("📍", "Адрес",      False),
+    "category":    ("🎯", "Категория",  True),
+    "price":       ("💰", "Цена",       False),
+    "description": ("📖", "Описание",   False),
+    "source_url":  ("🔗", "Ссылка",     False),
+}
+
+FIELD_PROMPTS = {
     "title":       "📝 Введите <b>название</b> события:",
     "event_date":  "📅 Введите <b>дату</b> в формате ДД.ММ.ГГГГ (например: 15.04.2026):",
-    "show_time":   "⏰ Введите <b>время начала</b> в формате ЧЧ:ММ (например: 19:00)\nИли нажмите /skip чтобы пропустить:",
-    "place":       "🏢 Введите <b>место проведения</b> (название площадки)\nИли нажмите /skip чтобы пропустить:",
+    "show_time":   "⏰ Введите <b>время начала</b> в формате ЧЧ:ММ (например: 19:00)\nИли /skip чтобы пропустить:",
+    "place":       "🏢 Введите <b>место проведения</b> (название площадки)\nИли /skip чтобы пропустить:",
+    "address":     "📍 Введите <b>адрес</b> (например: ул. Притыцкого, 62)\nИли /skip чтобы пропустить:",
     "category":    "🎯 Выберите <b>категорию</b>:",
-    "price":       "💰 Введите <b>цену</b> (например: от 20 BYN, Бесплатно)\nИли нажмите /skip чтобы пропустить:",
-    "description": "📖 Введите <b>описание</b> события (до 500 символов)\nИли нажмите /skip чтобы пропустить:",
+    "price":       "💰 Введите <b>цену</b> (например: от 20 BYN, Бесплатно)\nИли /skip чтобы пропустить:",
+    "description": "📖 Введите <b>описание</b> события (до 500 символов)\nИли /skip чтобы пропустить:",
+    "source_url":  "🔗 Введите <b>ссылку</b> на событие (сайт, соцсети)\nИли /skip чтобы пропустить:",
 }
 
 CATEGORY_KEYBOARD = InlineKeyboardMarkup([
@@ -1282,23 +1306,108 @@ CATEGORY_KEYBOARD = InlineKeyboardMarkup([
 ])
 
 
+
+def get_pending_event(pending_id: int) -> dict | None:
+    with get_db_connection() as conn:
+        row = conn.execute("SELECT * FROM pending_events WHERE id=?", (pending_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def update_pending_event(pending_id: int, data: dict):
+    with get_db_connection() as conn:
+        conn.execute("""
+            UPDATE pending_events
+            SET title=?, event_date=?, show_time=?, place=?, address=?,
+                category=?, price=?, description=?, source_url=?, status='edited'
+            WHERE id=?
+        """, (
+            data.get("title", ""), data.get("event_date", ""),
+            data.get("show_time", ""), data.get("place", ""),
+            data.get("address", ""), data.get("category", "other"),
+            data.get("price", ""), data.get("description", ""),
+            data.get("source_url", ""), pending_id,
+        ))
+        conn.commit()
+
+
+def build_fields_keyboard(data: dict, mode: str = "submit") -> InlineKeyboardMarkup:
+    """Строит меню полей с галочками у заполненных. mode=submit|mod_edit"""
+    rows = []
+    row = []
+    for field, (emoji, label, required) in FIELD_LABELS.items():
+        val = data.get(field, "")
+        if required:
+            mark = " ✅" if val else " ❗"
+        else:
+            mark = " ✓" if val else ""
+        btn = InlineKeyboardButton(f"{emoji} {label}{mark}",
+                                   callback_data=f"{mode}_field_{field}")
+        row.append(btn)
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    if mode == "submit":
+        rows.append([
+            InlineKeyboardButton("✅ Отправить на модерацию", callback_data="submit_confirm"),
+            InlineKeyboardButton("❌ Отмена", callback_data="submit_cancel"),
+        ])
+    else:  # mod_edit
+        pending_id = data.get("_pending_id", "")
+        rows.append([
+            InlineKeyboardButton("📤 Отправить пользователю", callback_data=f"mod_send_edit_{pending_id}"),
+            InlineKeyboardButton("❌ Отмена", callback_data=f"mod_edit_cancel_{pending_id}"),
+        ])
+    return InlineKeyboardMarkup(rows)
+
+
+def validate_field(field: str, text: str):
+    """Валидирует значение поля. Возвращает (ok, value_or_error)."""
+    import re as _re
+    from datetime import date as _date
+    if field == "event_date":
+        m = _re.match(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})$", text)
+        if not m:
+            return False, "❌ Формат: ДД.ММ.ГГГГ (например 15.04.2026)"
+        day, month, year = m.groups()
+        try:
+            ev = _date(int(year), int(month), int(day))
+        except ValueError:
+            return False, "❌ Такой даты не существует."
+        if ev < _date.today():
+            return False, f"❌ Дата не может быть в прошлом. Сегодня {_date.today().strftime('%d.%m.%Y')}"
+        return True, f"{year}-{month.zfill(2)}-{day.zfill(2)}"
+    elif field == "show_time":
+        m = _re.match(r"^(\d{1,2}):(\d{2})$", text)
+        if not m:
+            return False, "❌ Формат: ЧЧ:ММ (например 19:00)"
+        return True, text
+    elif field == "title" and len(text) < 3:
+        return False, "❌ Название слишком короткое."
+    elif field == "description":
+        return True, text[:500]
+    else:
+        return True, text
+
 def save_pending_event(user_id, username, first_name, data: dict) -> int:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO pending_events
               (user_id, username, first_name, title, event_date, show_time,
-               place, category, description, price, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+               place, address, category, description, price, source_url, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             user_id, username, first_name,
             data.get("title", ""),
             data.get("event_date", ""),
             data.get("show_time", ""),
             data.get("place", ""),
+            data.get("address", ""),
             data.get("category", "other"),
             data.get("description", ""),
             data.get("price", ""),
+            data.get("source_url", ""),
             datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"),
         ))
         conn.commit()
@@ -1312,6 +1421,10 @@ def approve_pending_event(pending_id: int) -> bool:
         row = cursor.fetchone()
         if not row:
             return False
+        try:
+            _addr = row["address"] or ""
+        except Exception:
+            _addr = ""
         cursor.execute("""
             INSERT INTO events
               (title, details, description, event_date, show_time,
@@ -1321,10 +1434,10 @@ def approve_pending_event(pending_id: int) -> bool:
             row["title"], "",
             row["description"] or "",
             row["event_date"], row["show_time"] or "",
-            row["place"] or "", "Минск",
+            row["place"] or "", _addr or "Минск",
             row["price"] or "",
             row["category"] or "other",
-            "user_submitted", "",
+            "user_submitted", row["source_url"] or "",
         ))
         cursor.execute("UPDATE pending_events SET status = 'approved' WHERE id = ?", (pending_id,))
         conn.commit()
@@ -1363,165 +1476,104 @@ def format_pending_preview(data: dict, user=None) -> str:
         lines.append(f"💰 {_html.escape(data['price'])}")
     if data.get("description"):
         lines.append(f"📖 {_html.escape(data['description'][:300])}")
+    if data.get("address"):
+        lines.append(f"📍 {_html.escape(data['address'])}")
+    if data.get("source_url"):
+        lines.append(f"🔗 {_html.escape(data['source_url'])}")
     return "\n".join(lines)
 
 
 async def start_submit(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["submit"] = {}
-    context.user_data["submit_step"] = 0
     context.user_data["in_submit"] = True
+    context.user_data.pop("submit_field", None)
     text = (
         "➕ <b>Добавление события</b>\n\n"
-        "Заполните форму шаг за шагом.\n"
-        "Для отмены введите /cancel\n\n"
-        + SUBMIT_PROMPTS["title"]
+        "Выберите поле для заполнения.\n"
+        "❗ — обязательное поле, ✅ — заполнено.\n"
+        "Когда всё готово — нажмите <b>Отправить на модерацию</b>.\n"
+        "Для отмены введите /cancel"
     )
+    kbd = build_fields_keyboard({}, mode="submit")
     if isinstance(update_or_query, Update):
-        await update_or_query.message.reply_text(text, parse_mode="HTML")
+        await update_or_query.message.reply_text(text, reply_markup=kbd, parse_mode="HTML")
     else:
         await update_or_query.answer()
-        await update_or_query.message.reply_text(text, parse_mode="HTML")
+        await update_or_query.message.reply_text(text, reply_markup=kbd, parse_mode="HTML")
 
 
 async def handle_submit_step(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    # Пользователь редактирует поле перед отправкой
-    if context.user_data.get("in_submit_edit"):
-        field = context.user_data.get("submit_edit_field")
+    # Редактирование поля модератором
+    if context.user_data.get("mod_edit_id") and update.effective_user.id == ADMIN_ID:
+        field = context.user_data.get("mod_edit_field")
+        if not field:
+            return False
         text = update.message.text.strip()
-        data_form = context.user_data.get("submit", {})
-
-        if text == "/cancel":
-            context.user_data.pop("in_submit_edit", None)
-            context.user_data.pop("submit_edit_field", None)
-            await update.message.reply_text("↩️ Редактирование поля отменено.")
-            return True
-
+        edit_data = context.user_data.get("mod_edit_data", {})
+        pending_id = context.user_data["mod_edit_id"]
         if text == "/skip":
-            data_form[field] = ""
+            edit_data[field] = ""
+        elif text == "/cancel":
+            context.user_data.pop("mod_edit_field", None)
+            await update.message.reply_text("↩️ Изменение поля отменено.")
+            edit_data["_pending_id"] = pending_id
+            await update.message.reply_text(
+                "✏️ Продолжайте редактирование или отправьте пользователю:",
+                reply_markup=build_fields_keyboard(edit_data, mode="mod_edit")
+            )
+            return True
         else:
-            if field == "event_date":
-                import re as _re; from datetime import date as _date
-                m = _re.match(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})$", text)
-                if not m:
-                    await update.message.reply_text("❌ Формат: ДД.ММ.ГГГГ"); return True
-                day, month, year = m.groups()
-                try:
-                    ev = _date(int(year), int(month), int(day))
-                except ValueError:
-                    await update.message.reply_text("❌ Такой даты не существует."); return True
-                if ev < _date.today():
-                    await update.message.reply_text("❌ Дата не может быть в прошлом."); return True
-                data_form[field] = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
-            elif field == "show_time":
-                import re as _re
-                if not _re.match(r"^(\d{1,2}):(\d{2})$", text):
-                    await update.message.reply_text("❌ Формат: ЧЧ:ММ"); return True
-                data_form[field] = text
-            elif field == "description":
-                data_form[field] = text[:500]
-            else:
-                data_form[field] = text
-
-        context.user_data.pop("in_submit_edit", None)
-        context.user_data.pop("submit_edit_field", None)
-        preview = format_pending_preview(data_form)
+            ok, val = validate_field(field, text)
+            if not ok:
+                await update.message.reply_text(val)
+                return True
+            edit_data[field] = val
+        context.user_data.pop("mod_edit_field", None)
+        edit_data["_pending_id"] = pending_id
         await update.message.reply_text(
-            preview + "\n\n<i>Проверьте данные и отправьте на модерацию:</i>",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Отправить на модерацию", callback_data="submit_confirm")],
-                [InlineKeyboardButton("✏️ Редактировать", callback_data="submit_edit")],
-                [InlineKeyboardButton("❌ Отмена", callback_data="submit_cancel")],
-            ]),
+            f"✅ <b>{FIELD_LABELS[field][1]}</b> обновлено.\n\nПродолжайте редактирование или отправьте пользователю:",
+            reply_markup=build_fields_keyboard(edit_data, mode="mod_edit"),
             parse_mode="HTML"
         )
         return True
 
+    # Ввод поля пользователем
     if not context.user_data.get("in_submit"):
         return False
 
+    field = context.user_data.get("submit_field")
+    if not field:
+        return False
+
     text = update.message.text.strip()
-    step_idx = context.user_data.get("submit_step", 0)
+    data = context.user_data["submit"]
 
     if text == "/cancel":
         context.user_data.pop("in_submit", None)
         context.user_data.pop("submit", None)
-        context.user_data.pop("submit_step", None)
+        context.user_data.pop("submit_field", None)
         await update.message.reply_text("❌ Добавление отменено.", reply_markup=get_reply_main_menu())
         return True
 
     if text == "/skip":
-        step_idx += 1
-        context.user_data["submit_step"] = step_idx
-        await _send_next_submit_prompt(update, context, step_idx)
-        return True
-
-    step_name = SUBMIT_STEPS[step_idx]
-    data = context.user_data["submit"]
-
-    if step_name == "event_date":
-        import re as _re
-        from datetime import date as _date
-        m = _re.match(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})$", text)
-        if not m:
-            await update.message.reply_text("❌ Неверный формат. Введите дату как ДД.ММ.ГГГГ:")
-            return True
-        day, month, year = m.groups()
-        try:
-            ev_date = _date(int(year), int(month), int(day))
-        except ValueError:
-            await update.message.reply_text("❌ Такой даты не существует. Введите корректную дату:")
-            return True
-        if ev_date < _date.today():
-            await update.message.reply_text(
-                f"❌ Дата не может быть в прошлом. Сегодня {_date.today().strftime('%d.%m.%Y')} — введите сегодня или позже:"
-            )
-            return True
-        data["event_date"] = f"{year}-{month.zfill(2)}-{day.zfill(2)}"
-    elif step_name == "show_time":
-        import re as _re
-        m = _re.match(r"^(\d{1,2}):(\d{2})$", text)
-        if not m:
-            await update.message.reply_text("❌ Неверный формат. Введите время как ЧЧ:ММ или /skip:")
-            return True
-        data["show_time"] = text
-    elif step_name == "title" and len(text) < 3:
-        await update.message.reply_text("❌ Название слишком короткое. Попробуйте ещё раз:")
-        return True
-    elif step_name == "description":
-        data["description"] = text[:500]
+        data[field] = ""
     else:
-        data[step_name] = text
+        ok, val = validate_field(field, text)
+        if not ok:
+            await update.message.reply_text(val)
+            return True
+        data[field] = val
 
-    step_idx += 1
-    context.user_data["submit_step"] = step_idx
-    await _send_next_submit_prompt(update, context, step_idx)
+    context.user_data.pop("submit_field", None)
+    await update.message.reply_text(
+        f"✅ <b>{FIELD_LABELS[field][1]}</b> сохранено.\n\nВыберите следующее поле или отправьте на модерацию:",
+        reply_markup=build_fields_keyboard(data, mode="submit"),
+        parse_mode="HTML"
+    )
     return True
 
 
-async def _send_next_submit_prompt(update_or_message, context: ContextTypes.DEFAULT_TYPE, step_idx: int):
-    # Принимаем как Update так и Message напрямую
-    msg = update_or_message.message if isinstance(update_or_message, Update) else update_or_message
-
-    if step_idx >= len(SUBMIT_STEPS):
-        data = context.user_data["submit"]
-        preview = format_pending_preview(data)
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Отправить на модерацию", callback_data="submit_confirm")],
-            [InlineKeyboardButton("✏️ Редактировать", callback_data="submit_edit")],
-            [InlineKeyboardButton("❌ Отмена", callback_data="submit_cancel")],
-        ])
-        await msg.reply_text(
-            preview + "\n\n<i>Проверьте данные и отправьте на модерацию:</i>",
-            reply_markup=keyboard, parse_mode="HTML"
-        )
-    else:
-        step_name = SUBMIT_STEPS[step_idx]
-        if step_name == "category":
-            await msg.reply_text(
-                SUBMIT_PROMPTS["category"], reply_markup=CATEGORY_KEYBOARD, parse_mode="HTML"
-            )
-        else:
-            await msg.reply_text(SUBMIT_PROMPTS[step_name], parse_mode="HTML")
+# _send_next_submit_prompt удалён — заменён на build_fields_keyboard
 
 
 # ---------------------- Публикация в канал ----------------------
@@ -2027,53 +2079,59 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Выбор категории в форме добавления события
         if data.startswith("sc_"):
             category = data[3:]
-            if context.user_data.get("in_submit_edit"):
-                context.user_data["submit"]["category"] = category
-                context.user_data.pop("in_submit_edit", None)
-                context.user_data.pop("submit_edit_field", None)
-                await query.answer(f"Выбрано: {CATEGORY_NAMES.get(category, category)}")
-                data_form = context.user_data.get("submit", {})
-                preview = format_pending_preview(data_form)
+            cat_name = CATEGORY_NAMES.get(category, category)
+            if context.user_data.get("mod_edit_field") == "category" and context.user_data.get("mod_edit_id"):
+                # Модератор меняет категорию
+                edit_data = context.user_data.get("mod_edit_data", {})
+                edit_data["category"] = category
+                context.user_data.pop("mod_edit_field", None)
+                pending_id = context.user_data["mod_edit_id"]
+                edit_data["_pending_id"] = pending_id
+                await query.answer(f"Выбрано: {cat_name}")
                 await query.message.reply_text(
-                    preview + "\n\n<i>Проверьте данные и отправьте на модерацию:</i>",
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("✅ Отправить на модерацию", callback_data="submit_confirm")],
-                        [InlineKeyboardButton("✏️ Редактировать", callback_data="submit_edit")],
-                        [InlineKeyboardButton("❌ Отмена", callback_data="submit_cancel")],
-                    ]),
+                    f"✅ <b>Категория</b> обновлена: {cat_name}\n\nПродолжайте редактирование:",
+                    reply_markup=build_fields_keyboard(edit_data, mode="mod_edit"),
                     parse_mode="HTML"
                 )
-            elif context.user_data.get("in_submit"):
+            elif context.user_data.get("submit_field") == "category" and context.user_data.get("in_submit"):
+                # Пользователь выбирает категорию
                 context.user_data["submit"]["category"] = category
-                step_idx = context.user_data.get("submit_step", 0) + 1
-                context.user_data["submit_step"] = step_idx
-                await query.answer(f"Выбрано: {CATEGORY_NAMES.get(category, category)}")
-                await _send_next_submit_prompt(query.message, context, step_idx)
+                context.user_data.pop("submit_field", None)
+                submit_data = context.user_data["submit"]
+                await query.answer(f"Выбрано: {cat_name}")
+                await query.message.reply_text(
+                    f"✅ <b>Категория</b> сохранена: {cat_name}\n\nВыберите следующее поле:",
+                    reply_markup=build_fields_keyboard(submit_data, mode="submit"),
+                    parse_mode="HTML"
+                )
             return
 
         # Подтверждение/отмена отправки события
         if data == "submit_confirm":
             user = query.from_user
             data_form = context.user_data.get("submit", {})
-            if not data_form.get("title") or not data_form.get("event_date"):
-                await query.answer("Не заполнены обязательные поля", show_alert=True)
+            missing = [FIELD_LABELS[f][1] for f in ["title","event_date","category"]
+                       if not data_form.get(f)]
+            if missing:
+                await query.answer(f"Не заполнены обязательные поля: {', '.join(missing)}", show_alert=True)
                 return
             pending_id = save_pending_event(user.id, user.username, user.first_name, data_form)
-            context.user_data.pop("in_submit", None)
-            context.user_data.pop("submit", None)
-            context.user_data.pop("submit_step", None)
+            for k in ["in_submit", "submit", "submit_field"]:
+                context.user_data.pop(k, None)
             await query.answer()
             await query.edit_message_text(
                 "✅ <b>Событие отправлено на модерацию!</b>\n\nМы рассмотрим его в ближайшее время.",
                 parse_mode="HTML"
             )
             log_user_action(user.id, user.username, user.first_name, "submit_event_sent", data_form.get("title"))
-            # Уведомление админу
             preview = format_pending_preview(data_form, user)
-            admin_keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ Одобрить", callback_data=f"mod_approve_{pending_id}"),
-                InlineKeyboardButton("❌ Отклонить", callback_data=f"mod_reject_{pending_id}"),
-            ]])
+            admin_keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Одобрить", callback_data=f"mod_approve_{pending_id}"),
+                    InlineKeyboardButton("❌ Отклонить", callback_data=f"mod_reject_{pending_id}"),
+                ],
+                [InlineKeyboardButton("✏️ Редактировать", callback_data=f"mod_edit_{pending_id}")],
+            ])
             try:
                 await context.bot.send_message(
                     chat_id=ADMIN_ID, text=preview,
@@ -2083,81 +2141,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"Не удалось отправить событие админу: {e}")
             return
 
-        if data == "submit_edit":
-            await query.answer()
-            data_form = context.user_data.get("submit", {})
-            field_labels = {
-                "title":       "📝 Название",
-                "event_date":  "📅 Дата",
-                "show_time":   "⏰ Время",
-                "place":       "🏢 Место",
-                "address":     "📍 Адрес",
-                "category":    "🎯 Категория",
-                "price":       "💰 Цена",
-                "description": "📖 Описание",
-                "source_url":  "🔗 Ссылка",
-            }
-            rows = []
-            row = []
-            for field, label in field_labels.items():
-                mark = " ✓" if data_form.get(field) else ""
-                row.append(InlineKeyboardButton(f"{label}{mark}", callback_data=f"submit_edit_field_{field}"))
-                if len(row) == 2:
-                    rows.append(row); row = []
-            if row:
-                rows.append(row)
-            rows.append([InlineKeyboardButton("◀️ Назад", callback_data="submit_back_preview")])
-            await query.edit_message_text(
-                "✏️ <b>Что хотите изменить?</b>\nВыберите поле:",
-                reply_markup=InlineKeyboardMarkup(rows), parse_mode="HTML"
-            )
-            return
-
-        if data.startswith("submit_edit_field_"):
-            field = data.replace("submit_edit_field_", "")
-            context.user_data["submit_edit_field"] = field
-            context.user_data["in_submit_edit"] = True
-            await query.answer()
-            prompts = {
-                "title":       "📝 Введите новое <b>название</b>:",
-                "event_date":  "📅 Введите новую <b>дату</b> (ДД.ММ.ГГГГ):",
-                "show_time":   "⏰ Введите новое <b>время</b> (ЧЧ:ММ) или /skip:",
-                "place":       "🏢 Введите новое <b>место</b> или /skip:",
-                "address":     "📍 Введите новый <b>адрес</b> или /skip:",
-                "category":    "🎯 Выберите новую <b>категорию</b>:",
-                "price":       "💰 Введите новую <b>цену</b> или /skip:",
-                "description": "📖 Введите новое <b>описание</b> или /skip:",
-                "source_url":  "🔗 Введите новую <b>ссылку</b> или /skip:",
-            }
-            if field == "category":
-                await query.message.reply_text(prompts[field], reply_markup=CATEGORY_KEYBOARD, parse_mode="HTML")
-            else:
-                await query.message.reply_text(prompts.get(field, "Введите новое значение:"), parse_mode="HTML")
-            return
-
-        if data == "submit_back_preview":
-            await query.answer()
-            context.user_data.pop("in_submit_edit", None)
-            context.user_data.pop("submit_edit_field", None)
-            data_form = context.user_data.get("submit", {})
-            preview = format_pending_preview(data_form)
-            await query.edit_message_text(
-                preview + "\n\n<i>Проверьте данные и отправьте на модерацию:</i>",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ Отправить на модерацию", callback_data="submit_confirm")],
-                    [InlineKeyboardButton("✏️ Редактировать", callback_data="submit_edit")],
-                    [InlineKeyboardButton("❌ Отмена", callback_data="submit_cancel")],
-                ]),
-                parse_mode="HTML"
-            )
-            return
-
         if data == "submit_cancel":
-            context.user_data.pop("in_submit", None)
-            context.user_data.pop("submit", None)
-            context.user_data.pop("submit_step", None)
-            context.user_data.pop("in_submit_edit", None)
-            context.user_data.pop("submit_edit_field", None)
+            for k in ["in_submit", "submit", "submit_field"]:
+                context.user_data.pop(k, None)
             await query.answer()
             await query.edit_message_text("❌ Добавление отменено.")
             return
@@ -2207,6 +2193,124 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     )
                 except Exception:
                     pass
+            return
+
+        if data.startswith("submit_field_"):
+            field = data.replace("submit_field_", "")
+            context.user_data["submit_field"] = field
+            await query.answer()
+            if field == "category":
+                await query.message.reply_text(FIELD_PROMPTS["category"], reply_markup=CATEGORY_KEYBOARD, parse_mode="HTML")
+            else:
+                await query.message.reply_text(FIELD_PROMPTS.get(field, "Введите значение:"), parse_mode="HTML")
+            return
+
+        if data.startswith("mod_edit_") and not data.startswith("mod_edit_cancel_"):
+            if query.from_user.id != ADMIN_ID:
+                await query.answer("⛔ Нет доступа", show_alert=True)
+                return
+            pending_id = int(data.split("_")[-1])
+            event = get_pending_event(pending_id)
+            if not event:
+                await query.answer("Событие не найдено", show_alert=True)
+                return
+            context.user_data["mod_edit_id"] = pending_id
+            context.user_data["mod_edit_user_id"] = event["user_id"]
+            edit_data = {k: event.get(k) or "" for k in FIELD_LABELS}
+            edit_data["_pending_id"] = pending_id
+            context.user_data["mod_edit_data"] = edit_data
+            context.user_data.pop("mod_edit_field", None)
+            await query.answer()
+            await query.message.reply_text(
+                f"✏️ <b>Редактирование события #{pending_id}</b>\n\n"
+                f"Выберите поле для изменения:",
+                reply_markup=build_fields_keyboard(edit_data, mode="mod_edit"),
+                parse_mode="HTML"
+            )
+            return
+
+        if data.startswith("mod_edit_field_"):
+            if query.from_user.id != ADMIN_ID:
+                await query.answer("⛔ Нет доступа", show_alert=True)
+                return
+            field = data.replace("mod_edit_field_", "")
+            context.user_data["mod_edit_field"] = field
+            await query.answer()
+            if field == "category":
+                await query.message.reply_text(FIELD_PROMPTS["category"], reply_markup=CATEGORY_KEYBOARD, parse_mode="HTML")
+            else:
+                await query.message.reply_text(FIELD_PROMPTS.get(field, "Введите значение:") + "\n/skip — очистить поле\n/cancel — отмена", parse_mode="HTML")
+            return
+
+        if data.startswith("mod_send_edit_"):
+            if query.from_user.id != ADMIN_ID:
+                await query.answer("⛔ Нет доступа", show_alert=True)
+                return
+            pending_id = int(data.split("_")[-1])
+            edit_data = context.user_data.get("mod_edit_data", {})
+            user_id = context.user_data.get("mod_edit_user_id")
+            if not edit_data or not user_id:
+                await query.answer("Нет данных", show_alert=True)
+                return
+            clean = {k: v for k, v in edit_data.items() if k != "_pending_id"}
+            update_pending_event(pending_id, clean)
+            await query.answer("📤 Отправлено")
+            preview = format_pending_preview(clean)
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"✏️ <b>Модератор внёс изменения в ваше событие</b>\n\n{preview}\n\n<i>Вы согласны?</i>",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("✅ Принять", callback_data=f"user_accept_edit_{pending_id}"),
+                        InlineKeyboardButton("❌ Отклонить", callback_data=f"user_reject_edit_{pending_id}"),
+                    ]]),
+                    parse_mode="HTML"
+                )
+                await query.message.reply_text(f"✅ Событие #{pending_id} отправлено пользователю на согласование.")
+            except Exception as e:
+                await query.message.reply_text(f"⚠️ Не удалось отправить: {e}")
+            for k in ["mod_edit_id", "mod_edit_user_id", "mod_edit_data", "mod_edit_field"]:
+                context.user_data.pop(k, None)
+            return
+
+        if data.startswith("mod_edit_cancel_"):
+            for k in ["mod_edit_id", "mod_edit_user_id", "mod_edit_data", "mod_edit_field"]:
+                context.user_data.pop(k, None)
+            await query.answer("Редактирование отменено")
+            await query.edit_message_reply_markup(reply_markup=None)
+            return
+
+        if data.startswith("user_accept_edit_"):
+            pending_id = int(data.split("_")[-1])
+            ok = approve_pending_event(pending_id)
+            await query.answer()
+            if ok:
+                await query.edit_message_text(
+                    query.message.text + "\n\n✅ <b>Вы приняли изменения. Событие добавлено в афишу!</b>",
+                    parse_mode="HTML"
+                )
+                try:
+                    await context.bot.send_message(chat_id=ADMIN_ID,
+                        text=f"✅ Пользователь принял правки события #{pending_id} — добавлено в афишу.")
+                except Exception:
+                    pass
+            else:
+                await query.edit_message_text("⚠️ Ошибка при добавлении.", parse_mode="HTML")
+            return
+
+        if data.startswith("user_reject_edit_"):
+            pending_id = int(data.split("_")[-1])
+            reject_pending_event(pending_id)
+            await query.answer()
+            await query.edit_message_text(
+                query.message.text + "\n\n❌ <b>Вы отклонили изменения. Событие не добавлено.</b>",
+                parse_mode="HTML"
+            )
+            try:
+                await context.bot.send_message(chat_id=ADMIN_ID,
+                    text=f"❌ Пользователь отклонил правки события #{pending_id}.")
+            except Exception:
+                pass
             return
 
         if data == "show_submit":
