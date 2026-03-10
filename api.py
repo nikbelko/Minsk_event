@@ -357,7 +357,8 @@ class EventSubmit(BaseModel):
     place: str
     address: Optional[str] = ""
     price: Optional[str] = ""
-    description: Optional[str] = ""
+    details: Optional[str] = ""      # Формат → details в БД
+    description: Optional[str] = ""  # Описание → description в БД
     source_url: Optional[str] = ""
 
 
@@ -369,13 +370,14 @@ def submit_event(event: EventSubmit):
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO pending_events
-                    (user_id, username, first_name, title, event_date, show_time,
+                    (user_id, username, first_name, title, details, event_date, show_time,
                      place, address, category, description, price, source_url,
                      status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 0, "web_user", "Web",
-                event.title, event.event_date, event.show_time or "",
+                event.title, event.details or "",
+                event.event_date, event.show_time or "",
                 event.place, event.address or "",
                 event.category, event.description or "",
                 event.price or "", event.source_url or "",
@@ -391,6 +393,10 @@ def submit_event(event: EventSubmit):
                 "🌐 <b>Новое событие с сайта</b>",
                 f"📌 <b>{event.title}</b>",
                 f"🗂 Категория: {event.category}",
+            ]
+            if event.details:
+                lines.append(f"📝 Формат: {event.details}")
+            lines += [
                 f"📅 Дата: {event.event_date}" + (f" ⏰ {event.show_time}" if event.show_time else ""),
                 f"🏢 Место: {event.place}" + (f", {event.address}" if event.address else ""),
             ]
