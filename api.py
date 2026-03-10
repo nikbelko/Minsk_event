@@ -85,6 +85,13 @@ class CategoryCounts(BaseModel):
     sport: int = 0
     party: int = 0
     free: int = 0
+    excursion: int = 0
+    market: int = 0
+    masterclass: int = 0
+    boardgames: int = 0
+    broadcast: int = 0
+    education: int = 0
+    other: int = 0
 
 
 # ── Вспомогательные функции ──────────────────────────────────────────────────
@@ -248,9 +255,22 @@ def get_events(
 
     # Поиск
     if search and len(search.strip()) >= 2:
-        q = search.strip().lower()
-        where.append("(LOWER(title) LIKE ? OR LOWER(place) LIKE ? OR LOWER(details) LIKE ?)")
-        params.extend([f"%{q}%", f"%{q}%", f"%{q}%"])
+        q = search.strip()
+        current_year = now_minsk().year
+
+        # Попытка распарсить как дату (дд.мм или дд.мм.гггг) — как в боте
+        import re as _re
+        date_match = _re.match(r'^(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?$', q)
+        if date_match:
+            day, month = date_match.group(1).zfill(2), date_match.group(2).zfill(2)
+            year = date_match.group(3) or str(current_year)
+            search_date = f"{year}-{month}-{day}"
+            where.append("event_date = ?")
+            params.append(search_date)
+        else:
+            ql = q.lower()
+            where.append("(LOWER(title) LIKE ? OR LOWER(place) LIKE ? OR LOWER(details) LIKE ? OR LOWER(description) LIKE ? OR category LIKE ?)")
+            params.extend([f"%{ql}%", f"%{ql}%", f"%{ql}%", f"%{ql}%", f"%{ql}%"])
 
     events = fetch_events(where, params)
     page_events, total = paginate(events, page, per_page)
@@ -353,42 +373,74 @@ class EventSubmit(BaseModel):
     title: str
     category: str
     event_date: str
+    event_date_to: Optional[str] = None   # для периода
     show_time: Optional[str] = ""
     place: str
     address: Optional[str] = ""
     price: Optional[str] = ""
-    details: Optional[str] = ""      # Формат → details в БД
-    description: Optional[str] = ""  # Описание → description в БД
+    details: Optional[str] = ""
+    description: Optional[str] = ""
     source_url: Optional[str] = ""
+
+
+def _dates_in_range(date_from: str, date_to: str) -> list[str]:
+    """Возвращает список дат включительно от date_from до date_to."""
+    from datetime import date as _date
+    start = _date.fromisoformat(date_from)
+    end = _date.fromisoformat(date_to)
+    result = []
+    current = start
+    while current <= end:
+        result.append(current.isoformat())
+        current += timedelta(days=1)
+    return result
 
 
 @app.post("/api/events/submit")
 def submit_event(event: EventSubmit):
-    """Принимает событие от пользователя сайта → сохраняет в pending_events."""
+    """Принимает событие → сохраняет в pending_events (одна запись или по одной на каждый день периода)."""
+    combined_description = ""
+    if event.details:
+        combined_description += f"[Формат: {event.details}]"
+    if event.description:
+        combined_description += (" " if combined_description else "") + event.description
+
+    # Список дат для вставки
+    if event.event_date_to and event.event_date_to > event.event_date:
+        dates = _dates_in_range(event.event_date, event.event_date_to)
+    else:
+        dates = [event.event_date]
+
     try:
+        pending_ids = []
         with get_db() as conn:
             cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO pending_events
-                    (user_id, username, first_name, title, details, event_date, show_time,
-                     place, address, category, description, price, source_url,
-                     status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                0, "web_user", "Web",
-                event.title, event.details or "",
-                event.event_date, event.show_time or "",
-                event.place, event.address or "",
-                event.category, event.description or "",
-                event.price or "", event.source_url or "",
-                "pending",
-                datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"),
-            ))
+            for d in dates:
+                cursor.execute("""
+                    INSERT INTO pending_events
+                        (user_id, username, first_name, title, event_date, show_time,
+                         place, address, category, description, price, source_url,
+                         status, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    0, "web_user", "Web",
+                    event.title, d, event.show_time or "",
+                    event.place, event.address or "",
+                    event.category, combined_description,
+                    event.price or "", event.source_url or "",
+                    "pending",
+                    datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+                ))
+                pending_ids.append(cursor.lastrowid)
             conn.commit()
-            pending_id = cursor.lastrowid
+        pending_id = pending_ids[0]
+        days_info = f" ({len(dates)} дней)" if len(dates) > 1 else ""
 
         # Уведомление админу в Telegram
         if BOT_TOKEN and ADMIN_ID:
+            date_info = event.event_date
+            if event.event_date_to and event.event_date_to > event.event_date:
+                date_info = f"{event.event_date} → {event.event_date_to}{days_info}"
             lines = [
                 "🌐 <b>Новое событие с сайта</b>",
                 f"📌 <b>{event.title}</b>",
@@ -397,7 +449,7 @@ def submit_event(event: EventSubmit):
             if event.details:
                 lines.append(f"📝 Формат: {event.details}")
             lines += [
-                f"📅 Дата: {event.event_date}" + (f" ⏰ {event.show_time}" if event.show_time else ""),
+                f"📅 Дата: {date_info}" + (f" ⏰ {event.show_time}" if event.show_time else ""),
                 f"🏢 Место: {event.place}" + (f", {event.address}" if event.address else ""),
             ]
             if event.price:
