@@ -193,15 +193,16 @@ def log_user_action(user_id: int, username: str | None, first_name: str | None, 
 
 def get_stats_data() -> dict:
     today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
+    # Все запросы исключают админа (ADMIN_ID)
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM user_stats")
+        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE user_id != ?", (ADMIN_ID,))
         total_users = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM user_stats")
+        cursor.execute("SELECT COUNT(*) FROM user_stats WHERE user_id != ?", (ADMIN_ID,))
         total_actions = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE created_at LIKE ?", (f"{today}%",))
+        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE user_id != ? AND created_at LIKE ?", (ADMIN_ID, f"{today}%"))
         users_today = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM user_stats WHERE created_at LIKE ?", (f"{today}%",))
+        cursor.execute("SELECT COUNT(*) FROM user_stats WHERE user_id != ? AND created_at LIKE ?", (ADMIN_ID, f"{today}%"))
         actions_today = cursor.fetchone()[0]
         cursor.execute("""
             SELECT
@@ -213,21 +214,21 @@ def get_stats_data() -> dict:
             FROM user_stats u
             LEFT JOIN (
                 SELECT user_id, MIN(DATE(created_at)) as first_day
-                FROM user_stats
+                FROM user_stats WHERE user_id != ?
                 GROUP BY user_id
             ) first_visit ON u.user_id = first_visit.user_id
-            WHERE u.created_at >= DATE('now', '-30 days')
+            WHERE u.created_at >= DATE('now', '-30 days') AND u.user_id != ?
             GROUP BY day ORDER BY day DESC
-        """)
+        """, (ADMIN_ID, ADMIN_ID))
         daily_activity = cursor.fetchall()
-        # Новые пользователи сегодня — те у кого первая запись датирована сегодня
         cursor.execute("""
             SELECT COUNT(*) FROM (
                 SELECT user_id FROM user_stats
+                WHERE user_id != ?
                 GROUP BY user_id
                 HAVING MIN(DATE(created_at)) = ?
             )
-        """, (today,))
+        """, (ADMIN_ID, today))
         new_today = cursor.fetchone()[0]
         cursor.execute("""
             SELECT
@@ -240,49 +241,47 @@ def get_stats_data() -> dict:
             FROM user_stats u
             LEFT JOIN (
                 SELECT user_id, MIN(DATE(created_at)) as first_day
-                FROM user_stats
+                FROM user_stats WHERE user_id != ?
                 GROUP BY user_id
             ) first_visit ON u.user_id = first_visit.user_id
+            WHERE u.user_id != ?
             GROUP BY month ORDER BY month DESC LIMIT 12
-        """)
+        """, (ADMIN_ID, ADMIN_ID))
         monthly_activity = cursor.fetchall()
-        cursor.execute("SELECT action, COUNT(*) as cnt FROM user_stats GROUP BY action ORDER BY cnt DESC LIMIT 10")
+        cursor.execute("SELECT action, COUNT(*) as cnt FROM user_stats WHERE user_id != ? GROUP BY action ORDER BY cnt DESC LIMIT 10", (ADMIN_ID,))
         top_actions = cursor.fetchall()
         cursor.execute("SELECT COUNT(*) FROM events WHERE event_date >= ?", (today,))
         events_count = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM subscriptions")
+        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM subscriptions WHERE user_id != ?", (ADMIN_ID,))
         subscribers_count = cursor.fetchone()[0]
-        # Webapp статистика
+        # Webapp статистика (уникальные пользователи, без админа)
         cursor.execute("""
-            SELECT COUNT(*) FROM user_stats WHERE action IN ('open_webapp', 'webapp_ping')
-        """)
-        webapp_total = cursor.fetchone()[0]
-        cursor.execute("""
-            SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE action IN ('open_webapp', 'webapp_ping')
-        """)
+            SELECT COUNT(DISTINCT user_id) FROM user_stats
+            WHERE action IN ('open_webapp', 'webapp_ping') AND user_id != ?
+        """, (ADMIN_ID,))
         webapp_users = cursor.fetchone()[0]
         cursor.execute("""
-            SELECT COUNT(*) FROM user_stats
-            WHERE action IN ('open_webapp', 'webapp_ping') AND created_at LIKE ?
-        """, (f"{today}%",))
-        webapp_today = cursor.fetchone()[0]
+            SELECT COUNT(DISTINCT user_id) FROM user_stats
+            WHERE action IN ('open_webapp', 'webapp_ping') AND user_id != ? AND created_at LIKE ?
+        """, (ADMIN_ID, f"{today}%"))
+        webapp_users_today = cursor.fetchone()[0]
         # Webapp по дням (за 30 дней)
         cursor.execute("""
-            SELECT DATE(created_at) as day, COUNT(*) as cnt, COUNT(DISTINCT user_id) as users
+            SELECT DATE(created_at) as day, COUNT(DISTINCT user_id) as users
             FROM user_stats
-            WHERE action IN ('open_webapp', 'webapp_ping') AND created_at >= DATE('now', '-30 days')
+            WHERE action IN ('open_webapp', 'webapp_ping') AND user_id != ?
+              AND created_at >= DATE('now', '-30 days')
             GROUP BY day
-        """)
-        webapp_by_day = {r["day"]: (r["cnt"], r["users"]) for r in cursor.fetchall()}
+        """, (ADMIN_ID,))
+        webapp_by_day = {r["day"]: r["users"] for r in cursor.fetchall()}
         # Webapp по месяцам
         cursor.execute("""
-            SELECT strftime('%Y-%m', created_at) as month,
-                   COUNT(*) as cnt, COUNT(DISTINCT user_id) as users
+            SELECT strftime('%Y-%m', created_at) as month, COUNT(DISTINCT user_id) as users
             FROM user_stats
-            WHERE action IN ('open_webapp', 'webapp_ping')
+            WHERE action IN ('open_webapp', 'webapp_ping') AND user_id != ?
             GROUP BY month
-        """)
-        webapp_by_month = {r["month"]: (r["cnt"], r["users"]) for r in cursor.fetchall()}
+        """, (ADMIN_ID,))
+        webapp_by_month = {r["month"]: r["users"] for r in cursor.fetchall()}
         return {
             "total_users": total_users,
             "total_actions": total_actions,
@@ -294,9 +293,8 @@ def get_stats_data() -> dict:
             "subscribers_count": subscribers_count,
             "new_today": new_today,
             "monthly_activity": monthly_activity,
-            "webapp_total": webapp_total,
             "webapp_users": webapp_users,
-            "webapp_today": webapp_today,
+            "webapp_users_today": webapp_users_today,
             "webapp_by_day": webapp_by_day,
             "webapp_by_month": webapp_by_month,
         }
@@ -1074,9 +1072,9 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = [
         "<b>📊 СТАТИСТИКА БОТА</b>",
         "",
-        f"👥 Всего пользователей: <b>{stats['total_users'] + stats['webapp_users']}</b> ({stats['webapp_users']} 🌐)",
+        f"👥 Всего пользователей: <b>{stats['total_users'] + stats['webapp_users']}</b> (бот: {stats['total_users']} + 🌐: {stats['webapp_users']})",
         f"📨 Всего запросов: <b>{stats['total_actions']}</b>",
-        f"🟢 Пользователей сегодня: <b>{stats['users_today'] + stats['webapp_today']}</b> ({stats['webapp_today']} 🌐) +{stats['new_today']} нов",
+        f"🟢 Пользователей сегодня: <b>{stats['users_today'] + stats['webapp_users_today']}</b> (бот: {stats['users_today']} + 🌐: {stats['webapp_users_today']}) +{stats['new_today']} нов",
         f"📬 Запросов сегодня: <b>{stats['actions_today']}</b>",
         f"🔔 Подписчиков: <b>{stats['subscribers_count']}</b>",
         f"🗂 Событий в базе: <b>{stats['events_count']}</b>",
@@ -1089,8 +1087,7 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         day, cnt, users = row["day"], row["cnt"], row["users"]
         new_u = row["new_users"] if "new_users" in row.keys() else 0
         new_str = f" +{new_u} нов" if new_u else ""
-        wa = stats["webapp_by_day"].get(day, (0, 0))
-        wa_u = wa[1] if isinstance(wa, tuple) else wa
+        wa_u = stats["webapp_by_day"].get(day, 0)
         total_u = users + wa_u
         wa_str = f" ({wa_u} 🌐)" if wa_u else ""
         lines.append(f"  {day} — {cnt} запр. {total_u} польз.{wa_str}{new_str}")
@@ -1106,8 +1103,7 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             year, mon = ym.split("-")
             label = f"{month_names.get(mon, mon)} {year}"
             new_str = f" +{new_u} нов" if new_u else ""
-            wa = stats["webapp_by_month"].get(ym, (0, 0))
-            wa_u = wa[1] if isinstance(wa, tuple) else wa
+            wa_u = stats["webapp_by_month"].get(ym, 0)
             total_u = users + wa_u
             wa_str = f" ({wa_u} 🌐)" if wa_u else ""
             lines.append(f"  {label} — {cnt} запр. {total_u} польз.{wa_str}{new_str}")
@@ -1886,21 +1882,35 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 text_parts.append(part)
         text_filter = " ".join(text_parts) if text_parts else None
 
+        now_time = now.strftime("%H:%M")
         with get_db_connection() as conn:
             where = []
             params = []
             if date_filter:
                 where.append("event_date = ?")
                 params.append(date_filter)
+                # Для сегодня — исключаем прошедшие сеансы
+                if date_filter == today:
+                    where.append("(show_time = '' OR show_time IS NULL OR show_time > ?)")
+                    params.append(now_time)
             elif date_from_filter and date_to_filter:
                 where.append("event_date BETWEEN ? AND ?")
                 params += [date_from_filter, date_to_filter]
+                # Если начало диапазона — сегодня, фильтруем время
+                if date_from_filter == today:
+                    where.append("(event_date > ? OR show_time = '' OR show_time IS NULL OR show_time > ?)")
+                    params += [today, now_time]
             elif date_from_filter:
                 where.append("event_date >= ?")
                 params.append(date_from_filter)
+                if date_from_filter == today:
+                    where.append("(event_date > ? OR show_time = '' OR show_time IS NULL OR show_time > ?)")
+                    params += [today, now_time]
             else:
                 where.append("event_date >= ?")
                 params.append(today)
+                where.append("(event_date > ? OR show_time = '' OR show_time IS NULL OR show_time > ?)")
+                params += [today, now_time]
             if cat_filter:
                 where.append("category = ?")
                 params.append(cat_filter)
@@ -2586,4 +2596,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
