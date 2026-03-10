@@ -1870,10 +1870,16 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         # Парсим cat: и date: теги
         cat_filter = None
         date_filter = None
+        date_from_filter = None
+        date_to_filter = None
         text_parts = []
         for part in query_text.split():
             if part.startswith("cat:"):
                 cat_filter = part[4:]
+            elif part.startswith("date_from:"):
+                date_from_filter = part[10:]
+            elif part.startswith("date_to:"):
+                date_to_filter = part[8:]
             elif part.startswith("date:"):
                 date_filter = part[5:]
             else:
@@ -1886,6 +1892,12 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             if date_filter:
                 where.append("event_date = ?")
                 params.append(date_filter)
+            elif date_from_filter and date_to_filter:
+                where.append("event_date BETWEEN ? AND ?")
+                params += [date_from_filter, date_to_filter]
+            elif date_from_filter:
+                where.append("event_date >= ?")
+                params.append(date_from_filter)
             else:
                 where.append("event_date >= ?")
                 params.append(today)
@@ -2128,7 +2140,7 @@ async def handle_date_category_buttons(query, context: ContextTypes.DEFAULT_TYPE
     elif date_type == "weekend":
         events, saturday, sunday = get_weekend_events(category=category)
         set_pagination(context, events, f"<b>{display_name} на выходные ({saturday.strftime('%d.%m')}–{sunday.strftime('%d.%m')}):</b>",
-                       share_query=f"cat:{category} date:{saturday.strftime('%Y-%m-%d')}")
+                       share_query=f"cat:{category} date_from:{saturday.strftime('%Y-%m-%d')} date_to:{sunday.strftime('%Y-%m-%d')}")
         await show_page(query, context)
         await send_subscription_prompt(query, category, "weekend")
 
@@ -2154,7 +2166,7 @@ async def handle_simple_buttons(query, context: ContextTypes.DEFAULT_TYPE, data:
         log_user_action(user.id, user.username, user.first_name, "btn_weekend")
         events, saturday, sunday = get_weekend_events()
         set_pagination(context, events, f"<b>Выходные ({saturday.strftime('%d.%m')}–{sunday.strftime('%d.%m')}):</b>",
-                       share_query=f"date:{saturday.strftime('%Y-%m-%d')}")
+                       share_query=f"date_from:{saturday.strftime('%Y-%m-%d')} date_to:{sunday.strftime('%Y-%m-%d')}")
         await show_page(query, context)
     elif data == "soon":
         log_user_action(user.id, user.username, user.first_name, "btn_upcoming")
@@ -2574,3 +2586,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
