@@ -191,18 +191,18 @@ def log_user_action(user_id: int, username: str | None, first_name: str | None, 
         logger.error(f"Ошибка логирования: {e}")
 
 
-def get_stats_data() -> dict:
+def get_stats_data(exclude_admin: bool = True) -> dict:
     today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
-    # Все запросы исключают админа (ADMIN_ID)
+    admin_filter = ADMIN_ID if exclude_admin else -1  # -1 никогда не совпадёт
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE user_id != ?", (ADMIN_ID,))
+        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE user_id != ?", (admin_filter,))
         total_users = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM user_stats WHERE user_id != ?", (ADMIN_ID,))
+        cursor.execute("SELECT COUNT(*) FROM user_stats WHERE user_id != ?", (admin_filter,))
         total_actions = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE user_id != ? AND created_at LIKE ?", (ADMIN_ID, f"{today}%"))
+        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE user_id != ? AND created_at LIKE ?", (admin_filter, f"{today}%"))
         users_today = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM user_stats WHERE user_id != ? AND created_at LIKE ?", (ADMIN_ID, f"{today}%"))
+        cursor.execute("SELECT COUNT(*) FROM user_stats WHERE user_id != ? AND created_at LIKE ?", (admin_filter, f"{today}%"))
         actions_today = cursor.fetchone()[0]
         cursor.execute("""
             SELECT
@@ -219,7 +219,7 @@ def get_stats_data() -> dict:
             ) first_visit ON u.user_id = first_visit.user_id
             WHERE u.created_at >= DATE('now', '-30 days') AND u.user_id != ?
             GROUP BY day ORDER BY day DESC
-        """, (ADMIN_ID, ADMIN_ID))
+        """, (admin_filter, admin_filter))
         daily_activity = cursor.fetchall()
         cursor.execute("""
             SELECT COUNT(*) FROM (
@@ -228,7 +228,7 @@ def get_stats_data() -> dict:
                 GROUP BY user_id
                 HAVING MIN(DATE(created_at)) = ?
             )
-        """, (ADMIN_ID, today))
+        """, (admin_filter, today))
         new_today = cursor.fetchone()[0]
         cursor.execute("""
             SELECT
@@ -246,24 +246,24 @@ def get_stats_data() -> dict:
             ) first_visit ON u.user_id = first_visit.user_id
             WHERE u.user_id != ?
             GROUP BY month ORDER BY month DESC LIMIT 12
-        """, (ADMIN_ID, ADMIN_ID))
+        """, (admin_filter, admin_filter))
         monthly_activity = cursor.fetchall()
-        cursor.execute("SELECT action, COUNT(*) as cnt FROM user_stats WHERE user_id != ? GROUP BY action ORDER BY cnt DESC LIMIT 10", (ADMIN_ID,))
+        cursor.execute("SELECT action, COUNT(*) as cnt FROM user_stats WHERE user_id != ? GROUP BY action ORDER BY cnt DESC LIMIT 10", (admin_filter,))
         top_actions = cursor.fetchall()
         cursor.execute("SELECT COUNT(*) FROM events WHERE event_date >= ?", (today,))
         events_count = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM subscriptions WHERE user_id != ?", (ADMIN_ID,))
+        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM subscriptions WHERE user_id != ?", (admin_filter,))
         subscribers_count = cursor.fetchone()[0]
         # Webapp статистика (уникальные пользователи, без админа)
         cursor.execute("""
             SELECT COUNT(DISTINCT user_id) FROM user_stats
             WHERE action IN ('open_webapp', 'webapp_ping') AND user_id != ?
-        """, (ADMIN_ID,))
+        """, (admin_filter,))
         webapp_users = cursor.fetchone()[0]
         cursor.execute("""
             SELECT COUNT(DISTINCT user_id) FROM user_stats
             WHERE action IN ('open_webapp', 'webapp_ping') AND user_id != ? AND created_at LIKE ?
-        """, (ADMIN_ID, f"{today}%"))
+        """, (admin_filter, f"{today}%"))
         webapp_users_today = cursor.fetchone()[0]
         # Webapp по дням (за 30 дней)
         cursor.execute("""
@@ -272,7 +272,7 @@ def get_stats_data() -> dict:
             WHERE action IN ('open_webapp', 'webapp_ping') AND user_id != ?
               AND created_at >= DATE('now', '-30 days')
             GROUP BY day
-        """, (ADMIN_ID,))
+        """, (admin_filter,))
         webapp_by_day = {r["day"]: r["users"] for r in cursor.fetchall()}
         # Webapp по месяцам
         cursor.execute("""
@@ -280,7 +280,7 @@ def get_stats_data() -> dict:
             FROM user_stats
             WHERE action IN ('open_webapp', 'webapp_ping') AND user_id != ?
             GROUP BY month
-        """, (ADMIN_ID,))
+        """, (admin_filter,))
         webapp_by_month = {r["month"]: r["users"] for r in cursor.fetchall()}
         return {
             "total_users": total_users,
@@ -1062,41 +1062,41 @@ async def send_subscriptions_digest(bot, date_type: str):
 # ---------------------- Статистика ----------------------
 
 
-async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ Нет доступа.")
-        return
-    
-    stats = get_stats_data()
-    
+def _format_stats(stats: dict, title: str) -> str:
+    import html as _html
+    month_names = {"01":"янв","02":"фев","03":"мар","04":"апр","05":"май","06":"июн",
+                   "07":"июл","08":"авг","09":"сен","10":"окт","11":"ноя","12":"дек"}
+    total_u = stats["total_users"]
+    webapp_u = stats["webapp_users"]
+    # Вариант А: total_users уже включает всех уникальных (бот + app)
+    # webapp_users — справочно "из них через app"
+    all_unique = max(total_u, webapp_u) if total_u == 0 else total_u
+    today_u = stats["users_today"]
+    webapp_today_u = stats["webapp_users_today"]
+    all_today = max(today_u, webapp_today_u) if today_u == 0 else today_u
+
     lines = [
-        "<b>📊 СТАТИСТИКА БОТА</b>",
+        f"<b>{title}</b>",
         "",
-        f"👥 Всего пользователей: <b>{stats['total_users'] + stats['webapp_users']}</b> (бот: {stats['total_users']} + 🌐: {stats['webapp_users']})",
+        f"👥 Всего уникальных: <b>{all_unique}</b> (🌐 {webapp_u})",
         f"📨 Всего запросов: <b>{stats['total_actions']}</b>",
-        f"🟢 Пользователей сегодня: <b>{stats['users_today'] + stats['webapp_users_today']}</b> (бот: {stats['users_today']} + 🌐: {stats['webapp_users_today']}) +{stats['new_today']} нов",
+        f"🟢 Сегодня уникальных: <b>{all_today}</b> (🌐 {webapp_today_u}) +{stats['new_today']} нов",
         f"📬 Запросов сегодня: <b>{stats['actions_today']}</b>",
         f"🔔 Подписчиков: <b>{stats['subscribers_count']}</b>",
         f"🗂 Событий в базе: <b>{stats['events_count']}</b>",
-
         "",
         "<b>📅 Активность за 30 дней:</b>",
     ]
-    
     for row in stats["daily_activity"]:
         day, cnt, users = row["day"], row["cnt"], row["users"]
         new_u = row["new_users"] if "new_users" in row.keys() else 0
         new_str = f" +{new_u} нов" if new_u else ""
         wa_u = stats["webapp_by_day"].get(day, 0)
-        total_u = users + wa_u
-        wa_str = f" ({wa_u} 🌐)" if wa_u else ""
-        lines.append(f"  {day} — {cnt} запр. {total_u} польз.{wa_str}{new_str}")
-
-    # Активность по прошлым месяцам
+        total_day = max(users, wa_u) if users == 0 else users
+        wa_str = f" (🌐 {wa_u})" if wa_u else ""
+        lines.append(f"  {day} — {cnt} запр. {total_day} польз.{wa_str}{new_str}")
     if stats.get("monthly_activity"):
         lines.extend(["", "<b>📅 Активность по месяцам:</b>"])
-        month_names = {"01":"янв","02":"фев","03":"мар","04":"апр","05":"май","06":"июн",
-                       "07":"июл","08":"авг","09":"сен","10":"окт","11":"ноя","12":"дек"}
         for row in stats["monthly_activity"]:
             ym, cnt, users = row["month"], row["cnt"], row["users"]
             new_u = row["new_users"] if "new_users" in row.keys() else 0
@@ -1104,23 +1104,31 @@ async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             label = f"{month_names.get(mon, mon)} {year}"
             new_str = f" +{new_u} нов" if new_u else ""
             wa_u = stats["webapp_by_month"].get(ym, 0)
-            total_u = users + wa_u
-            wa_str = f" ({wa_u} 🌐)" if wa_u else ""
-            lines.append(f"  {label} — {cnt} запр. {total_u} польз.{wa_str}{new_str}")
-
-    lines.extend([
-        "",
-        "<b>🔝 Топ действий:</b>"
-    ])
-    
+            total_mo = max(users, wa_u) if users == 0 else users
+            wa_str = f" (🌐 {wa_u})" if wa_u else ""
+            lines.append(f"  {label} — {cnt} запр. {total_mo} польз.{wa_str}{new_str}")
+    lines.extend(["", "<b>🔝 Топ действий:</b>"])
     for row in stats["top_actions"]:
-        import html
-        lines.append(f"  {html.escape(str(row['action']))} — {row['cnt']}")
-    
-    await update.message.reply_text(
-        "\n".join(lines), 
-        parse_mode="HTML"
-    )
+        lines.append(f"  {_html.escape(str(row['action']))} — {row['cnt']}")
+    return "\n".join(lines)
+
+
+async def show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """📊 /stats — статистика со мной (для проверки)."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Нет доступа.")
+        return
+    stats = get_stats_data(exclude_admin=False)
+    await update.message.reply_text(_format_stats(stats, "📊 СТАТИСТИКА (все)"), parse_mode="HTML")
+
+
+async def show_ustats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """📊 /ustats — статистика только пользователей (без меня)."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Нет доступа.")
+        return
+    stats = get_stats_data(exclude_admin=True)
+    await update.message.reply_text(_format_stats(stats, "📊 СТАТИСТИКА ПОЛЬЗОВАТЕЛЕЙ"), parse_mode="HTML")
 
 
 # ---------------------- Планировщик парсеров ----------------------
@@ -2571,6 +2579,7 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("today", today_command))
     application.add_handler(CommandHandler("subs", show_subscriptions))
     application.add_handler(CommandHandler("stats", show_stats))
+    application.add_handler(CommandHandler("ustats", show_ustats))
     application.add_handler(CommandHandler("update", update_parsers))
     application.add_handler(CommandHandler("donate", custom_donate))
     application.add_handler(CommandHandler("support", donate_command))
