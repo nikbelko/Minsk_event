@@ -1321,7 +1321,7 @@ FIELD_LABELS = {
     "address":     ("📍", "Адрес",      False),
     "category":    ("🎯", "Категория",  True),
     "price":       ("💰", "Цена",       False),
-    "description": ("📖", "Описание",   False),
+    "details":     ("📖", "Описание",   True),   # обязательное — пишется в details
     "source_url":  ("🔗", "Ссылка",     False),
 }
 
@@ -1333,7 +1333,7 @@ FIELD_PROMPTS = {
     "address":     "📍 Введите <b>адрес</b> (например: ул. Притыцкого, 62)\nИли /skip чтобы пропустить:",
     "category":    "🎯 Выберите <b>категорию</b>:",
     "price":       "💰 Введите <b>цену</b> (например: от 20 BYN, Бесплатно)\nИли /skip чтобы пропустить:",
-    "description": "📖 Введите <b>описание</b> события (до 500 символов)\nИли /skip чтобы пропустить:",
+    "details":     "📖 Введите <b>описание</b> события (до 500 символов):",
     "source_url":  "🔗 Введите <b>ссылку</b> на событие (сайт, соцсети)\nИли /skip чтобы пропустить:",
 }
 
@@ -1457,7 +1457,7 @@ def save_pending_event(user_id, username, first_name, data: dict) -> int:
             data.get("place", ""),
             data.get("address", ""),
             data.get("category", "other"),
-            data.get("description", ""),
+            data.get("details", "") or data.get("description", ""),  # details → pending.description
             data.get("price", ""),
             data.get("source_url", ""),
             datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"),
@@ -1483,8 +1483,9 @@ def approve_pending_event(pending_id: int) -> bool:
                place, location, price, category, source_name, source_url)
             VALUES (?,?,?,?,?,?,?,?,?,?,?)
         """, (
-            row["title"], "",
-            row["description"] or "",
+            row["title"],
+            row["description"] or "",   # details = описание от пользователя
+            row["description"] or "",   # description = то же
             row["event_date"], row["show_time"] or "",
             row["place"] or "", _addr or "Минск",
             row["price"] or "",
@@ -2081,27 +2082,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_user_action(user.id, user.username, user.first_name, "menu_today")
         today = datetime.now(MINSK_TZ)
         events = get_events_by_date_and_category(today)
-        set_pagination(context, events, f"<b>События на {today.strftime('%d.%m.%Y')}:</b>")
+        set_pagination(context, events, f"<b>События на {today.strftime('%d.%m.%Y')}:</b>",
+                       share_query=f"date:{today.strftime('%Y-%m-%d')}")
         await show_page(update, context)
         return
     if text == "📆 Завтра":
         log_user_action(user.id, user.username, user.first_name, "menu_tomorrow")
         tomorrow = datetime.now(MINSK_TZ) + timedelta(days=1)
         events = get_events_by_date_and_category(tomorrow)
-        set_pagination(context, events, f"<b>События на {tomorrow.strftime('%d.%m.%Y')}:</b>")
+        set_pagination(context, events, f"<b>События на {tomorrow.strftime('%d.%m.%Y')}:</b>",
+                       share_query=f"date:{tomorrow.strftime('%Y-%m-%d')}")
         await show_page(update, context)
         return
     if text == "🎉 Выходные":
         log_user_action(user.id, user.username, user.first_name, "menu_weekend")
         events, saturday, sunday = get_weekend_events()
-        set_pagination(context, events, f"<b>Выходные ({saturday.strftime('%d.%m')}–{sunday.strftime('%d.%m')}):</b>")
+        set_pagination(context, events, f"<b>Выходные ({saturday.strftime('%d.%m')}–{sunday.strftime('%d.%m')}):</b>",
+                       share_query=f"date_from:{saturday.strftime('%Y-%m-%d')} date_to:{sunday.strftime('%Y-%m-%d')}")
         await show_page(update, context)
         return
     if text == "⏰ Ближайшие":
         log_user_action(user.id, user.username, user.first_name, "menu_upcoming")
         events = get_upcoming_events(limit=100)
         if events:
-            set_pagination(context, events, "⏰ <b>Ближайшие события:</b>")
+            set_pagination(context, events, "⏰ <b>Ближайшие события:</b>", share_query="")
             await show_page(update, context)
         else:
             await update.message.reply_text("😕 Ближайших событий не найдено.")
