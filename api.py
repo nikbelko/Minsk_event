@@ -384,6 +384,30 @@ def submit_event(event: EventSubmit):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ── Webapp ping — трекинг открытий Mini App ─────────────────────────────────
+
+class WebappPingRequest(BaseModel):
+    user_id: Optional[int] = None
+    username: Optional[str] = None
+    first_name: Optional[str] = None
+
+@app.post("/api/webapp-ping")
+def webapp_ping(req: WebappPingRequest):
+    """Сайт вызывает при открытии — логируем для статистики."""
+    try:
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO user_stats (user_id, username, first_name, action, detail, created_at) VALUES (?,?,?,?,?,?)",
+                (req.user_id or 0, req.username or "", req.first_name or "",
+                 "webapp_ping", "web",
+                 datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"))
+            )
+            conn.commit()
+    except Exception:
+        pass
+    return {"ok": True}
+
+
 # ── Одно событие ─────────────────────────────────────────────────────────────
 
 @app.get("/api/events/{event_id}", response_model=Event)

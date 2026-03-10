@@ -2087,7 +2087,14 @@ async def handle_filter_buttons(query, context: ContextTypes.DEFAULT_TYPE, categ
     user = query.from_user
     log_user_action(user.id, user.username, user.first_name, "filter_category", category)
     filtered = data["events"] if category == "all" else filter_events_by_category(data["events"], category)
-    set_pagination(context, filtered, data["title"], date_info=data["date_info"])
+    # Обновляем share_query: берём старый и добавляем/заменяем категорию
+    old_sq = data.get("share_query") or ""
+    # Убираем старый cat: если был
+    sq_parts = [p for p in old_sq.split() if not p.startswith("cat:")]
+    if category and category != "all":
+        sq_parts.append(f"cat:{category}")
+    new_sq = " ".join(sq_parts)
+    set_pagination(context, filtered, data["title"], date_info=data["date_info"], share_query=new_sq)
     await show_page(query, context)
 
 
