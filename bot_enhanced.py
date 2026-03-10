@@ -716,11 +716,13 @@ def pre_group_for_pagination(events: list) -> list:
     return result
 
 
-def set_pagination(context: ContextTypes.DEFAULT_TYPE, events, title: str, date_info: str | None = None):
+def set_pagination(context: ContextTypes.DEFAULT_TYPE, events, title: str, date_info: str | None = None,
+                   share_query: str = ""):
     raw = [dict(e) if not isinstance(e, dict) else e for e in events]
     context.user_data["pagination"] = {
         "events": raw, "page": 0, "per_page": PER_PAGE,
         "title": title, "date_info": date_info,
+        "share_query": share_query,
     }
 
 
@@ -750,8 +752,9 @@ def build_page_keyboard(data: dict):
             InlineKeyboardButton(f"{page + 1}/{max_page + 1}", callback_data="page_noop"),
             InlineKeyboardButton("▶️", callback_data="page_next") if page < max_page else InlineKeyboardButton(" ", callback_data="page_noop"),
         ])
+    share_q = data.get("share_query") or ""
     keyboard.append([
-        InlineKeyboardButton("📤 Поделиться", switch_inline_query="")
+        InlineKeyboardButton("📤 Поделиться подборкой", switch_inline_query=share_q)
     ])
     return InlineKeyboardMarkup(keyboard) if keyboard else None
 async def show_page(update_or_query, context: ContextTypes.DEFAULT_TYPE):
@@ -1821,7 +1824,8 @@ async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user_action(user.id, user.username, user.first_name, "cmd_today")
     today = datetime.now(MINSK_TZ)
     events = get_events_by_date_and_category(today)
-    set_pagination(context, events, f"<b>События на {today.strftime('%d.%m.%Y')}:</b>")
+    set_pagination(context, events, f"<b>События на {today.strftime('%d.%m.%Y')}:</b>",
+                   share_query=f"date:{today.strftime('%Y-%m-%d')}")
     await show_page(update, context)
 
 
@@ -1853,28 +1857,51 @@ async def post_channel_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Inline режим — для кнопки Поделиться."""
+    """Inline режим — для кнопки Поделиться.
+    share_query формат: "cat:concert date:2026-03-10" или свободный текст.
+    """
     from telegram import InlineQueryResultArticle, InputTextMessageContent
     import uuid as _uuid
-    logger.info(f"[inline] запрос от {update.inline_query.from_user.id}: '{update.inline_query.query}'")
     try:
         now = datetime.now(MINSK_TZ)
         today = now.strftime("%Y-%m-%d")
-        query_text = update.inline_query.query or ""
-        with get_db_connection() as conn:
-            if query_text:
-                rows = conn.execute("""
-                    SELECT title, event_date, show_time, place, price, category, source_url
-                    FROM events WHERE event_date >= ? AND title LIKE ?
-                    ORDER BY event_date, show_time LIMIT 5
-                """, (today, f"%{query_text}%")).fetchall()
+        query_text = (update.inline_query.query or "").strip()
+
+        # Парсим cat: и date: теги
+        cat_filter = None
+        date_filter = None
+        text_parts = []
+        for part in query_text.split():
+            if part.startswith("cat:"):
+                cat_filter = part[4:]
+            elif part.startswith("date:"):
+                date_filter = part[5:]
             else:
-                rows = conn.execute("""
-                    SELECT title, event_date, show_time, place, price, category, source_url
-                    FROM events WHERE event_date >= ?
-                    ORDER BY event_date, show_time LIMIT 5
-                """, (today,)).fetchall()
-        logger.info(f"[inline] найдено строк: {len(rows)}")
+                text_parts.append(part)
+        text_filter = " ".join(text_parts) if text_parts else None
+
+        with get_db_connection() as conn:
+            where = []
+            params = []
+            if date_filter:
+                where.append("event_date = ?")
+                params.append(date_filter)
+            else:
+                where.append("event_date >= ?")
+                params.append(today)
+            if cat_filter:
+                where.append("category = ?")
+                params.append(cat_filter)
+            if text_filter:
+                where.append("(title LIKE ? OR place LIKE ?)")
+                params += [f"%{text_filter}%", f"%{text_filter}%"]
+            sql = f"""
+                SELECT DISTINCT title, event_date, show_time, place, price, category, source_url
+                FROM events WHERE {" AND ".join(where)}
+                ORDER BY event_date, show_time LIMIT 10
+            """
+            rows = conn.execute(sql, params).fetchall()
+
         results = []
         for row in rows:
             cat_emoji = CATEGORY_EMOJI.get(row["category"] or "", "🎉")
@@ -1896,8 +1923,7 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 description=f"📅 {date_str}{time_str}" + (f" | {row['place']}" if row["place"] else ""),
                 input_message_content=InputTextMessageContent(message_text=msg, parse_mode="HTML"),
             ))
-        await update.inline_query.answer(results, cache_time=30)
-        logger.info(f"[inline] отправлено результатов: {len(results)}")
+        await update.inline_query.answer(results, cache_time=0)
     except Exception as e:
         logger.error(f"[inline] ошибка: {e}", exc_info=True)
         await update.inline_query.answer([], cache_time=5)
@@ -2072,26 +2098,30 @@ async def handle_date_category_buttons(query, context: ContextTypes.DEFAULT_TYPE
     if date_type == "today":
         today = datetime.now(MINSK_TZ)
         events = get_events_by_date_and_category(today, category)
-        set_pagination(context, events, f"<b>{display_name} на {today.strftime('%d.%m.%Y')}:</b>")
+        set_pagination(context, events, f"<b>{display_name} на {today.strftime('%d.%m.%Y')}:</b>",
+                       share_query=f"cat:{category} date:{today.strftime('%Y-%m-%d')}")
         await show_page(query, context)
         await send_subscription_prompt(query, category, "today")
     elif date_type == "tomorrow":
         tomorrow = datetime.now(MINSK_TZ) + timedelta(days=1)
         events = get_events_by_date_and_category(tomorrow, category)
-        set_pagination(context, events, f"<b>{display_name} на {tomorrow.strftime('%d.%m.%Y')}:</b>")
+        set_pagination(context, events, f"<b>{display_name} на {tomorrow.strftime('%d.%m.%Y')}:</b>",
+                       share_query=f"cat:{category} date:{tomorrow.strftime('%Y-%m-%d')}")
         await show_page(query, context)
         await send_subscription_prompt(query, category, "tomorrow")
     elif date_type == "upcoming":
         events = get_upcoming_events(limit=100, category=category)
         if events:
-            set_pagination(context, events, f"<b>Ближайшие {display_name}:</b>")
+            set_pagination(context, events, f"<b>Ближайшие {display_name}:</b>",
+                           share_query=f"cat:{category}")
             await show_page(query, context)
             await send_subscription_prompt(query, category, "upcoming")
         else:
             await query.edit_message_text(f"😕 Ближайших событий в категории {display_name} не найдено.", parse_mode="Markdown")
     elif date_type == "weekend":
         events, saturday, sunday = get_weekend_events(category=category)
-        set_pagination(context, events, f"<b>{display_name} на выходные ({saturday.strftime('%d.%m')}–{sunday.strftime('%d.%m')}):</b>")
+        set_pagination(context, events, f"<b>{display_name} на выходные ({saturday.strftime('%d.%m')}–{sunday.strftime('%d.%m')}):</b>",
+                       share_query=f"cat:{category} date:{saturday.strftime('%Y-%m-%d')}")
         await show_page(query, context)
         await send_subscription_prompt(query, category, "weekend")
 
@@ -2103,18 +2133,21 @@ async def handle_simple_buttons(query, context: ContextTypes.DEFAULT_TYPE, data:
         log_user_action(user.id, user.username, user.first_name, "btn_today")
         today = datetime.now(MINSK_TZ)
         events = get_events_by_date_and_category(today)
-        set_pagination(context, events, f"<b>События на {today.strftime('%d.%m.%Y')}:</b>")
+        set_pagination(context, events, f"<b>События на {today.strftime('%d.%m.%Y')}:</b>",
+                       share_query=f"date:{today.strftime('%Y-%m-%d')}")
         await show_page(query, context)
     elif data == "tomorrow":
         log_user_action(user.id, user.username, user.first_name, "btn_tomorrow")
         tomorrow = datetime.now(MINSK_TZ) + timedelta(days=1)
         events = get_events_by_date_and_category(tomorrow)
-        set_pagination(context, events, f"<b>События на {tomorrow.strftime('%d.%m.%Y')}:</b>")
+        set_pagination(context, events, f"<b>События на {tomorrow.strftime('%d.%m.%Y')}:</b>",
+                       share_query=f"date:{tomorrow.strftime('%Y-%m-%d')}")
         await show_page(query, context)
     elif data == "weekend":
         log_user_action(user.id, user.username, user.first_name, "btn_weekend")
         events, saturday, sunday = get_weekend_events()
-        set_pagination(context, events, f"<b>Выходные ({saturday.strftime('%d.%m')}–{sunday.strftime('%d.%m')}):</b>")
+        set_pagination(context, events, f"<b>Выходные ({saturday.strftime('%d.%m')}–{sunday.strftime('%d.%m')}):</b>",
+                       share_query=f"date:{saturday.strftime('%Y-%m-%d')}")
         await show_page(query, context)
     elif data == "soon":
         log_user_action(user.id, user.username, user.first_name, "btn_upcoming")
