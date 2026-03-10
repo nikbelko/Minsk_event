@@ -27,9 +27,9 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL, "*"],   # в проде замените на конкретный домен
-    allow_credentials=True,
-    allow_methods=["GET"],
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
@@ -342,6 +342,46 @@ def events_upcoming(
     page_events, total = paginate(events, page, per_page)
     return EventsResponse(total=total, page=page, per_page=per_page,
                           events=[Event(**e) for e in page_events])
+
+
+# ── Сабмит события от пользователя сайта ────────────────────────────────────
+
+class EventSubmit(BaseModel):
+    title: str
+    category: str
+    event_date: str
+    show_time: Optional[str] = ""
+    place: str
+    address: Optional[str] = ""
+    price: Optional[str] = ""
+    description: Optional[str] = ""
+    source_url: Optional[str] = ""
+
+
+@app.post("/api/events/submit")
+def submit_event(event: EventSubmit):
+    """Принимает событие от пользователя сайта → сохраняет в pending_events."""
+    try:
+        with get_db() as conn:
+            conn.execute("""
+                INSERT INTO pending_events
+                    (user_id, username, first_name, title, event_date, show_time,
+                     place, address, category, description, price, source_url,
+                     status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                0, "web_user", "Web",
+                event.title, event.event_date, event.show_time or "",
+                event.place, event.address or "",
+                event.category, event.description or "",
+                event.price or "", event.source_url or "",
+                "pending",
+                datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+            ))
+            conn.commit()
+        return {"ok": True, "message": "Событие отправлено на модерацию"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ── Одно событие ─────────────────────────────────────────────────────────────
