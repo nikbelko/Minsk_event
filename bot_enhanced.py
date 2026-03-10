@@ -1083,7 +1083,7 @@ async def download_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     try:
         await update.message.reply_document(
-            document=open(DB_PATH, "rb"),
+            document=open(DB_NAME, "rb"),
             filename="events_final.db",
             caption=f"🗄 База данных\n📅 {datetime.now(MINSK_TZ).strftime('%d.%m.%Y %H:%M')}",
         )
@@ -2149,13 +2149,17 @@ async def handle_filter_buttons(query, context: ContextTypes.DEFAULT_TYPE, categ
     user = query.from_user
     log_user_action(user.id, user.username, user.first_name, "filter_category", category)
     filtered = data["events"] if category == "all" else filter_events_by_category(data["events"], category)
+    # Явно сбрасываем кеш группировки чтобы пересчитался для отфильтрованных событий
+    data.pop("_grouped", None)
+    data.pop("_grouped_key", None)
     # Обновляем share_query: берём старый и добавляем/заменяем категорию
     old_sq = data.get("share_query") or ""
-    # Убираем старый cat: если был
+    logger.info(f"[filter] old_sq='{old_sq}' → adding cat:{category}")
     sq_parts = [p for p in old_sq.split() if not p.startswith("cat:")]
     if category and category != "all":
         sq_parts.append(f"cat:{category}")
     new_sq = " ".join(sq_parts)
+    logger.info(f"[filter] new_sq='{new_sq}'")
     set_pagination(context, filtered, data["title"], date_info=data["date_info"], share_query=new_sq)
     await show_page(query, context)
 
