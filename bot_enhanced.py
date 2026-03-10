@@ -584,8 +584,7 @@ def group_other_events(events: list) -> list:
     title + place → все даты и времена вместе (одна запись в пагинации).
     Если у события нет place — объединяем с записью по тому же title."""
     from collections import OrderedDict
-    EMOJI_MAP = {"theater": "🎭", "concert": "🎵", "exhibition": "🖼️",
-                 "kids": "🧸", "cinema": "🎬", "party": "🌟", "free": "🆓", "sport": "⚽"}
+    EMOJI_MAP = CATEGORY_EMOJI  # используем глобальный словарь со всеми категориями
     grouped = OrderedDict()
     # Индекс title → ключ первой записи с непустым place
     title_to_key = {}
@@ -1075,6 +1074,21 @@ async def send_subscriptions_digest(bot, date_type: str):
 
 
 # ---------------------- Статистика ----------------------
+
+
+async def download_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Скачать БД — только для админа."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Нет доступа.")
+        return
+    try:
+        await update.message.reply_document(
+            document=open(DB_PATH, "rb"),
+            filename="events_final.db",
+            caption=f"🗄 База данных\n📅 {datetime.now(MINSK_TZ).strftime('%d.%m.%Y %H:%M')}",
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка: {e}")
 
 
 def _format_stats(stats: dict, title: str) -> str:
@@ -1887,6 +1901,7 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         now = datetime.now(MINSK_TZ)
         today = now.strftime("%Y-%m-%d")
         query_text = (update.inline_query.query or "").strip()
+        logger.info(f"[inline] from={update.inline_query.from_user.id} query='{query_text}'")
 
         # Парсим cat: и date: теги
         cat_filter = None
@@ -2596,6 +2611,7 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("today", today_command))
     application.add_handler(CommandHandler("subs", show_subscriptions))
     application.add_handler(CommandHandler("stats", show_stats))
+    application.add_handler(CommandHandler("download_db", download_db))
     application.add_handler(CommandHandler("ustats", show_ustats))
     application.add_handler(CommandHandler("update", update_parsers))
     application.add_handler(CommandHandler("donate", custom_donate))
