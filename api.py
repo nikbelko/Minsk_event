@@ -344,6 +344,36 @@ def events_upcoming(
                           events=[Event(**e) for e in page_events])
 
 
+# ── WebApp ping (статистика открытий) ───────────────────────────────────────
+
+class WebAppPing(BaseModel):
+    user_id: Optional[int] = None
+    username: Optional[str] = None
+    first_name: Optional[str] = None
+
+
+@app.post("/api/webapp-ping")
+def webapp_ping(ping: WebAppPing):
+    """Логирует каждое открытие веб-приложения в user_stats."""
+    try:
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO user_stats (user_id, username, first_name, action, detail, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    ping.user_id or 0,
+                    ping.username or "web_user",
+                    ping.first_name or "Web",
+                    "webapp_ping",
+                    "web",
+                    datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+                ),
+            )
+            conn.commit()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return {"ok": True}
+
+
 # ── Сабмит события от пользователя сайта ────────────────────────────────────
 
 class EventSubmit(BaseModel):
