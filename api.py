@@ -209,7 +209,7 @@ def get_events(
     date_to: Optional[str]   = Query(None),
     search: Optional[str]    = Query(None, description="Поиск по названию/месту"),
     page: int                = Query(1, ge=1),
-    per_page: int            = Query(10, ge=1, le=50),
+    per_page: int            = Query(10, ge=1, le=500),
 ):
     today = today_str()
     now_t = now_time_str()
@@ -266,7 +266,7 @@ def get_events(
 def events_today(
     category: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
-    per_page: int = Query(10, ge=1, le=50),
+    per_page: int = Query(10, ge=1, le=500),
 ):
     today = today_str()
     now_t = now_time_str()
@@ -288,7 +288,7 @@ def events_today(
 def events_tomorrow(
     category: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
-    per_page: int = Query(10, ge=1, le=50),
+    per_page: int = Query(10, ge=1, le=500),
 ):
     tomorrow = (now_minsk() + timedelta(days=1)).strftime("%Y-%m-%d")
     where = ["event_date = ?"]
@@ -306,7 +306,7 @@ def events_tomorrow(
 def events_weekend(
     category: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
-    per_page: int = Query(10, ge=1, le=50),
+    per_page: int = Query(10, ge=1, le=500),
 ):
     saturday, sunday = get_weekend_dates()
     where = ["event_date IN (?, ?)"]
@@ -325,7 +325,7 @@ def events_upcoming(
     category: Optional[str] = Query(None),
     days: int = Query(30, ge=1, le=90),
     page: int = Query(1, ge=1),
-    per_page: int = Query(10, ge=1, le=50),
+    per_page: int = Query(10, ge=1, le=500),
 ):
     today = today_str()
     now_t = now_time_str()
