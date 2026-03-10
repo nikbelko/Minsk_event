@@ -4,6 +4,7 @@
 
 import os
 import sqlite3
+import httpx
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -15,9 +16,11 @@ from pydantic import BaseModel
 
 # ── Конфиг ──────────────────────────────────────────────────────────────────
 
-DB_PATH   = os.getenv("DB_PATH", "/data/events_final.db")
-MINSK_TZ  = timezone(timedelta(hours=3))
-FRONTEND_URL = os.getenv("FRONTEND_URL", "*")   # URL фронтенда на Vercel/Netlify
+DB_PATH      = os.getenv("DB_PATH", "/data/events_final.db")
+MINSK_TZ     = timezone(timedelta(hours=3))
+FRONTEND_URL = os.getenv("FRONTEND_URL", "*")
+BOT_TOKEN    = os.getenv("TELEGRAM_BOT_TOKEN", "")
+ADMIN_ID     = int(os.getenv("ADMIN_ID", "502917728"))
 
 app = FastAPI(
     title="MinskDvizh API",
@@ -344,36 +347,6 @@ def events_upcoming(
                           events=[Event(**e) for e in page_events])
 
 
-# ── WebApp ping (статистика открытий) ───────────────────────────────────────
-
-class WebAppPing(BaseModel):
-    user_id: Optional[int] = None
-    username: Optional[str] = None
-    first_name: Optional[str] = None
-
-
-@app.post("/api/webapp-ping")
-def webapp_ping(ping: WebAppPing):
-    """Логирует каждое открытие веб-приложения в user_stats."""
-    try:
-        with get_db() as conn:
-            conn.execute(
-                "INSERT INTO user_stats (user_id, username, first_name, action, detail, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    ping.user_id or 0,
-                    ping.username or "web_user",
-                    ping.first_name or "Web",
-                    "webapp_ping",
-                    "web",
-                    datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"),
-                ),
-            )
-            conn.commit()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    return {"ok": True}
-
-
 # ── Сабмит события от пользователя сайта ────────────────────────────────────
 
 class EventSubmit(BaseModel):
@@ -393,7 +366,8 @@ def submit_event(event: EventSubmit):
     """Принимает событие от пользователя сайта → сохраняет в pending_events."""
     try:
         with get_db() as conn:
-            conn.execute("""
+            cursor = conn.cursor()
+            cursor.execute("""
                 INSERT INTO pending_events
                     (user_id, username, first_name, title, event_date, show_time,
                      place, address, category, description, price, source_url,
@@ -409,6 +383,44 @@ def submit_event(event: EventSubmit):
                 datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"),
             ))
             conn.commit()
+            pending_id = cursor.lastrowid
+
+        # Уведомление админу в Telegram
+        if BOT_TOKEN and ADMIN_ID:
+            lines = [
+                "🌐 <b>Новое событие с сайта</b>",
+                f"📌 <b>{event.title}</b>",
+                f"🗂 Категория: {event.category}",
+                f"📅 Дата: {event.event_date}" + (f" ⏰ {event.show_time}" if event.show_time else ""),
+                f"🏢 Место: {event.place}" + (f", {event.address}" if event.address else ""),
+            ]
+            if event.price:
+                lines.append(f"💰 Цена: {event.price}")
+            if event.description:
+                lines.append(f"📝 {event.description[:200]}")
+            if event.source_url:
+                lines.append(f"🔗 {event.source_url}")
+            lines.append(f"\n<i>ID в очереди: #{pending_id}</i>")
+            text = "\n".join(lines)
+            try:
+                with httpx.Client(timeout=5) as client:
+                    client.post(
+                        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                        json={
+                            "chat_id": ADMIN_ID,
+                            "text": text,
+                            "parse_mode": "HTML",
+                            "reply_markup": {
+                                "inline_keyboard": [[
+                                    {"text": "✅ Одобрить", "callback_data": f"mod_approve_{pending_id}"},
+                                    {"text": "❌ Отклонить", "callback_data": f"mod_reject_{pending_id}"},
+                                ]]
+                            }
+                        }
+                    )
+            except Exception:
+                pass  # не блокируем ответ если TG недоступен
+
         return {"ok": True, "message": "Событие отправлено на модерацию"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

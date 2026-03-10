@@ -10,3 +10,4 @@ lxml==4.9.3
 # API
 fastapi==0.111.0
 uvicorn==0.29.0
+httpx==0.27.0
