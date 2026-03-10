@@ -326,10 +326,10 @@ def get_events_count_by_category() -> dict:
             )
         """, (today,))
         cinema_count = cursor.fetchone()[0]
-        # Остальные: считаем уникальные (title, place)
+        # Остальные: считаем уникальные (title, place), COALESCE чтобы NULL не терялись
         cursor.execute("""
             SELECT category, COUNT(*) FROM (
-                SELECT DISTINCT category, title, place FROM events
+                SELECT DISTINCT category, title, COALESCE(place, '') as place FROM events
                 WHERE category != 'cinema' AND event_date >= ?
             ) GROUP BY category
         """, (today,))
@@ -732,11 +732,20 @@ def build_page_keyboard(data: dict):
     total = len(events)
     max_page = max(0, (total - 1) // per_page)
     keyboard = []
+    # Считаем уникальные события (как после группировки) — title+place
     category_counts = defaultdict(int)
+    _seen_cats: dict = defaultdict(set)
     for e in events:
         cat = e.get("category") if e.get("category") else ("cinema" if e.get("_pre_formatted") else None)
-        if cat:
+        if not cat:
+            continue
+        if e.get("_pre_formatted"):
             category_counts[cat] += 1
+        else:
+            key = (e.get("title", ""), e.get("place") or "")
+            if key not in _seen_cats[cat]:
+                _seen_cats[cat].add(key)
+                category_counts[cat] += 1
     if len(category_counts) > 1:
         row = []
         for cat_key, cat_name in CATEGORY_NAMES.items():
@@ -923,12 +932,18 @@ async def show_categories_menu(query, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     counts = get_events_count_by_category()
     # Показываем только категории у которых есть события
+    # Объединяем: сначала порядок из CATEGORY_NAMES, потом новые категории из БД
+    all_cats = dict(CATEGORY_NAMES)
+    for cat in counts:
+        if cat not in all_cats:
+            emoji = CATEGORY_EMOJI.get(cat, "📌")
+            all_cats[cat] = f"{emoji} {cat.capitalize()}"
     keyboard = []
     row = []
-    for cat, name in CATEGORY_NAMES.items():
+    for cat, name in all_cats.items():
         n = counts.get(cat, 0)
         if n == 0:
-            continue  # пропускаем пустые категории
+            continue
         label = f"{name} ({n})"
         row.append(InlineKeyboardButton(label, callback_data=f"cat_{cat}"))
         if len(row) == 2:
@@ -1075,12 +1090,14 @@ def _format_stats(stats: dict, title: str) -> str:
     webapp_today_u = stats["webapp_users_today"]
     all_today = max(today_u, webapp_today_u) if today_u == 0 else today_u
 
+    act_total = round(stats["total_actions"] / all_unique, 1) if all_unique else 0
+    act_today = round(stats["actions_today"] / all_today, 1) if all_today else 0
     lines = [
         f"<b>{title}</b>",
         "",
-        f"👥 Всего уникальных: <b>{all_unique}</b> (🌐 {webapp_u})",
+        f"👥 Всего уникальных: <b>{all_unique}</b> (🌐 {webapp_u}) акт. {act_total}",
         f"📨 Всего запросов: <b>{stats['total_actions']}</b>",
-        f"🟢 Сегодня уникальных: <b>{all_today}</b> (🌐 {webapp_today_u}) +{stats['new_today']} нов",
+        f"🟢 Сегодня уникальных: <b>{all_today}</b> (🌐 {webapp_today_u}) акт. {act_today} +{stats['new_today']} нов",
         f"📬 Запросов сегодня: <b>{stats['actions_today']}</b>",
         f"🔔 Подписчиков: <b>{stats['subscribers_count']}</b>",
         f"🗂 Событий в базе: <b>{stats['events_count']}</b>",
