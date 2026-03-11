@@ -2559,7 +2559,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.reply_text(get_prompt(field), parse_mode="HTML")
             return
 
-        if data.startswith("mod_edit_") and not data.startswith("mod_edit_cancel_"):
+        if data.startswith("mod_edit_") and not data.startswith("mod_edit_cancel_") and not data.startswith("mod_edit_field_"):
             if query.from_user.id != ADMIN_ID:
                 await query.answer("⛔ Нет доступа", show_alert=True)
                 return
