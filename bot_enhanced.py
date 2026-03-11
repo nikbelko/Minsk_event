@@ -506,23 +506,29 @@ def add_subscription(user_id: int, category: str, date_type: str):
 def remove_subscription(user_id: int, category: str, date_type: str):
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM subscriptions WHERE user_id = ? AND category = ? AND date_type = ?",
-                       (user_id, category, date_type))
+        # Ставим status='inactive' вместо DELETE — история сохраняется
+        cursor.execute(
+            "UPDATE subscriptions SET status='inactive' WHERE user_id = ? AND category = ? AND date_type = ?",
+            (user_id, category, date_type)
+        )
         conn.commit()
 
 
 def get_user_subscriptions(user_id: int):
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT category, date_type FROM subscriptions WHERE user_id = ?", (user_id,))
+        cursor.execute("SELECT category, date_type FROM subscriptions WHERE user_id = ? AND (status IS NULL OR status = 'active')", (user_id,))
         return cursor.fetchall()
 
 
 def get_all_subscribers() -> dict:
-    """Возвращает {(category, date_type): [user_id, ...]}."""
+    """Возвращает {(category, date_type): [user_id, ...]} — только активные подписки."""
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT user_id, category, date_type FROM subscriptions")
+        cursor.execute(
+            "SELECT user_id, category, date_type FROM subscriptions "
+            "WHERE status IS NULL OR status = 'active'"
+        )
         result = defaultdict(list)
         for row in cursor.fetchall():
             result[(row["category"], row["date_type"])].append(row["user_id"])
@@ -1006,22 +1012,47 @@ async def send_subscription_prompt(query_or_update, category: str, date_type: st
     await send(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 
-async def show_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    subs = get_user_subscriptions(user_id)
-    if not subs:
-        await update.message.reply_text("У вас пока нет активных подписок 🔔\n\nПодписаться можно через меню 🎯 Категории")
-        return
-    dt_names = {"today": "на сегодня", "tomorrow": "на завтра", "upcoming": "на ближайшие дни", "weekend": "на выходные"}
+def _build_subs_keyboard(subs: list) -> tuple:
+    """Строит текст и клавиатуру экрана подписок (галочки)."""
+    dt_names = {"today": "сегодня", "tomorrow": "завтра", "upcoming": "ближайшие", "weekend": "выходные"}
     keyboard = []
-    lines = ["🔔 Ваши подписки:"]
+    if not subs:
+        text = (
+            "🔔 <b>Мои подписки</b>\n\n"
+            "У вас нет активных подписок.\n"
+            "Подписаться можно через меню 🎯 Категории → выбрать категорию → выбрать период."
+        )
+        keyboard.append([InlineKeyboardButton("🎯 Перейти к категориям", callback_data="show_categories")])
+        return text, InlineKeyboardMarkup(keyboard)
+
+    lines = ["🔔 <b>Мои подписки</b>\n", "Нажмите ✅ чтобы <b>отписаться</b>:\n"]
     for s in subs:
         cat_name = CATEGORY_NAMES.get(s["category"], s["category"])
         dt_name = dt_names.get(s["date_type"], s["date_type"])
-        lines.append(f"• {cat_name} {dt_name}")
-        keyboard.append([InlineKeyboardButton(f"🔕 Отписаться: {cat_name} {dt_name}",
-                                               callback_data=f"unsub_{s['category']}_{s['date_type']}")])
-    await update.message.reply_text("\n".join(lines), reply_markup=InlineKeyboardMarkup(keyboard))
+        keyboard.append([
+            InlineKeyboardButton(
+                f"✅  {cat_name} / {dt_name}",
+                callback_data=f"unsub_{s['category']}_{s['date_type']}"
+            )
+        ])
+    keyboard.append([InlineKeyboardButton("➕ Добавить подписки", callback_data="show_categories")])
+    return "\n".join(lines), InlineKeyboardMarkup(keyboard)
+
+
+async def show_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    subs = get_user_subscriptions(update.effective_user.id)
+    text, keyboard = _build_subs_keyboard(subs)
+    await update.message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
+
+
+async def show_subscriptions_query(query, context: ContextTypes.DEFAULT_TYPE):
+    """Версия для callback — обновляет то же сообщение."""
+    subs = get_user_subscriptions(query.from_user.id)
+    text, keyboard = _build_subs_keyboard(subs)
+    try:
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except Exception:
+        await query.message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
 async def send_subscriptions_digest(bot, date_type: str):
     """Рассылает дайджест подписчикам после обновления парсеров."""
     logger.info(f"📬 Рассылка дайджеста: {date_type}")
@@ -1098,12 +1129,87 @@ async def send_subscriptions_digest(bot, date_type: str):
 # ---------------------- Статистика ----------------------
 
 
+async def show_pending_list(update_or_query, context: ContextTypes.DEFAULT_TYPE):
+    """Список событий на модерации (status=pending/edited)."""
+    if hasattr(update_or_query, 'from_user'):
+        uid = update_or_query.from_user.id
+    else:
+        uid = update_or_query.effective_user.id
+    if uid != ADMIN_ID:
+        return
+
+    with get_db_connection() as conn:
+        rows = conn.execute("""
+            SELECT id, title, event_date, place, category, status, first_name, username, created_at
+            FROM pending_events WHERE status IN ('pending','edited')
+            ORDER BY created_at ASC
+        """).fetchall()
+
+    if not rows:
+        text = "✅ <b>Очередь модерации пуста</b>\n\nНет событий ожидающих проверки."
+        if hasattr(update_or_query, 'edit_message_text'):
+            await update_or_query.edit_message_text(text, parse_mode="HTML")
+        else:
+            await update_or_query.message.reply_text(text, parse_mode="HTML")
+        return
+
+    import html as _html
+    lines = [f"📋 <b>На модерации: {len(rows)} событий</b>\n"]
+    keyboard = []
+    for r in rows:
+        try:
+            ed = r["event_date"] or ""
+            d = datetime.strptime(ed.split("|")[0].strip(), "%Y-%m-%d").strftime("%d.%m.%Y")
+            if "|" in ed:
+                d += "–" + datetime.strptime(ed.split("|")[1].strip(), "%Y-%m-%d").strftime("%d.%m.%Y")
+        except Exception:
+            d = r["event_date"] or "?"
+        cat_emoji = CATEGORY_EMOJI.get(r["category"] or "", "📌")
+        mark = "🆕" if r["status"] == "pending" else "✏️"
+        uname = f"@{r['username']}" if r["username"] else (r["first_name"] or "?")
+        place_str = f" • {_html.escape(r['place'])}" if r["place"] else ""
+        lines.append(
+            f"{mark} <b>#{r['id']}</b> {cat_emoji} {_html.escape(r['title'] or '—')}\n"
+            f"   📅 {d}{place_str} | 👤 {_html.escape(uname)}"
+        )
+        keyboard.append([
+            InlineKeyboardButton(f"✅#{r['id']}", callback_data=f"mod_approve_{r['id']}"),
+            InlineKeyboardButton(f"❌#{r['id']}", callback_data=f"mod_reject_{r['id']}"),
+            InlineKeyboardButton(f"✏️#{r['id']}", callback_data=f"mod_edit_{r['id']}"),
+        ])
+    keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="adm_pending")])
+
+    text = "\n".join(lines)[:4000]
+    kbd = InlineKeyboardMarkup(keyboard)
+    if hasattr(update_or_query, 'edit_message_text'):
+        try:
+            await update_or_query.edit_message_text(text, reply_markup=kbd, parse_mode="HTML")
+        except Exception:
+            await update_or_query.message.reply_text(text, reply_markup=kbd, parse_mode="HTML")
+    else:
+        await update_or_query.message.reply_text(text, reply_markup=kbd, parse_mode="HTML")
+
+
+async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /pending — очередь модерации."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Нет доступа.")
+        return
+    await show_pending_list(update, context)
+
+
 async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """🔧 /admin — панель администратора."""
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("⛔ Нет доступа.")
         return
+    with get_db_connection() as conn:
+        _pcnt = conn.execute(
+            "SELECT COUNT(*) FROM pending_events WHERE status IN ('pending','edited')"
+        ).fetchone()[0]
+    _plabel = f"📋 Модерация ({_pcnt})" if _pcnt else "📋 Модерация"
     keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(_plabel, callback_data="adm_pending")],
         [InlineKeyboardButton("📊 Статистика", callback_data="adm_stats"),
          InlineKeyboardButton("📈 Кл. статистика", callback_data="adm_ustats")],
         [InlineKeyboardButton("🔄 Обновить парсеры", callback_data="adm_update"),
@@ -1503,10 +1609,15 @@ def validate_field(field: str, text: str):
                 d_to   = _pd(pm.group(2))
             except ValueError:
                 return False, "❌ Одна из дат периода не существует."
-            if d_from < _date.today():
-                return False, "❌ Дата начала не может быть в прошлом."
+            today_d = _date.today()
+            if d_from < today_d:
+                return False, f"❌ Дата начала ({pm.group(1)}) уже в прошлом.\nСегодня {today_d.strftime('%d.%m.%Y')}"
+            if d_to < today_d:
+                return False, f"❌ Дата конца ({pm.group(2)}) уже в прошлом.\nСегодня {today_d.strftime('%d.%m.%Y')}"
             if d_to < d_from:
-                return False, "❌ Дата конца раньше даты начала."
+                return False, f"❌ Дата конца ({pm.group(2)}) раньше даты начала ({pm.group(1)})."
+            if d_to == d_from:
+                return False, "❌ Для одного дня введите дату без дефиса (ДД.ММ.ГГГГ)."
             if (d_to - d_from).days > 90:
                 return False, "❌ Период не может быть больше 90 дней."
             return True, f"{d_from.strftime('%Y-%m-%d')}|{d_to.strftime('%Y-%m-%d')}"
@@ -1519,8 +1630,9 @@ def validate_field(field: str, text: str):
             ev = _date(int(year), int(month), int(day))
         except ValueError:
             return False, "❌ Такой даты не существует."
-        if ev < _date.today():
-            return False, f"❌ Дата не может быть в прошлом. Сегодня {_date.today().strftime('%d.%m.%Y')}"
+        today_d = _date.today()
+        if ev < today_d:
+            return False, f"❌ Дата {ev.strftime('%d.%m.%Y')} уже в прошлом. Сегодня {today_d.strftime('%d.%m.%Y')}"
         return True, f"{year}-{month.zfill(2)}-{day.zfill(2)}"
     elif field == "show_time":
         # Диапазон ЧЧ:ММ-ЧЧ:ММ
@@ -1577,6 +1689,96 @@ def save_pending_event(user_id, username, first_name, data: dict) -> int:
         ))
         conn.commit()
         return cursor.lastrowid
+
+
+def check_duplicate_event(title: str, event_date: str, place: str) -> dict | None:
+    """Проверяет дубликат в таблицах events и pending_events.
+
+    Стратегия (3 уровня строгости):
+      1. Точное совпадение: title + event_date + place (нормализованные)
+      2. Мягкое: title + event_date (без учёта места — одно событие на разных площадках редкость)
+      3. Только дата + место (ловит переименованные события)
+
+    Возвращает dict с описанием дубликата или None.
+    """
+    import re as _re
+
+    def _norm(s: str) -> str:
+        """Нормализация: нижний регистр, убираем лишние пробелы и знаки."""
+        return _re.sub(r"[\s\-—–,\.!?]+", " ", (s or "").lower()).strip()
+
+    t_norm  = _norm(title)
+    p_norm  = _norm(place)
+
+    # Для периода берём начальную дату
+    if "|" in (event_date or ""):
+        dates = [event_date.split("|")[0].strip()]
+    else:
+        dates = [event_date] if event_date else []
+
+    if not dates or not t_norm:
+        return None
+
+    with get_db_connection() as conn:
+        for chk_date in dates:
+            # ── Уровень 1: title + date + place ──────────────────
+            if p_norm:
+                rows = conn.execute(
+                    "SELECT id, title, event_date, place FROM events "
+                    "WHERE event_date = ? AND LOWER(title) LIKE ? AND LOWER(COALESCE(place,'')) LIKE ?",
+                    (chk_date, f"%{t_norm[:20]}%", f"%{p_norm[:20]}%")
+                ).fetchall()
+                for r in rows:
+                    if _norm(r["title"]) == t_norm and _norm(r["place"] or "") == p_norm:
+                        return {"level": 1, "source": "events", "id": r["id"],
+                                "title": r["title"], "date": r["event_date"], "place": r["place"] or ""}
+
+            # ── Уровень 2: title + date (без места) ──────────────
+            rows = conn.execute(
+                "SELECT id, title, event_date, place FROM events "
+                "WHERE event_date = ? AND LOWER(title) LIKE ?",
+                (chk_date, f"%{t_norm[:20]}%")
+            ).fetchall()
+            for r in rows:
+                if _norm(r["title"]) == t_norm:
+                    return {"level": 2, "source": "events", "id": r["id"],
+                            "title": r["title"], "date": r["event_date"], "place": r["place"] or ""}
+
+            # ── Проверяем pending_events (pending/edited, не rejected) ──
+            rows_p = conn.execute(
+                "SELECT id, title, event_date, place FROM pending_events "
+                "WHERE event_date LIKE ? AND status NOT IN ('rejected','approved') AND LOWER(title) LIKE ?",
+                (f"%{chk_date}%", f"%{t_norm[:20]}%")
+            ).fetchall()
+            for r in rows_p:
+                if _norm(r["title"]) == t_norm:
+                    return {"level": 2, "source": "pending", "id": r["id"],
+                            "title": r["title"], "date": r["event_date"], "place": r["place"] or ""}
+
+    return None
+
+
+def _fmt_duplicate_reason(dup: dict) -> str:
+    """Формирует текст причины отказа."""
+    import html as _html
+    src = "афише" if dup["source"] == "events" else "очереди на модерацию"
+    try:
+        from datetime import datetime as _dt
+        d = _dt.strptime(dup["date"], "%Y-%m-%d").strftime("%d.%m.%Y")
+    except Exception:
+        d = dup["date"]
+    place_str = f" в «{_html.escape(dup['place'])}»" if dup["place"] else ""
+    lvl_hint = {
+        1: "точное совпадение названия, даты и места",
+        2: "совпадение названия и даты",
+        3: "совпадение даты и места",
+    }.get(dup["level"], "")
+    return (
+        f"⚠️ Событие уже есть в {src}:\n"
+        f"📌 <b>{_html.escape(dup['title'])}</b>\n"
+        f"📅 {d}{place_str}\n"
+        f"<i>({lvl_hint})</i>"
+    )
 
 
 def approve_pending_event(pending_id: int) -> bool:
@@ -2238,6 +2440,7 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("➕ Добавить событие", callback_data="show_submit"),
                 InlineKeyboardButton("⭐ Поддержать", callback_data="show_donate"),
             ],
+            [InlineKeyboardButton("🔔 Мои подписки", callback_data="show_subs")],
         ]),
         parse_mode=ParseMode.MARKDOWN,
         disable_web_page_preview=True,
@@ -2254,7 +2457,8 @@ async def search_by_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.chat.send_action(action="typing")
     events = search_events_by_title(query)
     if events:
-        set_pagination(context, events, f"<b>Результаты: «{query}»</b>")
+        set_pagination(context, events, f"<b>Результаты: «{query}»</b>",
+                       share_query=query)  # передаём текст → inline покажет те же результаты
         await show_page(update, context)
     else:
         await update.message.reply_text(f"По запросу «{query}» ничего не найдено.", parse_mode="Markdown")
@@ -2493,6 +2697,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.reply_text("📢 Публикую подборку на выходные...")
                 await post_to_channel(context.bot, "weekend")
                 await query.message.reply_text("✅ Готово!")
+            elif cmd == "pending":
+                await show_pending_list(query, context)
             return
 
         # Выбор категории в форме добавления события
@@ -2529,11 +2735,33 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if data == "submit_confirm":
             user = query.from_user
             data_form = context.user_data.get("submit", {})
-            missing = [FIELD_LABELS[f][1] for f in ["title","event_date","category"]
+            missing = [FIELD_LABELS[f][1] for f in ["title","event_date","category","place","details","show_time"]
                        if not data_form.get(f)]
             if missing:
                 await query.answer(f"Не заполнены обязательные поля: {', '.join(missing)}", show_alert=True)
                 return
+
+            # ── Проверка дубликата ────────────────────────────────
+            dup = check_duplicate_event(
+                title=data_form.get("title", ""),
+                event_date=data_form.get("event_date", ""),
+                place=data_form.get("place", ""),
+            )
+            if dup:
+                await query.answer()
+                reason = _fmt_duplicate_reason(dup)
+                for k in ["in_submit", "submit", "submit_field"]:
+                    context.user_data.pop(k, None)
+                await query.edit_message_text(
+                    f"❌ <b>Событие не принято — дубликат</b>\n\n{reason}\n\n"
+                    f"Если вы считаете, что это ошибка — свяжитесь с @i354444",
+                    parse_mode="HTML"
+                )
+                log_user_action(user.id, user.username, user.first_name, "submit_duplicate",
+                                data_form.get("title"))
+                return
+            # ─────────────────────────────────────────────────────
+
             pending_id = save_pending_event(user.id, user.username, user.first_name, data_form)
             for k in ["in_submit", "submit", "submit_field"]:
                 context.user_data.pop(k, None)
@@ -2765,6 +2993,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await start_submit(query, context)
             return
 
+        if data == "show_subs":
+            await query.answer()
+            await show_subscriptions_query(query, context)
+            return
+
         if data == "show_donate":
             await query.answer()
             user = query.from_user
@@ -2812,12 +3045,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user = query.from_user
             remove_subscription(user.id, category, date_type)
             log_user_action(user.id, user.username, user.first_name, "unsubscribe", f"{category}_{date_type}")
-            try:
-                await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔔 Подписаться", callback_data=f"sub_{category}_{date_type}")
-                ]]))
-            except Exception: pass
             await query.answer("Подписка отменена 🔕", show_alert=False)
+            # Если открыт экран /subs — обновляем список
+            msg_text = (query.message.text or "")
+            if "Мои подписки" in msg_text:
+                await show_subscriptions_query(query, context)
+            else:
+                try:
+                    await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🔔 Подписаться", callback_data=f"sub_{category}_{date_type}")
+                    ]]))
+                except Exception:
+                    pass
             return
         if data.startswith("cal_"):
             parts = data.split("_")
@@ -2868,6 +3107,7 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("today", today_command))
     application.add_handler(CommandHandler("subs", show_subscriptions))
     application.add_handler(CommandHandler("admin", admin_menu))
+    application.add_handler(CommandHandler("pending", pending_command))
     application.add_handler(CommandHandler("stats", show_stats))
     application.add_handler(CommandHandler("download_db", download_db))
     application.add_handler(CommandHandler("ustats", show_ustats))
