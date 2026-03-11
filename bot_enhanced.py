@@ -161,6 +161,8 @@ def init_db():
         # Миграции для существующих БД
         for col_sql in [
             "ALTER TABLE pending_events ADD COLUMN details TEXT DEFAULT ''",
+            "ALTER TABLE pending_events ADD COLUMN end_time TEXT DEFAULT ''",
+            "ALTER TABLE events ADD COLUMN end_time TEXT DEFAULT ''",
             "ALTER TABLE subscriptions ADD COLUMN status TEXT DEFAULT 'active'",
         ]:
             try:
@@ -261,8 +263,10 @@ def get_stats_data(exclude_admin: bool = True) -> dict:
         top_actions = cursor.fetchall()
         cursor.execute("SELECT COUNT(*) FROM events WHERE event_date >= ?", (today,))
         events_count = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM subscriptions WHERE user_id != ?", (admin_filter,))
+        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM subscriptions WHERE user_id != ? AND (status IS NULL OR status = 'active')", (admin_filter,))
         subscribers_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM subscriptions WHERE user_id != ? AND (status IS NULL OR status = 'active')", (admin_filter,))
+        subscriptions_total = cursor.fetchone()[0]
         # Webapp статистика (уникальные пользователи, без админа)
         cursor.execute("""
             SELECT COUNT(DISTINCT user_id) FROM user_stats
@@ -300,6 +304,7 @@ def get_stats_data(exclude_admin: bool = True) -> dict:
             "top_actions": top_actions,
             "events_count": events_count,
             "subscribers_count": subscribers_count,
+            "subscriptions_total": subscriptions_total,
             "new_today": new_today,
             "monthly_activity": monthly_activity,
             "webapp_users": webapp_users,
@@ -538,7 +543,15 @@ def format_event_text(event) -> str:
     if event["event_date"]:
         text += f"\n📅 {datetime.strptime(event['event_date'], '%Y-%m-%d').strftime('%d.%m.%Y')}"
     if event["show_time"]:
-        text += f" ⏰ {event['show_time']}"
+        _t = event["show_time"]
+        try:
+            _et = event["end_time"] or ""
+        except Exception:
+            _et = ""
+        if _et:
+            text += f" ⏰ {_t}–{_et}"
+        else:
+            text += f" ⏰ {_t}"
     if event["place"] and event["place"] != "Кинотеатр":
         text += f"\n🏢 {event['place']}"
     if event["price"]:
@@ -1142,7 +1155,7 @@ def _format_stats(stats: dict, title: str) -> str:
         f"📨 Всего запросов: <b>{stats['total_actions']}</b>",
         f"🟢 Сегодня уникальных: <b>{all_today}</b> (🌐 {webapp_today_u}) акт. {act_today} +{stats['new_today']} нов",
         f"📬 Запросов сегодня: <b>{stats['actions_today']}</b>",
-        f"🔔 Подписчиков: <b>{stats['subscribers_count']}</b>",
+        f"🔔 Подписчиков: <b>{stats['subscribers_count']}</b> | Подписок: <b>{stats.get('subscriptions_total', '—')}</b>",
         f"🗂 Событий в базе: <b>{stats['events_count']}</b>",
         "",
         "<b>📅 Активность за 30 дней:</b>",
@@ -1347,7 +1360,7 @@ FIELD_LABELS = {
     "details":     ("📖", "Формат",     True),   # обязательное: краткий формат события
     "category":    ("🎯", "Категория",  True),   # обязательное
     "event_date":  ("📅", "Дата",       True),   # обязательное
-    "show_time":   ("⏰", "Время",      True),   # обязательное
+    "show_time":   ("⏰", "Время",      True),   # обязательное (формат ЧЧ:ММ или ЧЧ:ММ-ЧЧ:ММ)
     "place":       ("🏢", "Место",      True),   # обязательное
     "address":     ("📍", "Адрес",      False),
     "price":       ("💰", "Цена",       False),
@@ -1360,7 +1373,7 @@ FIELD_PROMPTS = {
     "event_date":  ("📅 Введите <b>дату</b> в формате ДД.ММ.ГГГГ\n"
                     "Или <b>период</b>: ДД.ММ.ГГГГ-ДД.ММ.ГГГГ (например: 15.04.2026-20.04.2026)\n"
                     "Тогда событие появится на каждый день периода"),
-    "show_time":   "⏰ Введите <b>время начала</b> в формате ЧЧ:ММ (например: 19:00):",
+    "show_time":   "⏰ Введите <b>время</b> в формате ЧЧ:ММ или диапазон ЧЧ:ММ-ЧЧ:ММ (например: 10:00-18:00):",
     "place":       "🏢 Введите <b>место проведения</b> (название площадки):",
     "address":     "📍 Введите <b>адрес</b> (например: ул. Притыцкого, 62)\nИли /skip чтобы пропустить:",
     "category":    "🎯 Выберите <b>категорию</b>:",
@@ -1408,14 +1421,22 @@ def get_pending_event(pending_id: int) -> dict | None:
 
 def update_pending_event(pending_id: int, data: dict):
     with get_db_connection() as conn:
+        # Парсим show_time при сохранении модератором
+        raw_t = data.get("show_time", "") or ""
+        if "-" in raw_t and raw_t.count(":") == 2:
+            _tp = raw_t.split("-", 1)
+            _st, _et = _tp[0].strip(), _tp[1].strip()
+        else:
+            _st, _et = raw_t, data.get("end_time", "") or ""
         conn.execute("""
             UPDATE pending_events
-            SET title=?, event_date=?, show_time=?, place=?, address=?,
+            SET title=?, event_date=?, show_time=?, end_time=?, place=?, address=?,
                 category=?, price=?, details=?, description=?, source_url=?, status='edited'
             WHERE id=?
         """, (
             data.get("title", ""), data.get("event_date", ""),
-            data.get("show_time", ""), data.get("place", ""),
+            _st, _et,
+            data.get("place", ""),
             data.get("address", ""), data.get("category", "other"),
             data.get("price", ""), data.get("details", ""),
             data.get("description", ""),
@@ -1465,6 +1486,12 @@ def validate_field(field: str, text: str):
     import re as _re
     from datetime import date as _date, timedelta as _td
     if field == "event_date":
+        # Уже сохранённый период в ISO: "2026-04-15|2026-04-20" — принимаем как есть
+        if _re.match(r"^\d{4}-\d{2}-\d{2}\|\d{4}-\d{2}-\d{2}$", text.strip()):
+            return True, text.strip()
+        # Уже сохранённая одиночная дата ISO: "2026-04-15" — принимаем как есть
+        if _re.match(r"^\d{4}-\d{2}-\d{2}$", text.strip()):
+            return True, text.strip()
         # Период: ДД.ММ.ГГГГ-ДД.ММ.ГГГГ
         pm = _re.match(r"^(\d{1,2}\.\d{1,2}\.\d{4})-(\d{1,2}\.\d{1,2}\.\d{4})$", text.strip())
         if pm:
@@ -1496,10 +1523,19 @@ def validate_field(field: str, text: str):
             return False, f"❌ Дата не может быть в прошлом. Сегодня {_date.today().strftime('%d.%m.%Y')}"
         return True, f"{year}-{month.zfill(2)}-{day.zfill(2)}"
     elif field == "show_time":
-        m = _re.match(r"^(\d{1,2}):(\d{2})$", text)
+        # Диапазон ЧЧ:ММ-ЧЧ:ММ
+        rng = _re.match(r"^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$", text.strip())
+        if rng:
+            t1, t2 = rng.group(1), rng.group(2)
+            for t in (t1, t2):
+                if not _re.match(r"^\d{1,2}:\d{2}$", t):
+                    return False, "❌ Формат времени: ЧЧ:ММ-ЧЧ:ММ (например: 10:00-18:00)"
+            return True, text.strip()  # сохраняем как "10:00-18:00" в show_time
+        # Одиночное время
+        m = _re.match(r"^(\d{1,2}):(\d{2})$", text.strip())
         if not m:
-            return False, "❌ Формат: ЧЧ:ММ (например 19:00)"
-        return True, text
+            return False, "❌ Формат: ЧЧ:ММ или ЧЧ:ММ-ЧЧ:ММ (например: 19:00 или 10:00-18:00)"
+        return True, text.strip()
     elif field == "title" and len(text) < 3:
         return False, "❌ Название слишком короткое."
     elif field == "details":
@@ -1512,16 +1548,24 @@ def validate_field(field: str, text: str):
 def save_pending_event(user_id, username, first_name, data: dict) -> int:
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        # Парсим show_time: "10:00-18:00" → show_time="10:00", end_time="18:00"
+        raw_time = data.get("show_time", "") or ""
+        if "-" in raw_time and raw_time.count(":") == 2:
+            _t_parts = raw_time.split("-", 1)
+            _show_t, _end_t = _t_parts[0].strip(), _t_parts[1].strip()
+        else:
+            _show_t, _end_t = raw_time, ""
         cursor.execute("""
             INSERT INTO pending_events
-              (user_id, username, first_name, title, event_date, show_time,
+              (user_id, username, first_name, title, event_date, show_time, end_time,
                place, address, category, details, description, price, source_url, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             user_id, username, first_name,
             data.get("title", ""),
             data.get("event_date", ""),
-            data.get("show_time", ""),
+            _show_t,
+            _end_t,
             data.get("place", ""),
             data.get("address", ""),
             data.get("category", "other"),
@@ -1571,17 +1615,22 @@ def approve_pending_event(pending_id: int) -> bool:
             except Exception:
                 dates = []
         for d in dates:
+            try:
+                _end_time = row["end_time"] or ""
+            except Exception:
+                _end_time = ""
             cursor.execute("""
                 INSERT INTO events
-                  (title, details, description, event_date, show_time,
+                  (title, details, description, event_date, show_time, end_time,
                    place, location, price, category, source_name, source_url)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 row["title"],
                 _details,
                 _description,
                 d.strftime("%Y-%m-%d"),
                 row["show_time"] or "",
+                _end_time,
                 row["place"] or "", _addr or "Минск",
                 row["price"] or "",
                 row["category"] or "other",
@@ -2051,6 +2100,22 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         today = now.strftime("%Y-%m-%d")
         query_text = (update.inline_query.query or "").strip()
         logger.info(f"[inline] from={update.inline_query.from_user.id} query='{query_text}'")
+
+        # Пустой запрос — показываем подсказку вместо всех событий
+        if not query_text:
+            from telegram import InlineQueryResultArticle, InputTextMessageContent
+            import uuid as _uuid
+            hint = InlineQueryResultArticle(
+                id=str(_uuid.uuid4()),
+                title="🔍 Введите запрос для поиска событий",
+                description="Например: концерт, выставка, 15.04.2026",
+                input_message_content=InputTextMessageContent(
+                    "🔍 Ищи события в @Minskdvizh_bot",
+                    parse_mode="HTML"
+                ),
+            )
+            await update.inline_query.answer([hint], cache_time=5)
+            return
 
         # Парсим cat: и date: теги
         cat_filter = None
