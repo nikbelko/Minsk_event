@@ -1794,7 +1794,7 @@ async def post_to_channel(bot, post_type: str = "today"):
         from collections import defaultdict as _dd
         by_cat = _dd(list)
         for e in list(events)[:30]:
-            by_cat[e["category"]].append(e)
+            by_cat[e["category"]].append(dict(e))
         for cat, evs in by_cat.items():
             emoji = CAT_POST_EMOJI.get(cat, "📌")
             cat_name = CAT_POST_NAMES.get(cat, cat.upper())
@@ -1825,7 +1825,7 @@ async def post_to_channel(bot, post_type: str = "today"):
         from collections import defaultdict as _dd
         by_cat = _dd(list)
         for e in all_events:
-            by_cat[e["category"]].append(e)
+            by_cat[e["category"]].append(dict(e))
         for cat, evs in by_cat.items():
             emoji = CAT_POST_EMOJI.get(cat, "📌")
             cat_name = CAT_POST_NAMES.get(cat, cat.upper())
