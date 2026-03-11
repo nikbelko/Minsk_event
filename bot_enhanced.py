@@ -1343,14 +1343,14 @@ async def send_digest_job(bot=None):
 
 # Метаданные полей формы — используется везде (добавление, редактирование, модерация)
 FIELD_LABELS = {
-    "title":       ("📝", "Название",   True),
-    "event_date":  ("📅", "Дата",       True),
-    "show_time":   ("⏰", "Время",      False),
-    "place":       ("🏢", "Место",      False),
-    "address":     ("📍", "Адрес",      False),
-    "category":    ("🎯", "Категория",  True),
-    "price":       ("💰", "Цена",       False),
+    "title":       ("📝", "Название",   True),   # обязательное
     "details":     ("📖", "Формат",     True),   # обязательное: краткий формат события
+    "category":    ("🎯", "Категория",  True),   # обязательное
+    "event_date":  ("📅", "Дата",       True),   # обязательное
+    "show_time":   ("⏰", "Время",      True),   # обязательное
+    "place":       ("🏢", "Место",      True),   # обязательное
+    "address":     ("📍", "Адрес",      False),
+    "price":       ("💰", "Цена",       False),
     "description": ("📋", "Описание",   False),  # необязательное: подробное описание
     "source_url":  ("🔗", "Ссылка",     False),
 }
@@ -1359,9 +1359,9 @@ FIELD_PROMPTS = {
     "title":       "📝 Введите <b>название</b> события:",
     "event_date":  ("📅 Введите <b>дату</b> в формате ДД.ММ.ГГГГ\n"
                     "Или <b>период</b>: ДД.ММ.ГГГГ-ДД.ММ.ГГГГ (например: 15.04.2026-20.04.2026)\n"
-                    "Тогда событие появится на каждый день периода:"),
-    "show_time":   "⏰ Введите <b>время начала</b> в формате ЧЧ:ММ (например: 19:00)\nИли /skip чтобы пропустить:",
-    "place":       "🏢 Введите <b>место проведения</b> (название площадки)\nИли /skip чтобы пропустить:",
+                    "Тогда событие появится на каждый день периода"),
+    "show_time":   "⏰ Введите <b>время начала</b> в формате ЧЧ:ММ (например: 19:00):",
+    "place":       "🏢 Введите <b>место проведения</b> (название площадки):",
     "address":     "📍 Введите <b>адрес</b> (например: ул. Притыцкого, 62)\nИли /skip чтобы пропустить:",
     "category":    "🎯 Выберите <b>категорию</b>:",
     "price":       "💰 Введите <b>цену</b> (например: от 20 BYN, Бесплатно)\nИли /skip чтобы пропустить:",
@@ -1369,6 +1369,16 @@ FIELD_PROMPTS = {
     "description": "📋 Введите <b>подробное описание</b> (программа, спикеры и т.д.)\nИли /skip чтобы пропустить:",
     "source_url":  "🔗 Введите <b>ссылку</b> на событие\nИли /skip чтобы пропустить:",
 }
+
+def get_prompt(field: str, extra: str = "") -> str:
+    """Возвращает строку промпта для поля (корректно обрабатывает tuple)."""
+    p = get_prompt(field)
+    if isinstance(p, tuple):
+        p = "".join(p)
+    if extra:
+        p = p + "\n" + extra
+    return p
+
 
 CATEGORY_KEYBOARD = InlineKeyboardMarkup([
     [InlineKeyboardButton("🎬 Кино", callback_data="sc_cinema"),
@@ -1423,7 +1433,7 @@ def build_fields_keyboard(data: dict, mode: str = "submit") -> InlineKeyboardMar
         if required:
             mark = " ✅" if val else " ❗"
         else:
-            mark = " ✓" if val else ""
+            mark = " ✅" if val else ""   # все галочки одинаковые
         btn = InlineKeyboardButton(f"{emoji} {label}{mark}",
                                    callback_data=f"{mode}_field_{field}")
         row.append(btn)
@@ -1735,67 +1745,108 @@ async def post_to_channel(bot, post_type: str = "today"):
         return
 
     now = datetime.now(MINSK_TZ)
+    DAY_NAMES = ["Понедельник","Вторник","Среда","Четверг","Пятница","Суббота","Воскресенье"]
+    MONTH_NAMES = ["января","февраля","марта","апреля","мая","июня",
+                   "июля","августа","сентября","октября","ноября","декабря"]
+    # Эмодзи для категорий в постах (заглавные)
+    CAT_POST_EMOJI = {
+        "cinema": "🎬", "concert": "🎵", "theater": "🎭", "exhibition": "🖼",
+        "kids": "🧸", "sport": "⚽", "party": "🌟", "free": "🆓",
+        "excursion": "🗺", "market": "🛍", "masterclass": "🎨",
+        "boardgames": "🎲", "broadcast": "📺", "education": "📚",
+    }
+    CAT_POST_NAMES = {
+        "cinema": "КИНО", "concert": "КОНЦЕРТЫ", "theater": "ТЕАТР",
+        "exhibition": "ВЫСТАВКИ", "kids": "ДЕТЯМ", "sport": "СПОРТ",
+        "party": "ДВИЖ", "free": "БЕСПЛАТНО", "excursion": "ЭКСКУРСИИ",
+        "market": "МАРКЕТЫ", "masterclass": "МАСТЕР-КЛАССЫ",
+        "boardgames": "НАСТОЛКИ", "broadcast": "ТРАНСЛЯЦИИ", "education": "ОБУЧЕНИЕ",
+    }
+
+    def _fmt_price(price: str) -> str:
+        if not price:
+            return ""
+        p = price.strip()
+        if p.lower() in ("бесплатно", "free", "0", "0 byn", "0byn"):
+            return "🆓"
+        return p
+
+    def _fmt_event_line(e) -> str:
+        title = e["title"] or ""
+        price = _fmt_price(e.get("price", "") or "")
+        url = e.get("source_url") or ""
+        title_part = f"<a href=\"{url}\">{title}</a>" if url else title
+        return f"→ {title_part}" + (f" | {price}" if price else "")
 
     if post_type == "today":
         events = get_events_by_date_and_category(now)
         if not events:
             return
-        date_label = now.strftime("%d.%m.%Y")
-        day_name = ["Понедельник","Вторник","Среда","Четверг","Пятница","Суббота","Воскресенье"][now.weekday()]
-        lines = [f"🎭 <b>{day_name}, {date_label}</b>\n✨ Куда пойти сегодня в Минске:\n"]
+        day_name = DAY_NAMES[now.weekday()].lower()
+        day_num = now.day
+        month_name = MONTH_NAMES[now.month - 1]
+        lines = [
+            f"👹 Сегодня {day_num} {month_name} ({day_name}). #минск #дайджест",
+            f"😎 Всем доброго утра и продуктивного дня!",
+            f"✨ Куда пойти сегодня в Минске?\n",
+            f"Планируй когда удобно — всё открыто для тебя.\n",
+        ]
         from collections import defaultdict as _dd
         by_cat = _dd(list)
-        for e in list(events)[:20]:
+        for e in list(events)[:30]:
             by_cat[e["category"]].append(e)
         for cat, evs in by_cat.items():
-            cat_name = CATEGORY_NAMES.get(cat, cat)
-            lines.append(f"\n{cat_name}")
-            for e in evs[:4]:
-                title = e["title"] or ""
-                time_str = f" {e['show_time']}" if e["show_time"] else ""
-                place_str = f" • {e['place']}" if e["place"] else ""
-                price_str = f" • {e['price']}" if e["price"] else ""
-                url = e["source_url"] if e["source_url"] else ""
-                if url:
-                    lines.append(f"  • <a href=\"{url}\">{title}</a>{time_str}{place_str}{price_str}")
-                else:
-                    lines.append(f"  • {title}{time_str}{place_str}{price_str}")
+            emoji = CAT_POST_EMOJI.get(cat, "📌")
+            cat_name = CAT_POST_NAMES.get(cat, cat.upper())
+            lines.append(f"\n{emoji} {cat_name}")
+            for e in evs[:5]:
+                lines.append(_fmt_event_line(e))
+        lines.append(f"\nА вечером тебя ждет ДВИЖ 🌟")
+        lines.append(f"\n👉 Ищи все события: @Minskdvizh_bot")
+        lines.append("#афишаминск #мероприятияминск #концертыминск #выставкиминск #движ")
 
     elif post_type == "weekend":
         saturday = now + timedelta(days=(5 - now.weekday()) % 7 or 7)
         sunday = saturday + timedelta(days=1)
         events_sat = get_events_by_date_and_category(saturday)
         events_sun = get_events_by_date_and_category(sunday)
-        all_events = list(events_sat)[:10] + list(events_sun)[:10]
+        all_events = list(events_sat)[:15] + list(events_sun)[:15]
         if not all_events:
             return
-        sat_str = saturday.strftime("%d.%m")
-        sun_str = sunday.strftime("%d.%m")
-        lines = [f"🎉 <b>Выходные {sat_str}–{sun_str} в Минске</b>\n🌟 Что интересного:\n"]
+        sat_d = saturday.day
+        sun_d = sunday.day
+        mon = MONTH_NAMES[saturday.month - 1]
+        sat_day = DAY_NAMES[saturday.weekday()].lower()
+        sun_day = DAY_NAMES[sunday.weekday()].lower()
+        lines = [
+            f"🎉 Выходные {sat_d}-{sun_d} {mon} ({sat_day}-{sun_day}). #минск #выходные",
+            f"😎 Планируем яркие выходные в Минске!\n",
+        ]
         from collections import defaultdict as _dd
         by_cat = _dd(list)
         for e in all_events:
             by_cat[e["category"]].append(e)
         for cat, evs in by_cat.items():
-            cat_name = CATEGORY_NAMES.get(cat, cat)
-            lines.append(f"\n{cat_name}")
-            for e in evs[:3]:
-                title = e["title"] or ""
+            emoji = CAT_POST_EMOJI.get(cat, "📌")
+            cat_name = CAT_POST_NAMES.get(cat, cat.upper())
+            lines.append(f"\n{emoji} {cat_name}")
+            for e in evs[:4]:
                 date_str = datetime.strptime(e["event_date"], "%Y-%m-%d").strftime("%d.%m")
-                time_str = f" {e['show_time']}" if e["show_time"] else ""
-                place_str = f" • {e['place']}" if e["place"] else ""
-                url = e["source_url"] if e["source_url"] else ""
-                if url:
-                    lines.append(f"  • <a href=\"{url}\">{title}</a> ({date_str}{time_str}){place_str}")
-                else:
-                    lines.append(f"  • {title} ({date_str}{time_str}){place_str}")
+                day_n = DAY_NAMES[datetime.strptime(e["event_date"], "%Y-%m-%d").weekday()].lower()[:2]
+                time_str = f" {e['show_time']}" if e.get("show_time") else ""
+                price = _fmt_price(e.get("price", "") or "")
+                url = e.get("source_url") or ""
+                title = e["title"] or ""
+                title_part = f"<a href=\"{url}\">{title}</a>" if url else title
+                lines.append(f"→ {title_part} ({date_str} {day_n}{time_str})" + (f" | {price}" if price else ""))
+        lines.append(f"\n👉 Ищи все события: @Minskdvizh_bot")
+        lines.append("#афишаминск #выходныеминск #движ")
     else:
         return
 
-    lines.append(f"\n\n🔎 Все события → @Minskdvizh_bot")
     text = "\n".join(lines)
     if len(text) > 4000:
-        text = text[:4000] + "...\n\n🔎 @Minskdvizh_bot"
+        text = text[:4000] + "...\n\n👉 @Minskdvizh_bot"
 
     try:
         await bot.send_message(
@@ -2505,7 +2556,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if field == "category":
                 await query.message.reply_text(FIELD_PROMPTS["category"], reply_markup=CATEGORY_KEYBOARD, parse_mode="HTML")
             else:
-                await query.message.reply_text(FIELD_PROMPTS.get(field, "Введите значение:"), parse_mode="HTML")
+                await query.message.reply_text(get_prompt(field), parse_mode="HTML")
             return
 
         if data.startswith("mod_edit_") and not data.startswith("mod_edit_cancel_"):
@@ -2547,7 +2598,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if field == "category":
                 await query.message.reply_text(FIELD_PROMPTS["category"], reply_markup=CATEGORY_KEYBOARD, parse_mode="HTML")
             else:
-                await query.message.reply_text(FIELD_PROMPTS.get(field, "Введите значение:") + "\n/skip — очистить поле\n/cancel — отмена", parse_mode="HTML")
+                await query.message.reply_text(get_prompt(field, "/skip — очистить поле | /cancel — отмена"), parse_mode="HTML")
             return
 
         if data.startswith("mod_send_edit_"):
