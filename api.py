@@ -258,13 +258,15 @@ def get_events(
         q = search.strip()
         current_year = now_minsk().year
 
-        # Попытка распарсить как дату (дд.мм или дд.мм.гггг) — как в боте
         import re as _re
         date_match = _re.match(r'^(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?$', q)
         if date_match:
+            # При поиске по дате — заменяем date-фильтры
             day, month = date_match.group(1).zfill(2), date_match.group(2).zfill(2)
             year = date_match.group(3) or str(current_year)
             search_date = f"{year}-{month}-{day}"
+            where.clear()
+            params.clear()
             where.append("event_date = ?")
             params.append(search_date)
         else:
@@ -373,7 +375,7 @@ class EventSubmit(BaseModel):
     title: str
     category: str
     event_date: str
-    event_date_to: Optional[str] = None   # для периода
+    event_date_to: Optional[str] = None
     show_time: Optional[str] = ""
     place: str
     address: Optional[str] = ""
@@ -381,6 +383,9 @@ class EventSubmit(BaseModel):
     details: Optional[str] = ""
     description: Optional[str] = ""
     source_url: Optional[str] = ""
+    tg_user_id: Optional[int] = None      # ID пользователя из Telegram WebApp
+    tg_username: Optional[str] = None
+    tg_first_name: Optional[str] = None
 
 
 def _dates_in_range(date_from: str, date_to: str) -> list[str]:
@@ -398,14 +403,7 @@ def _dates_in_range(date_from: str, date_to: str) -> list[str]:
 
 @app.post("/api/events/submit")
 def submit_event(event: EventSubmit):
-    """Принимает событие → сохраняет в pending_events (одна запись или по одной на каждый день периода)."""
-    combined_description = ""
-    if event.details:
-        combined_description += f"[Формат: {event.details}]"
-    if event.description:
-        combined_description += (" " if combined_description else "") + event.description
-
-    # Список дат для вставки
+    """Принимает событие → сохраняет в pending_events."""
     if event.event_date_to and event.event_date_to > event.event_date:
         dates = _dates_in_range(event.event_date, event.event_date_to)
     else:
@@ -413,25 +411,36 @@ def submit_event(event: EventSubmit):
 
     try:
         pending_ids = []
+        user_id   = event.tg_user_id or 0
+        username  = event.tg_username or "web_user"
+        first_name = event.tg_first_name or "Web"
         with get_db() as conn:
             cursor = conn.cursor()
             for d in dates:
                 cursor.execute("""
                     INSERT INTO pending_events
                         (user_id, username, first_name, title, event_date, show_time,
-                         place, address, category, description, price, source_url,
+                         place, address, category, details, description, price, source_url,
                          status, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    0, "web_user", "Web",
+                    user_id, username, first_name,
                     event.title, d, event.show_time or "",
                     event.place, event.address or "",
-                    event.category, combined_description,
+                    event.category,
+                    event.details or "",
+                    event.description or "",
                     event.price or "", event.source_url or "",
                     "pending",
                     datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"),
                 ))
                 pending_ids.append(cursor.lastrowid)
+            # Логируем в user_stats
+            conn.execute(
+                "INSERT INTO user_stats (user_id, username, first_name, action, detail, created_at) VALUES (?,?,?,?,?,?)",
+                (user_id, username, first_name, "web_submit_event", event.title,
+                 datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"))
+            )
             conn.commit()
         pending_id = pending_ids[0]
         days_info = f" ({len(dates)} дней)" if len(dates) > 1 else ""
@@ -469,10 +478,15 @@ def submit_event(event: EventSubmit):
                             "text": text,
                             "parse_mode": "HTML",
                             "reply_markup": {
-                                "inline_keyboard": [[
-                                    {"text": "✅ Одобрить", "callback_data": f"mod_approve_{pending_id}"},
-                                    {"text": "❌ Отклонить", "callback_data": f"mod_reject_{pending_id}"},
-                                ]]
+                                "inline_keyboard": [
+                                    [
+                                        {"text": "✅ Одобрить", "callback_data": f"mod_approve_{pending_id}"},
+                                        {"text": "❌ Отклонить", "callback_data": f"mod_reject_{pending_id}"},
+                                    ],
+                                    [
+                                        {"text": "✏️ Редактировать", "callback_data": f"mod_edit_{pending_id}"},
+                                    ],
+                                ]
                             }
                         }
                     )
