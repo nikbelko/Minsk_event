@@ -158,6 +158,15 @@ def init_db():
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_stats_user_id ON user_stats(user_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_stats_created_at ON user_stats(created_at)")
+        # Миграции для существующих БД
+        for col_sql in [
+            "ALTER TABLE pending_events ADD COLUMN details TEXT DEFAULT ''",
+            "ALTER TABLE subscriptions ADD COLUMN status TEXT DEFAULT 'active'",
+        ]:
+            try:
+                cursor.execute(col_sql)
+            except Exception:
+                pass
         conn.commit()
         try:
             cursor.execute("""
@@ -483,7 +492,7 @@ def add_subscription(user_id: int, category: str, date_type: str):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT OR IGNORE INTO subscriptions (user_id, category, date_type) VALUES (?, ?, ?)",
+            "INSERT OR IGNORE INTO subscriptions (user_id, category, date_type, status) VALUES (?, ?, ?, 'active')",
             (user_id, category, date_type),
         )
         conn.commit()
@@ -1076,6 +1085,26 @@ async def send_subscriptions_digest(bot, date_type: str):
 # ---------------------- Статистика ----------------------
 
 
+async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """🔧 /admin — панель администратора."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Нет доступа.")
+        return
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 Статистика", callback_data="adm_stats"),
+         InlineKeyboardButton("📈 Кл. статистика", callback_data="adm_ustats")],
+        [InlineKeyboardButton("🔄 Обновить парсеры", callback_data="adm_update"),
+         InlineKeyboardButton("🗄 Скачать базу", callback_data="adm_download")],
+        [InlineKeyboardButton("📢 Пост: сегодня", callback_data="adm_post_today"),
+         InlineKeyboardButton("🎉 Пост: выходные", callback_data="adm_post_weekend")],
+    ])
+    await update.message.reply_text(
+        "🔧 <b>Панель администратора</b>\n\nВыберите действие:",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+
+
 async def download_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Скачать БД — только для админа."""
     if update.effective_user.id != ADMIN_ID:
@@ -1314,27 +1343,31 @@ async def send_digest_job(bot=None):
 
 # Метаданные полей формы — используется везде (добавление, редактирование, модерация)
 FIELD_LABELS = {
-    "title":       ("📝", "Название",   True),   # (эмодзи, название, обязательное)
+    "title":       ("📝", "Название",   True),
     "event_date":  ("📅", "Дата",       True),
     "show_time":   ("⏰", "Время",      False),
     "place":       ("🏢", "Место",      False),
     "address":     ("📍", "Адрес",      False),
     "category":    ("🎯", "Категория",  True),
     "price":       ("💰", "Цена",       False),
-    "details":     ("📖", "Описание",   True),   # обязательное — пишется в details
+    "details":     ("📖", "Формат",     True),   # обязательное: краткий формат события
+    "description": ("📋", "Описание",   False),  # необязательное: подробное описание
     "source_url":  ("🔗", "Ссылка",     False),
 }
 
 FIELD_PROMPTS = {
     "title":       "📝 Введите <b>название</b> события:",
-    "event_date":  "📅 Введите <b>дату</b> в формате ДД.ММ.ГГГГ (например: 15.04.2026):",
+    "event_date":  ("📅 Введите <b>дату</b> в формате ДД.ММ.ГГГГ\n"
+                    "Или <b>период</b>: ДД.ММ.ГГГГ-ДД.ММ.ГГГГ (например: 15.04.2026-20.04.2026)\n"
+                    "Тогда событие появится на каждый день периода:"),
     "show_time":   "⏰ Введите <b>время начала</b> в формате ЧЧ:ММ (например: 19:00)\nИли /skip чтобы пропустить:",
     "place":       "🏢 Введите <b>место проведения</b> (название площадки)\nИли /skip чтобы пропустить:",
     "address":     "📍 Введите <b>адрес</b> (например: ул. Притыцкого, 62)\nИли /skip чтобы пропустить:",
     "category":    "🎯 Выберите <b>категорию</b>:",
     "price":       "💰 Введите <b>цену</b> (например: от 20 BYN, Бесплатно)\nИли /skip чтобы пропустить:",
-    "details":     "📖 Введите <b>описание</b> события (до 500 символов):",
-    "source_url":  "🔗 Введите <b>ссылку</b> на событие (сайт, соцсети)\nИли /skip чтобы пропустить:",
+    "details":     "📖 Введите <b>формат события</b> — коротко что это и для кого (до 300 символов):",
+    "description": "📋 Введите <b>подробное описание</b> (программа, спикеры и т.д.)\nИли /skip чтобы пропустить:",
+    "source_url":  "🔗 Введите <b>ссылку</b> на событие\nИли /skip чтобы пропустить:",
 }
 
 CATEGORY_KEYBOARD = InlineKeyboardMarkup([
@@ -1368,13 +1401,14 @@ def update_pending_event(pending_id: int, data: dict):
         conn.execute("""
             UPDATE pending_events
             SET title=?, event_date=?, show_time=?, place=?, address=?,
-                category=?, price=?, description=?, source_url=?, status='edited'
+                category=?, price=?, details=?, description=?, source_url=?, status='edited'
             WHERE id=?
         """, (
             data.get("title", ""), data.get("event_date", ""),
             data.get("show_time", ""), data.get("place", ""),
             data.get("address", ""), data.get("category", "other"),
-            data.get("price", ""), data.get("description", ""),
+            data.get("price", ""), data.get("details", ""),
+            data.get("description", ""),
             data.get("source_url", ""), pending_id,
         ))
         conn.commit()
@@ -1414,13 +1448,35 @@ def build_fields_keyboard(data: dict, mode: str = "submit") -> InlineKeyboardMar
 
 
 def validate_field(field: str, text: str):
-    """Валидирует значение поля. Возвращает (ok, value_or_error)."""
+    """Валидирует значение поля. Возвращает (ok, value_or_error).
+    Для event_date поддерживает период ДД.ММ.ГГГГ-ДД.ММ.ГГГГ.
+    Период кодируется как "YYYY-MM-DD|YYYY-MM-DD" и разворачивается при approve.
+    """
     import re as _re
-    from datetime import date as _date
+    from datetime import date as _date, timedelta as _td
     if field == "event_date":
-        m = _re.match(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})$", text)
+        # Период: ДД.ММ.ГГГГ-ДД.ММ.ГГГГ
+        pm = _re.match(r"^(\d{1,2}\.\d{1,2}\.\d{4})-(\d{1,2}\.\d{1,2}\.\d{4})$", text.strip())
+        if pm:
+            def _pd(s):
+                d, mo, y = s.split(".")
+                return _date(int(y), int(mo), int(d))
+            try:
+                d_from = _pd(pm.group(1))
+                d_to   = _pd(pm.group(2))
+            except ValueError:
+                return False, "❌ Одна из дат периода не существует."
+            if d_from < _date.today():
+                return False, "❌ Дата начала не может быть в прошлом."
+            if d_to < d_from:
+                return False, "❌ Дата конца раньше даты начала."
+            if (d_to - d_from).days > 90:
+                return False, "❌ Период не может быть больше 90 дней."
+            return True, f"{d_from.strftime('%Y-%m-%d')}|{d_to.strftime('%Y-%m-%d')}"
+        # Одна дата
+        m = _re.match(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})$", text.strip())
         if not m:
-            return False, "❌ Формат: ДД.ММ.ГГГГ (например 15.04.2026)"
+            return False, "❌ Формат: ДД.ММ.ГГГГ или ДД.ММ.ГГГГ-ДД.ММ.ГГГГ"
         day, month, year = m.groups()
         try:
             ev = _date(int(year), int(month), int(day))
@@ -1436,8 +1492,10 @@ def validate_field(field: str, text: str):
         return True, text
     elif field == "title" and len(text) < 3:
         return False, "❌ Название слишком короткое."
+    elif field == "details":
+        return True, text[:300]
     elif field == "description":
-        return True, text[:500]
+        return True, text[:1000]
     else:
         return True, text
 
@@ -1447,8 +1505,8 @@ def save_pending_event(user_id, username, first_name, data: dict) -> int:
         cursor.execute("""
             INSERT INTO pending_events
               (user_id, username, first_name, title, event_date, show_time,
-               place, address, category, description, price, source_url, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+               place, address, category, details, description, price, source_url, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             user_id, username, first_name,
             data.get("title", ""),
@@ -1457,7 +1515,8 @@ def save_pending_event(user_id, username, first_name, data: dict) -> int:
             data.get("place", ""),
             data.get("address", ""),
             data.get("category", "other"),
-            data.get("details", "") or data.get("description", ""),  # details → pending.description
+            data.get("details", ""),
+            data.get("description", ""),
             data.get("price", ""),
             data.get("source_url", ""),
             datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"),
@@ -1467,31 +1526,57 @@ def save_pending_event(user_id, username, first_name, data: dict) -> int:
 
 
 def approve_pending_event(pending_id: int) -> bool:
+    from datetime import date as _date, timedelta as _td
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM pending_events WHERE id = ?", (pending_id,))
         row = cursor.fetchone()
         if not row:
             return False
+        _addr = (row["address"] or "") if "address" in row.keys() else ""
+        # Читаем details и description (с фолбеком на старые БД)
         try:
-            _addr = row["address"] or ""
+            _details = row["details"] or ""
         except Exception:
-            _addr = ""
-        cursor.execute("""
-            INSERT INTO events
-              (title, details, description, event_date, show_time,
-               place, location, price, category, source_name, source_url)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
-        """, (
-            row["title"],
-            row["description"] or "",   # details = описание от пользователя
-            row["description"] or "",   # description = то же
-            row["event_date"], row["show_time"] or "",
-            row["place"] or "", _addr or "Минск",
-            row["price"] or "",
-            row["category"] or "other",
-            "user_submitted", row["source_url"] or "",
-        ))
+            _details = ""
+        if not _details:
+            _details = row["description"] or ""  # фолбек для старых записей
+        try:
+            _description = row["description"] or ""
+        except Exception:
+            _description = ""
+        # Период дат: "2026-04-15|2026-04-20" → несколько записей
+        event_date_raw = row["event_date"] or ""
+        if "|" in event_date_raw:
+            parts = event_date_raw.split("|", 1)
+            try:
+                d_from = _date.fromisoformat(parts[0].strip())
+                d_to   = _date.fromisoformat(parts[1].strip())
+                dates = [d_from + _td(days=i) for i in range((d_to - d_from).days + 1)]
+            except Exception:
+                dates = [_date.today()]
+        else:
+            try:
+                dates = [_date.fromisoformat(event_date_raw)]
+            except Exception:
+                dates = []
+        for d in dates:
+            cursor.execute("""
+                INSERT INTO events
+                  (title, details, description, event_date, show_time,
+                   place, location, price, category, source_name, source_url)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                row["title"],
+                _details,
+                _description,
+                d.strftime("%Y-%m-%d"),
+                row["show_time"] or "",
+                row["place"] or "", _addr or "Минск",
+                row["price"] or "",
+                row["category"] or "other",
+                "user_submitted", row["source_url"] or "",
+            ))
         cursor.execute("UPDATE pending_events SET status = 'approved' WHERE id = ?", (pending_id,))
         conn.commit()
         return True
@@ -1515,10 +1600,20 @@ def format_pending_preview(data: dict, user=None) -> str:
     lines.append("")
     lines.append(f"{cat_emoji} <b>{_html.escape(data.get('title', '—'))}</b>")
     if data.get("event_date"):
-        try:
-            d = datetime.strptime(data["event_date"], "%Y-%m-%d").strftime("%d.%m.%Y")
-        except Exception:
-            d = data["event_date"]
+        ed = data["event_date"]
+        if "|" in str(ed):
+            parts = ed.split("|", 1)
+            try:
+                d1 = datetime.strptime(parts[0].strip(), "%Y-%m-%d").strftime("%d.%m.%Y")
+                d2 = datetime.strptime(parts[1].strip(), "%Y-%m-%d").strftime("%d.%m.%Y")
+                d = f"{d1} — {d2}"
+            except Exception:
+                d = ed
+        else:
+            try:
+                d = datetime.strptime(ed, "%Y-%m-%d").strftime("%d.%m.%Y")
+            except Exception:
+                d = ed
         line = f"📅 {d}"
         if data.get("show_time"):
             line += f" ⏰ {data['show_time']}"
@@ -1527,8 +1622,10 @@ def format_pending_preview(data: dict, user=None) -> str:
         lines.append(f"🏢 {_html.escape(data['place'])}")
     if data.get("price"):
         lines.append(f"💰 {_html.escape(data['price'])}")
+    if data.get("details"):
+        lines.append(f"📖 <b>Формат:</b> {_html.escape(data['details'][:300])}")
     if data.get("description"):
-        lines.append(f"📖 {_html.escape(data['description'][:300])}")
+        lines.append(f"📋 <b>Описание:</b> {_html.escape(data['description'][:300])}")
     if data.get("address"):
         lines.append(f"📍 {_html.escape(data['address'])}")
     if data.get("source_url"):
@@ -1645,7 +1742,7 @@ async def post_to_channel(bot, post_type: str = "today"):
             return
         date_label = now.strftime("%d.%m.%Y")
         day_name = ["Понедельник","Вторник","Среда","Четверг","Пятница","Суббота","Воскресенье"][now.weekday()]
-        lines = [f"🗓 <b>{day_name}, {date_label} — афиша Минска</b>\n"]
+        lines = [f"🎭 <b>{day_name}, {date_label}</b>\n✨ Куда пойти сегодня в Минске:\n"]
         from collections import defaultdict as _dd
         by_cat = _dd(list)
         for e in list(events)[:20]:
@@ -1674,7 +1771,7 @@ async def post_to_channel(bot, post_type: str = "today"):
             return
         sat_str = saturday.strftime("%d.%m")
         sun_str = sunday.strftime("%d.%m")
-        lines = [f"🎉 <b>Выходные {sat_str}–{sun_str} — афиша Минска</b>\n"]
+        lines = [f"🎉 <b>Выходные {sat_str}–{sun_str} в Минске</b>\n🌟 Что интересного:\n"]
         from collections import defaultdict as _dd
         by_cat = _dd(list)
         for e in all_events:
@@ -1695,10 +1792,10 @@ async def post_to_channel(bot, post_type: str = "today"):
     else:
         return
 
-    lines.append(f"\n\n👉 Все события: @MinskDvizhBot")
+    lines.append(f"\n\n🔎 Все события → @Minskdvizh_bot")
     text = "\n".join(lines)
     if len(text) > 4000:
-        text = text[:4000] + "...\n\n👉 @MinskDvizhBot"
+        text = text[:4000] + "...\n\n🔎 @Minskdvizh_bot"
 
     try:
         await bot.send_message(
@@ -1979,7 +2076,7 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             url_str = f"\n🔗 {row['source_url']}" if row["source_url"] else ""
             msg = (f"{cat_emoji} <b>{title}</b>\n"
                    f"📅 {date_str}{time_str}{place_str}{price_str}{url_str}\n\n"
-                   f"👉 @MinskDvizhBot")
+                   f"👉 @Minskdvizh_bot")
             results.append(InlineQueryResultArticle(
                 id=str(_uuid.uuid4()),
                 title=f"{cat_emoji} {title}",
@@ -2251,6 +2348,37 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         data = query.data
 
+        # ── Кнопки /admin панели ─────────────────────────────────
+        if data.startswith("adm_") and query.from_user.id == ADMIN_ID:
+            await query.answer()
+            cmd = data[4:]
+            if cmd == "stats":
+                stats = get_stats_data(exclude_admin=False)
+                await query.message.reply_text(_format_stats(stats, "📊 СТАТИСТИКА (все)"), parse_mode="HTML")
+            elif cmd == "ustats":
+                stats = get_stats_data(exclude_admin=True)
+                await query.message.reply_text(_format_stats(stats, "📊 СТАТИСТИКА ПОЛЬЗОВАТЕЛЕЙ"), parse_mode="HTML")
+            elif cmd == "update":
+                await update_parsers(update, context)
+            elif cmd == "download":
+                try:
+                    await query.message.reply_document(
+                        document=open(DB_NAME, "rb"),
+                        filename="events_final.db",
+                        caption=f"🗄 База данных\n📅 {datetime.now(MINSK_TZ).strftime('%d.%m.%Y %H:%M')}",
+                    )
+                except Exception as e:
+                    await query.message.reply_text(f"❌ Ошибка: {e}")
+            elif cmd == "post_today":
+                await query.message.reply_text("📢 Публикую подборку на сегодня...")
+                await post_to_channel(context.bot, "today")
+                await query.message.reply_text("✅ Готово!")
+            elif cmd == "post_weekend":
+                await query.message.reply_text("📢 Публикую подборку на выходные...")
+                await post_to_channel(context.bot, "weekend")
+                await query.message.reply_text("✅ Готово!")
+            return
+
         # Выбор категории в форме добавления события
         if data.startswith("sc_"):
             category = data[3:]
@@ -2391,7 +2519,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             context.user_data["mod_edit_id"] = pending_id
             context.user_data["mod_edit_user_id"] = event["user_id"]
-            edit_data = {k: event.get(k) or "" for k in FIELD_LABELS}
+            # Собираем edit_data по всем полям FIELD_LABELS; details фолбек на description
+            edit_data = {}
+            for k in FIELD_LABELS:
+                edit_data[k] = event.get(k) or ""
+            if not edit_data.get("details") and event.get("description"):
+                edit_data["details"] = event["description"]
             edit_data["_pending_id"] = pending_id
             context.user_data["mod_edit_data"] = edit_data
             context.user_data.pop("mod_edit_field", None)
@@ -2618,6 +2751,7 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("today", today_command))
     application.add_handler(CommandHandler("subs", show_subscriptions))
+    application.add_handler(CommandHandler("admin", admin_menu))
     application.add_handler(CommandHandler("stats", show_stats))
     application.add_handler(CommandHandler("download_db", download_db))
     application.add_handler(CommandHandler("ustats", show_ustats))
