@@ -328,7 +328,8 @@ def get_raw_events_count_by_category() -> dict:
 
 def get_events_count_by_category() -> dict:
     """Кол-во сгруппированных событий по категориям.
-    Кино: уникальных (title, date). Остальные: уникальных (title, place)."""
+    Кино: уникальных (title, date). Остальные: уникальных (title, place).
+    Возвращает ВСЕ категории из БД — независимо от CATEGORY_NAMES."""
     today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
     with get_db_connection() as conn:
         cursor = conn.cursor()
@@ -340,11 +341,12 @@ def get_events_count_by_category() -> dict:
             )
         """, (today,))
         cinema_count = cursor.fetchone()[0]
-        # Остальные: считаем уникальные (title, place), COALESCE чтобы NULL не терялись
+        # Все остальные категории: уникальных (title, place)
         cursor.execute("""
             SELECT category, COUNT(*) FROM (
                 SELECT DISTINCT category, title, COALESCE(place, '') as place FROM events
-                WHERE category != 'cinema' AND event_date >= ?
+                WHERE category IS NOT NULL AND category != '' AND category != 'cinema'
+                AND event_date >= ?
             ) GROUP BY category
         """, (today,))
         result = {row[0]: row[1] for row in cursor.fetchall()}
@@ -958,19 +960,21 @@ async def show_main_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE | None
 async def show_categories_menu(query, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     counts = get_events_count_by_category()
-    # Показываем только категории у которых есть события
-    # Объединяем: сначала порядок из CATEGORY_NAMES, потом новые категории из БД
-    all_cats = dict(CATEGORY_NAMES)
+    # Строим список: сначала категории из CATEGORY_NAMES (в правильном порядке),
+    # потом неизвестные категории из БД
+    ordered = {}
+    for cat in CATEGORY_NAMES:
+        if counts.get(cat, 0) > 0:
+            ordered[cat] = CATEGORY_NAMES[cat]
     for cat in counts:
-        if cat not in all_cats:
+        if cat not in ordered and counts[cat] > 0:
+            # Неизвестная категория — показываем с emoji из CATEGORY_EMOJI или дефолт
             emoji = CATEGORY_EMOJI.get(cat, "📌")
-            all_cats[cat] = f"{emoji} {cat.capitalize()}"
+            ordered[cat] = f"{emoji} {cat.replace('_', ' ').capitalize()}"
     keyboard = []
     row = []
-    for cat, name in all_cats.items():
-        n = counts.get(cat, 0)
-        if n == 0:
-            continue
+    for cat, name in ordered.items():
+        n = counts[cat]
         label = f"{name} ({n})"
         row.append(InlineKeyboardButton(label, callback_data=f"cat_{cat}"))
         if len(row) == 2:
@@ -1177,7 +1181,10 @@ async def show_pending_list(update_or_query, context: ContextTypes.DEFAULT_TYPE)
             InlineKeyboardButton(f"❌#{r['id']}", callback_data=f"mod_reject_{r['id']}"),
             InlineKeyboardButton(f"✏️#{r['id']}", callback_data=f"mod_edit_{r['id']}"),
         ])
-    keyboard.append([InlineKeyboardButton("🔄 Обновить", callback_data="adm_pending")])
+    keyboard.append([
+        InlineKeyboardButton("✅ Принять все", callback_data="adm_approve_all"),
+        InlineKeyboardButton("❌ Отклонить все", callback_data="adm_reject_all"),
+    ])
 
     text = "\n".join(lines)[:4000]
     kbd = InlineKeyboardMarkup(keyboard)
@@ -2699,6 +2706,45 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.reply_text("✅ Готово!")
             elif cmd == "pending":
                 await show_pending_list(query, context)
+            elif cmd == "approve_all":
+                with get_db_connection() as conn:
+                    ids = [r["id"] for r in conn.execute(
+                        "SELECT id FROM pending_events WHERE status IN ('pending','edited')"
+                    ).fetchall()]
+                cnt = 0
+                for pid in ids:
+                    if approve_pending_event(pid):
+                        cnt += 1
+                        with get_db_connection() as conn:
+                            r = conn.execute("SELECT user_id, title FROM pending_events WHERE id=?", (pid,)).fetchone()
+                        if r:
+                            try:
+                                await context.bot.send_message(
+                                    chat_id=r["user_id"],
+                                    text=f"✅ Ваше событие <b>{r['title']}</b> одобрено и добавлено в афишу! 🎉",
+                                    parse_mode="HTML"
+                                )
+                            except Exception:
+                                pass
+                await query.message.reply_text(f"✅ Одобрено событий: <b>{cnt}</b>", parse_mode="HTML")
+                await show_pending_list(query, context)
+            elif cmd == "reject_all":
+                with get_db_connection() as conn:
+                    rows = conn.execute(
+                        "SELECT id, user_id, title FROM pending_events WHERE status IN ('pending','edited')"
+                    ).fetchall()
+                for r in rows:
+                    reject_pending_event(r["id"])
+                    try:
+                        await context.bot.send_message(
+                            chat_id=r["user_id"],
+                            text=f"❌ Ваше событие <b>{r['title']}</b> не прошло модерацию.",
+                            parse_mode="HTML"
+                        )
+                    except Exception:
+                        pass
+                await query.message.reply_text(f"❌ Отклонено событий: <b>{len(rows)}</b>", parse_mode="HTML")
+                await show_pending_list(query, context)
             return
 
         # Выбор категории в форме добавления события
@@ -2801,24 +2847,31 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.answer("⛔ Нет доступа", show_alert=True)
                 return
             pending_id = int(data.split("_")[-1])
+            # Сохраняем title до approve (статус изменится)
+            with get_db_connection() as conn:
+                _row = conn.execute("SELECT user_id, title FROM pending_events WHERE id=?", (pending_id,)).fetchone()
             ok = approve_pending_event(pending_id)
             if ok:
                 await query.answer("✅ Одобрено!")
-                await query.edit_message_text(query.message.text + "\n\n✅ <b>ОДОБРЕНО</b>", parse_mode="HTML")
-                # Уведомляем пользователя
-                with get_db_connection() as conn:
-                    row = conn.execute("SELECT user_id, title FROM pending_events WHERE id=?", (pending_id,)).fetchone()
-                if row:
+                if _row:
                     try:
                         await context.bot.send_message(
-                            chat_id=row["user_id"],
-                            text=f"✅ Ваше событие <b>{row['title']}</b> одобрено и добавлено в афишу!",
+                            chat_id=_row["user_id"],
+                            text=f"✅ Ваше событие <b>{_row['title']}</b> одобрено и добавлено в афишу! 🎉",
                             parse_mode="HTML"
                         )
                     except Exception:
                         pass
+                # Показываем статус + обновлённый список
+                import html as _html
+                title_escaped = _html.escape(_row["title"] if _row else f"#{pending_id}")
+                await query.message.reply_text(
+                    f"✅ <b>Одобрено:</b> {title_escaped}",
+                    parse_mode="HTML"
+                )
+                await show_pending_list(query, context)
             else:
-                await query.answer("Ошибка", show_alert=True)
+                await query.answer("Ошибка при одобрении", show_alert=True)
             return
 
         if data.startswith("mod_reject_"):
@@ -2826,20 +2879,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.answer("⛔ Нет доступа", show_alert=True)
                 return
             pending_id = int(data.split("_")[-1])
+            with get_db_connection() as conn:
+                _row = conn.execute("SELECT user_id, title FROM pending_events WHERE id=?", (pending_id,)).fetchone()
             reject_pending_event(pending_id)
             await query.answer("❌ Отклонено")
-            await query.edit_message_text(query.message.text + "\n\n❌ <b>ОТКЛОНЕНО</b>", parse_mode="HTML")
-            with get_db_connection() as conn:
-                row = conn.execute("SELECT user_id, title FROM pending_events WHERE id=?", (pending_id,)).fetchone()
-            if row:
+            if _row:
                 try:
                     await context.bot.send_message(
-                        chat_id=row["user_id"],
-                        text=f"❌ Ваше событие <b>{row['title']}</b> не прошло модерацию.",
+                        chat_id=_row["user_id"],
+                        text=f"❌ Ваше событие <b>{_row['title']}</b> не прошло модерацию.",
                         parse_mode="HTML"
                     )
                 except Exception:
                     pass
+            import html as _html
+            title_escaped = _html.escape(_row["title"] if _row else f"#{pending_id}")
+            await query.message.reply_text(
+                f"❌ <b>Отклонено:</b> {title_escaped}",
+                parse_mode="HTML"
+            )
+            await show_pending_list(query, context)
             return
 
         if data.startswith("submit_field_"):
