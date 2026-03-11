@@ -1372,7 +1372,7 @@ FIELD_PROMPTS = {
 
 def get_prompt(field: str, extra: str = "") -> str:
     """Возвращает строку промпта для поля (корректно обрабатывает tuple)."""
-    p = get_prompt(field)
+    p = FIELD_PROMPTS.get(field, "Введите значение:")
     if isinstance(p, tuple):
         p = "".join(p)
     if extra:
