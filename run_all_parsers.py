@@ -21,9 +21,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 PARSERS = [
-    ("relax_parser.py",    "🌐 Relax"),
+    ("relax_parser.py",     "🌐 Relax"),
     ("ticketpro_parser.py", "🎫 Ticketpro"),
-    ("bezkassira_parser.py",  "🎟 BezKassira"),
+    ("bezkassira_parser.py", "🎟 BezKassira"),
+    # ("afisha24_parser.py",  "🎭 24Afisha"),   # в разработке
+    # ("bycard_parser.py",    "🎭 Bycard"),      # в разработке
 ]
 
 

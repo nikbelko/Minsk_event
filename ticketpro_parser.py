@@ -1,8 +1,8 @@
-import os
 #!/usr/bin/env python3
 # ticketpro_parser.py
 # Парсер для Ticketpro с нормализацией мест и улучшенной защитой от дубликатов
 
+import os
 import json
 import re
 import sqlite3
@@ -13,6 +13,7 @@ from typing import List, Dict, Optional
 
 import requests
 from bs4 import BeautifulSoup
+from normalizer import normalize_place, normalize_title, is_minsk_event, format_price_from_offers, normalize_price
 # Определяем путь к БД (локально или на Railway)
 if os.path.exists('/data'):
     DB_PATH = '/data/events_final.db'  # Railway volume
@@ -30,61 +31,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Словарь для нормализации названий мест
-PLACE_ALIASES = {
-    # КЗ Минск
-    'кз минск': 'КЗ Минск',
-    'кз "минск"': 'КЗ Минск',
-    'концертный зал минск': 'КЗ Минск',
-    
-    # Дворец спорта
-    'дворец спорта': 'Дворец спорта',
-    'дворец спорта, 4': 'Дворец спорта',
-    'дворец спорта 4': 'Дворец спорта',
-    
-    # Белгосфилармония
-    'белгосфилармония': 'Белорусская государственная филармония',
-    'белорусская государственная филармония': 'Белорусская государственная филармония',
-    
-    # Молодёжный театр
-    'молодёжный театр': 'Молодёжный театр',
-    'молодежный театр': 'Молодёжный театр',
-    'молодёжный театр эстрады': 'Молодёжный театр эстрады',
-    'молодежный театр эстрады': 'Молодёжный театр эстрады',
-    
-    # Дворец Республики
-    'дворец республики': 'Дворец Республики',
-    'гу дворец республики': 'Дворец Республики',
-    
-    # Центральный дом офицеров
-    'центральный дом офицеров': 'Центральный дом офицеров',
-    'дом офицеров': 'Центральный дом офицеров',
-    
-    # Дом литератора
-    'дом литератора': 'Дом литератора',
-    
-    # Музыкальный театр
-    'музыкальный театр': 'Музыкальный театр',
-    
-    # Театр юного зрителя
-    'театр юного зрителя': 'ТЮЗ',
-    'тюз': 'ТЮЗ',
-    
-    # Falcon Club
-    'falcon club': 'Falcon Club Arena',
-    'falcon club arena': 'Falcon Club Arena',
-    
-    # Prime Hall
-    'prime hall': 'Prime Hall',
-    'прайм холл': 'Prime Hall',
-    
-    # ДК МАЗ
-    'дк маз': 'ДК МАЗ',
-    
-    # Верхний город
-    'верхний город': 'Концертный зал Верхний город',
-    'концертный зал верхний город': 'Концертный зал Верхний город',
-}
 
 class TicketproParser:
     def __init__(self, DB_PATH=os.getenv("DB_PATH", "/data/events_final.db")):
@@ -124,95 +70,8 @@ class TicketproParser:
             logger.error(f"Ошибка загрузки: {e}")
         return None
 
-    def is_minsk_event(self, place_text: str) -> bool:
-        """Проверяет, относится ли событие к Минску."""
-        if not place_text or place_text == '':
-            return False  # без города не берём — лучше пропустить, чем взять не-минское
-        
-        place_lower = place_text.lower()
-        
-        # Список городов для исключения (обновлённый)
-        other_cities = [
-            'гомель', 'gomel', 'витебск', 'vitebsk', 'могилев', 'mogilev',
-            'гродно', 'grodno', 'брест', 'brest', 'бобруйск', 'bobruisk',
-            'солигорск', 'soligorsk', 'орша', 'orsha', 'пинск', 'pinsk',
-            'лида', 'lida', 'новополоцк', 'novopolotsk', 'молодечно', 'molodechno',
-            'кобрин', 'kobrin', 'жодино', 'zhodino', 'речица', 'rechitsa',
-            'берёза', 'bereza', 'мозырь', 'mozyr', 'борисов', 'borisov',
-            'барановичи', 'baranovichi', 'несвиж', 'nesvizh', 'дзержинск', 'dzerzhinsk',
-            'пружаны', 'pruzhany',
-            'гродна', 'grodna', 'гродненская', 'слоним', 'slonim', 'волковыск', 'volkovysk',
-            'слуцк', 'slutsk', 'светлогорск', 'svetlogorsk', 'полоцк', 'polotsk',
-            'областная филармония', 'областной', 'областной дворец'
-        ]
-        
-        for city in other_cities:
-            if city in place_lower:
-                return False
-        
-        return True
 
-    def clean_place(self, place_text: str) -> str:
-        """Очищает место от лишних слов и кавычек, приводит к единому виду."""
-        if not place_text:
-            return ""
-        
-        # Убираем "Минск," в начале
-        cleaned = re.sub(r'^Минск,\s*', '', place_text)
-        cleaned = re.sub(r'^г\.\s*Минск,\s*', '', cleaned)
-        
-        # Убираем кавычки всех видов
-        cleaned = re.sub(r'[«»"]', '', cleaned)
-        
-        # Убираем лишние пробелы
-        cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-        
-        # Приводим к нижнему регистру для поиска по словарю
-        cleaned_lower = cleaned.lower()
-        
-        # Нормализуем по словарю
-        for alias, normalized in PLACE_ALIASES.items():
-            if alias in cleaned_lower:
-                cleaned = normalized
-                break
-        
-        return cleaned
 
-    def normalize_title(self, title: str) -> str:
-        """Нормализует название для сравнения."""
-        if not title:
-            return ""
-        
-        # Приводим к нижнему регистру
-        norm = title.lower()
-        
-        # Убираем общие слова в начале и конце
-        norm = re.sub(r'^(концерт|концертная\s+программа|спектакль|шоу|юбилейный\s+концерт|сольный\s+концерт|гала-концерт|праздничный\s+концерт|отчетный\s+концерт|эстрадный\s+караоке-спектакль)\s+', '', norm)
-        norm = re.sub(r'\s+(концерт|спектакль|шоу|программа|фестиваль)$', '', norm)
-        
-        # Убираем кавычки всех видов
-        norm = re.sub(r'[«»"\'`]', '', norm)
-        
-        # Убираем точки в конце
-        norm = re.sub(r'\.+$', '', norm)
-        
-        # Убираем многоточия
-        norm = re.sub(r'\.{2,}', '', norm)
-        
-        # Заменяем "и", "&" на общий разделитель
-        norm = re.sub(r'\s+и\s+', ' & ', norm)
-        norm = re.sub(r'&', ' & ', norm)
-        
-        # Убираем лишние пробелы
-        norm = re.sub(r'\s+', ' ', norm).strip()
-        
-        # Унифицируем дефисы и тире
-        norm = re.sub(r'[—–-]', '-', norm)
-        
-        # Убираем знаки препинания, оставляем буквы, цифры, пробелы, дефис, амперсанд
-        norm = re.sub(r'[^\w\s\-&]', '', norm)
-        
-        return norm
 
     def load_relax_index(self) -> dict:
         """Загружает все non-Ticketpro события одним запросом в память."""
@@ -226,7 +85,7 @@ class TicketproParser:
         conn.close()
         index = {}
         for title, date, place, show_time in rows:
-            norm = self.normalize_title(title)
+            norm = normalize_title(title)
             index.setdefault(date, []).append((norm, place or "", show_time or ""))
         logger.info(f"📋 Загружено {sum(len(v) for v in index.values())} событий из БД для проверки дублей")
         return index
@@ -239,7 +98,7 @@ class TicketproParser:
         candidates = relax_index.get(event_date, [])
         if not candidates:
             return False
-        norm_title = self.normalize_title(title)
+        norm_title = normalize_title(title)
         place = place or ""
         show_time = show_time or ""
         for norm_existing, ex_place, ex_time in candidates:
@@ -275,8 +134,8 @@ class TicketproParser:
                     if isinstance(ld_address, dict):
                         ld_address = ld_address.get('addressLocality', '') or ld_address.get('streetAddress', '')
                     offers = ld.get('offers', {})
-                    if offers.get('price'):
-                        ld_price = f"от {offers['price']} {offers.get('priceCurrency', 'BYN')}"
+                    if offers:
+                        ld_price = format_price_from_offers(offers)
                 except Exception:
                     pass
 
@@ -288,11 +147,11 @@ class TicketproParser:
 
             # Проверка на Минск — по месту И по адресу из JSON-LD
             check_str = ' '.join(filter(None, [place_raw, ld_address]))
-            if not self.is_minsk_event(check_str):
+            if not is_minsk_event(check_str):
                 self.stats['filtered_out'] += 1
                 return None
 
-            place = self.clean_place(place_raw)
+            place = normalize_place(place_raw)
 
             # === Дата и время ===
             date_tag = event_html.find('div', class_='event-box__date')
@@ -361,8 +220,7 @@ class TicketproParser:
             if not price:
                 price_tag = event_html.find('div', class_='event-box__price')
                 price_text = price_tag.get_text(strip=True) if price_tag else ''
-                m = re.search(r'(\d+[.,]\d*)\s*BYN', price_text)
-                price = f"от {m.group(1)} BYN" if m else ""
+                price = normalize_price(price_text) if price_text else ""
 
             # === URL: JSON-LD → первый <a> fallback ===
             event_url = ld_url

@@ -8,11 +8,12 @@ import re
 import sqlite3
 import logging
 import time
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from typing import List, Dict, Optional
 
 import requests
 from bs4 import BeautifulSoup
+from normalizer import normalize_place, normalize_title, parse_iso_datetime, parse_text_date, format_price_from_offers, is_future_date
 
 # ── БД ──────────────────────────────────────────────────────────────────────
 if os.path.exists('/data'):
@@ -48,44 +49,9 @@ CATEGORIES = [
     {"url": f"{BASE_URL}/events/party/",   "category": "party",    "label": "вечеринок"},
 ]
 
-# Нормализация названий площадок — приводим к единому виду как в ticketpro/relax
-PLACE_NORMALIZE = {
-    'кз «минск»':          'КЗ Минск',
-    'кз "минск"':          'КЗ Минск',
-    'кз минск':            'КЗ Минск',
-    'концертный зал минск': 'КЗ Минск',
-    'дворец республики':   'Дворец Республики',
-    'дворец профсоюзов':   'Дворец Профсоюзов',
-    'минск-арена':         'Минск-Арена',
-    'prime hall':          'Prime Hall',
-    'прайм холл':          'Prime Hall',
-    'falcon club':         'Falcon Club Arena',
-    'белгосфилармония':    'Белорусская государственная филармония',
-    'молодёжный театр':    'Молодёжный театр',
-    'молодежный театр':    'Молодёжный театр',
-    'дворец спорта':       'Дворец спорта',
-}
 
 
-def normalize_place(place: str) -> str:
-    """Приводит название площадки к каноническому виду."""
-    if not place:
-        return place
-    key = place.lower().strip()
-    # Убираем кавычки для поиска
-    key_clean = key.replace('«', '').replace('»', '').replace('"', '').strip()
-    for alias, canonical in PLACE_NORMALIZE.items():
-        alias_clean = alias.replace('«', '').replace('»', '').replace('"', '').strip()
-        if alias_clean in key_clean or key_clean in alias_clean:
-            return canonical
-    return place
 
-
-MONTHS_RU = {
-    "января": "01", "февраля": "02", "марта": "03",   "апреля": "04",
-    "мая":    "05", "июня":   "06", "июля":  "07",   "августа": "08",
-    "сентября": "09", "октября": "10", "ноября": "11", "декабря": "12",
-}
 
 
 # ── Вспомогательные функции ──────────────────────────────────────────────────
@@ -103,62 +69,12 @@ def fetch_page(url: str, retries: int = 3) -> Optional[str]:
     return None
 
 
-def parse_iso_datetime(iso: str):
-    """Из 2026-03-06T18:00:00+03:00 → ('2026-03-06', '18:00')"""
-    try:
-        dt = datetime.fromisoformat(iso)
-        date_str = dt.strftime("%Y-%m-%d")
-        time_str = dt.strftime("%H:%M") if (dt.hour or dt.minute) else ""
-        return date_str, time_str
-    except Exception:
-        return "", ""
 
 
-def parse_text_date(text: str) -> str:
-    """'6 марта 2026' → '2026-03-06'; '7 — 8 марта 2026' → '2026-03-07'"""
-    text = text.strip()
-    # Диапазон дат — берём первую дату
-    text = re.sub(r'\s*[—–-]\s*\d+\s+', ' ', text)
-    m = re.search(r'(\d{1,2})\s+(\w+)\s+(\d{4})', text)
-    if m:
-        day, mon_ru, year = m.group(1), m.group(2).lower(), m.group(3)
-        mon = MONTHS_RU.get(mon_ru)
-        if mon:
-            return f"{year}-{mon}-{day.zfill(2)}"
-    return ""
 
 
-def format_price(offers: dict) -> str:
-    if not offers:
-        return ""
-    price_val = offers.get("price") or offers.get("lowPrice")
-    high_val  = offers.get("highPrice")
-    currency  = offers.get("priceCurrency", "BYN")
-    if price_val is None:
-        return ""
-    if price_val == 0:
-        return "Бесплатно"
-    if high_val and high_val != price_val:
-        return f"от {price_val} {currency}"
-    return f"{price_val} {currency}"
 
 
-def normalize_title(title: str) -> str:
-    """Нормализует название для сравнения дублей."""
-    if not title:
-        return ""
-    norm = title.lower()
-    norm = re.sub(r'^(концерт|концертная\s+программа|спектакль|шоу|'
-                  r'юбилейный\s+концерт|сольный\s+концерт|гала-концерт|'
-                  r'праздничный\s+концерт|отчетный\s+концерт)\s+', '', norm)
-    norm = re.sub(r'\s+(концерт|спектакль|шоу|программа|фестиваль)$', '', norm)
-    norm = re.sub(r'[«»"\'`]', '', norm)
-    norm = re.sub(r'\.+$', '', norm)
-    norm = re.sub(r'\s+и\s+', ' & ', norm)
-    norm = re.sub(r'[—–-]', '-', norm)
-    norm = re.sub(r'[^\w\s\-&]', '', norm)
-    norm = re.sub(r'\s+', ' ', norm).strip()
-    return norm
 
 
 # ── Основной класс ──────────────────────────────────────────────────────────
@@ -266,15 +182,8 @@ class BezkassiraParser:
             if not event_date:
                 return None
 
-            # 4. Фильтр: только будущие события
-            try:
-                ev_dt = date.fromisoformat(event_date)
-                if ev_dt < date.today():
-                    return None
-                # Не берём события дальше 6 месяцев
-                if ev_dt > date.today() + timedelta(days=180):
-                    return None
-            except ValueError:
+            # 4. Фильтр: только будущие события (не дальше 6 месяцев)
+            if not is_future_date(event_date, max_days=180):
                 return None
 
             # 5. Место (hint уже найден выше)
@@ -292,7 +201,7 @@ class BezkassiraParser:
             price = ""
             offers = ld.get("offers", {})
             if offers:
-                price = format_price(offers)
+                price = format_price_from_offers(offers)
 
             # 8. Описание
             description = ld.get("description", "")

@@ -12,6 +12,7 @@ from collections import defaultdict
 
 import requests
 from bs4 import BeautifulSoup
+from normalizer import normalize_place, extract_time, parse_text_date, normalize_price
 
 # ---------------------- Путь к БД ----------------------
 
@@ -60,12 +61,6 @@ class RelaxBaseParser:
             "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
         })
 
-        self.months = {
-            "января": 1, "февраля": 2, "марта": 3, "апреля": 4,
-            "мая": 5, "июня": 6, "июля": 7, "августа": 8,
-            "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12,
-        }
-        self.current_year = datetime.now().year
 
     # ---------------------- Утилиты ----------------------
 
@@ -85,66 +80,8 @@ class RelaxBaseParser:
                 time.sleep(5)
         return None
 
-    def parse_date_from_header(self, header_text: str) -> str | None:
-        if not header_text:
-            return None
-        text = header_text.strip().lower()
-        m = re.search(r"(\d{1,2})\s+([а-я]+)", text)
-        if not m:
-            return None
-        day = int(m.group(1))
-        month = self.months.get(m.group(2))
-        if not month:
-            return None
-        today = datetime.now()
-        year = self.current_year
-        if month < today.month or (month == today.month and day < today.day):
-            year += 1
-        return f"{year}-{month:02d}-{day:02d}"
 
-    def normalize_place(self, place: str) -> str | None:
-        if not place or len(place) < 3:
-            return None
-        place_lower = place.lower()
-        for venue in self.known_venues:
-            if venue.lower() in place_lower:
-                return venue
-        # Убираем адресные части
-        place = re.sub(r"ул\.?\s*\w+", "", place)
-        place = re.sub(r"пр-?т\.?\s*\w+", "", place)
-        place = re.sub(r"пл\.?\s*\w+", "", place)
-        place = re.sub(r"пер\.?\s*\w+", "", place)
-        place = re.sub(r"\s+", " ", place).strip()
-        return place if len(place) > 3 else None
 
-    def extract_time(self, text: str) -> str:
-        for pattern in [
-            r"начало\s*в\s*(\d{1,2}[:\.]\d{2})",
-            r"в\s*(\d{1,2}[:\.]\d{2})",
-            r"(\d{2}[:\.]\d{2})",
-            r"(\d{1,2}[:\.]\d{2})\s*ч",
-        ]:
-            m = re.search(pattern, text)
-            if m:
-                t = m.group(1).replace(".", ":")
-                if len(t) == 4:
-                    t = t[:2] + ":" + t[2:]
-                return t
-        return ""
-
-    def extract_price(self, text: str) -> str:
-        for pattern in [
-            r"(от\s*\d+[\.,]?\d*\s*руб)",
-            r"(\d+[\.,]?\d*\s*руб)",
-            r"(\d+[\.,]?\d*\s*р\.)",
-            r"(\d+[\.,]?\d*\s*₽)",
-            r"(вход\s*свободный)",
-            r"(бесплатно)",
-        ]:
-            m = re.search(pattern, text, re.IGNORECASE)
-            if m:
-                return m.group(1)
-        return ""
 
     def build_url(self, href: str) -> str:
         if not href:
@@ -176,7 +113,7 @@ class RelaxBaseParser:
             if not h5:
                 skip_no_date += 1
                 continue
-            event_date = self.parse_date_from_header(h5.get_text())
+            event_date = parse_text_date(h5.get_text())
             if not event_date:
                 skip_no_date += 1
                 continue
@@ -192,7 +129,7 @@ class RelaxBaseParser:
                     place_a = place_div.find("a", class_="js-schedule__place-link")
                     if place_a:
                         raw_place = place_a.get_text(strip=True)
-                        last_place = self.normalize_place(raw_place) or raw_place
+                        last_place = normalize_place(raw_place, known_venues=self.known_venues) or raw_place
                     addr_span = place_div.find("span", class_="schedule__place-link")
                     last_location = addr_span.get_text(strip=True) if addr_span else "Минск"
 
@@ -247,6 +184,7 @@ class RelaxBaseParser:
                 else:
                     seance_div = item.find("div", class_="schedule__seance")
                     price = seance_div.get("data-summ", "").strip() if seance_div else ""
+                price = normalize_price(price)
 
                 description = f"{self.emoji} {title}"
                 if details:
@@ -363,7 +301,7 @@ class RelaxBaseParser:
 class RelaxTheatreParser(RelaxBaseParser):
     path = "/theatre/minsk/"
     category = "theater"
-    source_name = "relax.by/theatre"
+    source_name = "relax.by"
     emoji = "🎭"
     clear_label = "спектаклей"
     known_venues = [
@@ -372,6 +310,7 @@ class RelaxTheatreParser(RelaxBaseParser):
         "Театр им. Горького", "Театр имени Горького",
         "Театр им. Янки Купалы", "Театр имени Янки Купалы", "Купаловский",
         "Театр оперы и балета", "Большой театр",
+        "Большой театр Беларуси", "Государственный академический Большой театр",
         "Театр сатиры и юмора", "Театр сатиры",
         "Театр-студия киноактера", "Театр киноактера",
         "Новый драматический театр", "Новый театр",
@@ -391,7 +330,7 @@ class RelaxTheatreParser(RelaxBaseParser):
 class RelaxConcertParser(RelaxBaseParser):
     path = "/conserts/minsk/"
     category = "concert"
-    source_name = "relax.by/concerts"
+    source_name = "relax.by"
     emoji = "🎵"
     clear_label = "концертов"
     known_venues = [
@@ -420,7 +359,7 @@ class RelaxConcertParser(RelaxBaseParser):
 class RelaxExhibitionParser(RelaxBaseParser):
     path = "/expo/minsk/"
     category = "exhibition"
-    source_name = "relax.by/expo"
+    source_name = "relax.by"
     emoji = "🖼️"
     clear_label = "выставок"
     known_venues = [
@@ -450,7 +389,7 @@ class RelaxExhibitionParser(RelaxBaseParser):
 class RelaxKidsParser(RelaxBaseParser):
     path = "/kids/minsk/"
     category = "kids"
-    source_name = "relax.by/kids"
+    source_name = "relax.by"
     emoji = "🧸"
     clear_label = "детских событий"
     known_venues = [
@@ -478,7 +417,7 @@ class RelaxKidsParser(RelaxBaseParser):
 class RelaxPartyParser(RelaxBaseParser):
     path = "/clubs/minsk/"
     category = "party"
-    source_name = "relax.by/clubs"
+    source_name = "relax.by"
     emoji = "🎉"
     clear_label = "вечеринок"
     known_venues = [
@@ -495,7 +434,7 @@ class RelaxPartyParser(RelaxBaseParser):
 class RelaxFreeParser(RelaxBaseParser):
     path = "/free/minsk/"
     category = "free"
-    source_name = "relax.by/free"
+    source_name = "relax.by"
     emoji = "🆓"
     clear_label = "бесплатных событий"
     known_venues = []   # принимаем все места — бесплатные мероприятия везде
@@ -504,7 +443,7 @@ class RelaxFreeParser(RelaxBaseParser):
 class RelaxKinoParser(RelaxBaseParser):
     path = "/kino/minsk/"
     category = "cinema"
-    source_name = "relax.by/kino"
+    source_name = "relax.by"
     emoji = "🎬"
     clear_label = "сеансов"
     known_venues = []  # кинотеатры берём напрямую из HTML
@@ -543,7 +482,7 @@ class RelaxKinoParser(RelaxBaseParser):
             h5 = day_block.find("h5")
             if not h5:
                 continue
-            event_date = self.parse_date_from_header(h5.get_text())
+            event_date = parse_text_date(h5.get_text())
             if not event_date:
                 continue
 
@@ -558,7 +497,7 @@ class RelaxKinoParser(RelaxBaseParser):
                         place_a = place_fill.find("a", class_="js-schedule__place-link")
                         if place_a:
                             raw_place = place_a.get_text(strip=True)
-                            last_place = self.normalize_place(raw_place) or raw_place
+                            last_place = normalize_place(raw_place, known_venues=self.known_venues) or raw_place
                         addr = place_fill.find("span", class_="schedule__place-link")
                         last_location = addr.get_text(strip=True) if addr else "Минск"
 
@@ -591,6 +530,7 @@ class RelaxKinoParser(RelaxBaseParser):
                         else:
                             data_summ = seance.get("data-summ", "").strip()
                             price = data_summ if data_summ else ""
+                        price = normalize_price(price)
 
                         key = (title, event_date, show_time, last_place)
                         if key in seen:
