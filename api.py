@@ -271,8 +271,17 @@ def get_events(
             params.append(search_date)
         else:
             ql = q.lower()
-            where.append("(LOWER(title) LIKE ? OR LOWER(place) LIKE ? OR LOWER(details) LIKE ? OR LOWER(description) LIKE ? OR category LIKE ?)")
-            params.extend([f"%{ql}%", f"%{ql}%", f"%{ql}%", f"%{ql}%", f"%{ql}%"])
+            # SQLite LOWER() не работает с кириллицей без ICU — дублируем LIKE без LOWER
+            sp = f"%{q}%"
+            spl = f"%{ql}%"
+            where.append(
+                "(LOWER(title) LIKE ? OR title LIKE ? "
+                "OR LOWER(place) LIKE ? OR place LIKE ? "
+                "OR LOWER(details) LIKE ? OR details LIKE ? "
+                "OR LOWER(description) LIKE ? OR description LIKE ? "
+                "OR category LIKE ?)"
+            )
+            params.extend([spl, sp, spl, sp, spl, sp, spl, sp, spl])
 
     events = fetch_events(where, params)
     page_events, total = paginate(events, page, per_page)
@@ -403,11 +412,90 @@ def _dates_in_range(date_from: str, date_to: str) -> list[str]:
 
 @app.post("/api/events/submit")
 def submit_event(event: EventSubmit):
-    """Принимает событие → сохраняет в pending_events."""
-    if event.event_date_to and event.event_date_to > event.event_date:
+    """Принимает событие → валидирует даты → проверяет дубликат → сохраняет в pending_events."""
+    import re as _re
+    from datetime import date as _date
+
+    # ── Валидация дат ────────────────────────────────────────────────────────
+    today_d = _date.today()
+
+    try:
+        d_from = _date.fromisoformat(event.event_date)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Некорректная дата начала. Формат: YYYY-MM-DD")
+
+    if d_from < today_d:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Дата {d_from.strftime('%d.%m.%Y')} уже в прошлом. Сегодня {today_d.strftime('%d.%m.%Y')}"
+        )
+
+    if event.event_date_to:
+        try:
+            d_to = _date.fromisoformat(event.event_date_to)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Некорректная дата окончания. Формат: YYYY-MM-DD")
+        if d_to < today_d:
+            raise HTTPException(status_code=400, detail=f"Дата окончания {d_to.strftime('%d.%m.%Y')} уже в прошлом.")
+        if d_to < d_from:
+            raise HTTPException(status_code=400, detail="Дата окончания раньше даты начала.")
+        if d_to == d_from:
+            raise HTTPException(status_code=400, detail="Для одного дня не указывайте дату окончания.")
+        if (d_to - d_from).days > 90:
+            raise HTTPException(status_code=400, detail="Период не может быть больше 90 дней.")
         dates = _dates_in_range(event.event_date, event.event_date_to)
     else:
         dates = [event.event_date]
+
+    # ── Проверка дубликата ───────────────────────────────────────────────────
+    def _norm(s: str) -> str:
+        return _re.sub(r"[\s\-—–,\.!?]+", " ", (s or "").lower()).strip()
+
+    t_norm = _norm(event.title)
+    p_norm = _norm(event.place)
+
+    with get_db() as conn:
+        for chk_date in dates[:1]:  # проверяем первую дату
+            # Уровень 1: title + date + place
+            rows = conn.execute(
+                "SELECT id, title, event_date, place FROM events "
+                "WHERE event_date = ? AND LOWER(title) LIKE ? AND LOWER(COALESCE(place,'')) LIKE ?",
+                (chk_date, f"%{t_norm[:20]}%", f"%{p_norm[:20]}%")
+            ).fetchall()
+            for r in rows:
+                if _norm(r["title"]) == t_norm and _norm(r["place"] or "") == p_norm:
+                    try:
+                        from datetime import datetime as _dt
+                        d_fmt = _dt.strptime(r["event_date"], "%Y-%m-%d").strftime("%d.%m.%Y")
+                    except Exception:
+                        d_fmt = r["event_date"]
+                    raise HTTPException(status_code=409, detail=f"Событие уже есть в афише: «{r['title']}» {d_fmt}")
+
+            # Уровень 2: title + date (без места)
+            rows = conn.execute(
+                "SELECT id, title, event_date, place FROM events "
+                "WHERE event_date = ? AND LOWER(title) LIKE ?",
+                (chk_date, f"%{t_norm[:20]}%")
+            ).fetchall()
+            for r in rows:
+                if _norm(r["title"]) == t_norm:
+                    try:
+                        from datetime import datetime as _dt
+                        d_fmt = _dt.strptime(r["event_date"], "%Y-%m-%d").strftime("%d.%m.%Y")
+                    except Exception:
+                        d_fmt = r["event_date"]
+                    raise HTTPException(status_code=409, detail=f"Событие уже есть в афише: «{r['title']}» {d_fmt}")
+
+            # Проверяем pending_events
+            rows_p = conn.execute(
+                "SELECT id, title, event_date FROM pending_events "
+                "WHERE event_date LIKE ? AND status NOT IN ('rejected','approved') AND LOWER(title) LIKE ?",
+                (f"%{chk_date}%", f"%{t_norm[:20]}%")
+            ).fetchall()
+            for r in rows_p:
+                if _norm(r["title"]) == t_norm:
+                    raise HTTPException(status_code=409, detail=f"Событие уже отправлено на модерацию: «{r['title']}»")
+
 
     try:
         pending_ids = []
