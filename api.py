@@ -626,3 +626,119 @@ def get_event(event_id: int):
     if not row:
         raise HTTPException(status_code=404, detail="Event not found")
     return Event(**row_to_dict(row))
+
+# ── Pydantic схемы для подписок ───────────────────────────────────────────────
+
+class SubscriptionRequest(BaseModel):
+    user_id: int
+    category: str
+    date_type: str  # "upcoming", "daily", "weekly"
+
+
+class SubscriptionResponse(BaseModel):
+    subscriptions: list[dict]  # [{"category": "concert", "date_type": "upcoming"}, ...]
+
+
+# ── Эндпоинты для подписок ────────────────────────────────────────────────────
+
+@app.get("/api/subscriptions", response_model=SubscriptionResponse)
+def get_subscriptions(user_id: int = Query(..., description="ID пользователя Telegram")):
+    """
+    Получить все активные подписки пользователя.
+    Вызывается из фронта при загрузке страницы подписок.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT category, date_type FROM subscriptions WHERE user_id = ? AND status = 'active'",
+            (user_id,)
+        )
+        subs = [{"category": row[0], "date_type": row[1]} for row in cursor.fetchall()]
+    
+    return {"subscriptions": subs}
+
+
+@app.post("/api/subscriptions/add")
+def add_subscription(req: SubscriptionRequest):
+    """
+    Добавить или активировать подписку.
+    INSERT OR REPLACE гарантирует, что даже если была неактивная — станет активной.
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT OR REPLACE INTO subscriptions 
+            (user_id, category, date_type, status) 
+            VALUES (?, ?, ?, 'active')
+        """, (req.user_id, req.category, req.date_type))
+        conn.commit()
+    
+    # Логируем для статистики
+    try:
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO user_stats (user_id, action, detail, created_at) VALUES (?, ?, ?, ?)",
+                (req.user_id, "web_subscribe", f"{req.category}_{req.date_type}",
+                 datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"))
+            )
+            conn.commit()
+    except Exception:
+        pass
+    
+    return {"ok": True, "message": "Подписка добавлена"}
+
+
+@app.post("/api/subscriptions/remove")
+def remove_subscription(req: SubscriptionRequest):
+    """
+    Деактивировать подписку (мягкое удаление).
+    """
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE subscriptions SET status='inactive' WHERE user_id = ? AND category = ? AND date_type = ?",
+            (req.user_id, req.category, req.date_type)
+        )
+        conn.commit()
+    
+    # Логируем для статистики
+    try:
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO user_stats (user_id, action, detail, created_at) VALUES (?, ?, ?, ?)",
+                (req.user_id, "web_unsubscribe", f"{req.category}_{req.date_type}",
+                 datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"))
+            )
+            conn.commit()
+    except Exception:
+        pass
+    
+    return {"ok": True, "message": "Подписка удалена"}
+
+
+@app.get("/api/subscriptions/categories")
+def get_available_categories():
+    """
+    Список категорий, на которые можно подписаться (те, у которых есть события).
+    """
+    today = today_str()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT DISTINCT category FROM events WHERE event_date >= ?",
+            (today,)
+        )
+        categories = [row[0] for row in cursor.fetchall()]
+    
+    # Добавляем все возможные date_type
+    date_types = ["upcoming", "daily", "weekly"]
+    
+    return {
+        "categories": categories,
+        "date_types": date_types,
+        "descriptions": {
+            "upcoming": "🔔 Все новые события",
+            "daily": "📅 Ежедневный дайджест",
+            "weekly": "📆 Дайджест на выходные"
+        }
+    }
