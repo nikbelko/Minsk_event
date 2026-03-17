@@ -1342,13 +1342,25 @@ async def show_ustats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------- Планировщик парсеров ----------------------
 
 
-async def update_parsers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def update_parsers(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     """Ручной запуск парсеров (только для администратора)."""
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("⛔ Нет доступа.")
+    # Определяем, откуда пришел вызов
+    if isinstance(update_or_query, Update):
+        user_id = update_or_query.effective_user.id
+        message = update_or_query.message
+    else:
+        user_id = update_or_query.from_user.id
+        message = update_or_query.message
+    
+    if user_id != ADMIN_ID:
+        if isinstance(update_or_query, Update):
+            await update_or_query.message.reply_text("⛔ Нет доступа.")
+        else:
+            await update_or_query.answer("⛔ Нет доступа", show_alert=True)
         return
     
-    await update.message.reply_text("🔄 **Обновление афиши...**\nЗапускаю парсеры, ~1-2 минуты.", parse_mode="Markdown")
+    # Отправляем сообщение о начале обновления
+    await message.reply_text("🔄 **Обновление афиши...**\nЗапускаю парсеры, ~1-2 минуты.", parse_mode="Markdown")
     
     try:
         process = await asyncio.create_subprocess_exec(
@@ -1356,7 +1368,7 @@ async def update_parsers(update: Update, context: ContextTypes.DEFAULT_TYPE):
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
-        elapsed = (datetime.now(MINSK_TZ) - update.message.date.astimezone(MINSK_TZ)).total_seconds()
+        elapsed = (datetime.now(MINSK_TZ) - message.date.astimezone(MINSK_TZ)).total_seconds()
         
         if process.returncode == 0:
             output = stdout.decode("utf-8", errors="replace")
@@ -1365,21 +1377,21 @@ async def update_parsers(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text = _format_parser_report(report, elapsed)
             else:
                 text = f"✅ Обновление завершено за {elapsed:.0f} сек\n\nℹ️ Детальный отчёт недоступен"
-            await update.message.reply_text(text, parse_mode="Markdown")
+            await message.reply_text(text, parse_mode="Markdown")
             
         else:
             err = stderr.decode("utf-8", errors="replace").strip() if stderr else ""
             out = stdout.decode("utf-8", errors="replace").strip() if stdout else ""
             debug = err or out or "нет вывода"
-            await update.message.reply_text(
+            await message.reply_text(
                 f"❌ **Ошибка парсеров** (код {process.returncode})\n\n```\n{debug[:800]}\n```",
                 parse_mode="Markdown"
             )
             
     except asyncio.TimeoutError:
-        await update.message.reply_text("⏰ Превышено время ожидания (5 мин).", parse_mode="Markdown")
+        await message.reply_text("⏰ Превышено время ожидания (5 мин).", parse_mode="Markdown")
     except Exception as e:
-        await update.message.reply_text(f"💥 **Ошибка**: `{e}`", parse_mode="Markdown")
+        await message.reply_text(f"💥 **Ошибка**: `{e}`", parse_mode="Markdown")
 
 
 async def run_parsers_job(bot=None):
@@ -2708,7 +2720,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 stats = get_stats_data(exclude_admin=True)
                 await query.message.reply_text(_format_stats(stats, "📊 СТАТИСТИКА ПОЛЬЗОВАТЕЛЕЙ"), parse_mode="HTML")
             elif cmd == "update":
-                await update_parsers(update, context)
+                await update_parsers(query, context)  # передаем query, а не update
             elif cmd == "download":
                 try:
                     await query.message.reply_document(
