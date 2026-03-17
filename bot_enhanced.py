@@ -327,31 +327,41 @@ def get_raw_events_count_by_category() -> dict:
 
 
 def get_events_count_by_category() -> dict:
-    """Кол-во сгруппированных событий по категориям.
-    Кино: уникальных (title, date). Остальные: уникальных (title, place).
-    Возвращает ВСЕ категории из БД — независимо от CATEGORY_NAMES."""
+    """Кол-во сгруппированных событий по категориям."""
     today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
     with get_db_connection() as conn:
         cursor = conn.cursor()
-        # Кино: считаем уникальные (title, event_date)
+        
+        # Обычные категории (все события, включая бесплатные)
+        cursor.execute("""
+            SELECT category, COUNT(*) FROM (
+                SELECT DISTINCT category, title, COALESCE(place, '') as place 
+                FROM events
+                WHERE category IS NOT NULL AND category != '' AND category != 'cinema'
+                AND event_date >= ?
+            ) GROUP BY category
+        """, (today,))
+        result = {row[0]: row[1] for row in cursor.fetchall()}
+        
+        # Кино (отдельная логика)
         cursor.execute("""
             SELECT COUNT(*) FROM (
                 SELECT DISTINCT title, event_date FROM events
                 WHERE category = 'cinema' AND event_date >= ?
             )
         """, (today,))
-        cinema_count = cursor.fetchone()[0]
-        # Все остальные категории: уникальных (title, place)
+        result["cinema"] = cursor.fetchone()[0]
+        
+        # FREE - ВСЕ бесплатные события (независимо от категории)
         cursor.execute("""
-            SELECT category, COUNT(*) FROM (
-                SELECT DISTINCT category, title, COALESCE(place, '') as place FROM events
-                WHERE category IS NOT NULL AND category != '' AND category != 'cinema'
-                AND event_date >= ?
-            ) GROUP BY category
+            SELECT COUNT(*) FROM (
+                SELECT DISTINCT title, COALESCE(place, ''), event_date 
+                FROM events
+                WHERE event_date >= ? AND price = 'Бесплатно'
+            )
         """, (today,))
-        result = {row[0]: row[1] for row in cursor.fetchall()}
-        if cinema_count:
-            result["cinema"] = cinema_count
+        result["free"] = cursor.fetchone()[0]
+        
         return result
 
 
@@ -452,21 +462,26 @@ def get_upcoming_events(limit: int = 20, category: str | None = None):
     time_filter = " AND (event_date > ? OR show_time = '' OR show_time IS NULL OR show_time > ?)"
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        
+        # ОСОБЫЙ СЛУЧАЙ: категория "free" показывает ВСЕ бесплатные события
         if category == "free":
             cursor.execute(f"""
                 SELECT id, title, details, description, event_date, show_time,
                        place, location, price, category, source_url
-                FROM events WHERE event_date >= ?
-                  AND category = 'free'
-                  {time_filter}
+                FROM events 
+                WHERE event_date >= ? AND price = 'Бесплатно'
+                {time_filter}
                 ORDER BY event_date, show_time, title LIMIT ?
             """, (today, today, now_time, limit * SEARCH_MULTIPLIER))
-        elif category and category != "all":
+            return cursor.fetchall()
+        
+        # Обычная категория (не free)
+        if category and category != "all":
             cursor.execute(f"""
                 SELECT id, title, details, description, event_date, show_time,
                        place, location, price, category, source_url
                 FROM events WHERE event_date >= ? AND category = ?
-                  {time_filter}
+                {time_filter}
                 ORDER BY event_date, show_time, title LIMIT ?
             """, (today, category, today, now_time, limit * SEARCH_MULTIPLIER))
         else:
@@ -474,29 +489,41 @@ def get_upcoming_events(limit: int = 20, category: str | None = None):
                 SELECT id, title, details, description, event_date, show_time,
                        place, location, price, category, source_url
                 FROM events WHERE event_date >= ?
-                  {time_filter}
+                {time_filter}
                 ORDER BY event_date, show_time, title LIMIT ?
             """, (today, today, now_time, limit * SEARCH_MULTIPLIER))
+        
         return cursor.fetchall()
 
 
 def get_weekend_events(category: str | None = None):
+    """
+    Возвращает события на ближайшие выходные (суббота и воскресенье).
+    Для категории free: все события с ценой 'Бесплатно'
+    Для остальных категорий: события по категории
+    """
     today = datetime.now(MINSK_TZ)
     days_until_saturday = (5 - today.weekday()) % 7 or 7
     saturday = today + timedelta(days=days_until_saturday)
     sunday = saturday + timedelta(days=1)
     saturday_str, sunday_str = saturday.strftime("%Y-%m-%d"), sunday.strftime("%Y-%m-%d")
+    
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        
+        # ОСОБЫЙ СЛУЧАЙ: категория "free" показывает ВСЕ бесплатные события
         if category == "free":
             cursor.execute("""
                 SELECT id, title, details, description, event_date, show_time,
                        place, location, price, category, source_url
-                FROM events WHERE event_date IN (?, ?)
-                  AND category = 'free'
+                FROM events 
+                WHERE event_date IN (?, ?) AND price = 'Бесплатно'
                 ORDER BY event_date, show_time, title
             """, (saturday_str, sunday_str))
-        elif category and category != "all":
+            return cursor.fetchall(), saturday, sunday
+        
+        # Обычная категория (не free)
+        if category and category != "all":
             cursor.execute("""
                 SELECT id, title, details, description, event_date, show_time,
                        place, location, price, category, source_url
@@ -510,10 +537,14 @@ def get_weekend_events(category: str | None = None):
                 FROM events WHERE event_date IN (?, ?)
                 ORDER BY event_date, show_time, title
             """, (saturday_str, sunday_str))
+        
         return cursor.fetchall(), saturday, sunday
 
 
 def filter_events_by_category(events, category: str):
+    """Фильтрует события по категории. Для free фильтрует по цене."""
+    if category == "free":
+        return [e for e in events if e.get("price") == "Бесплатно"]
     return [e for e in events if e.get("category") == category]
 
 
