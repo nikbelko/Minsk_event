@@ -813,30 +813,46 @@ def build_page_keyboard(data: dict):
     per_page = data["per_page"]
     total = len(events)
     max_page = max(0, (total - 1) // per_page)
+    target_date = data.get("target_date")
     keyboard = []
     
-    # Получаем общее количество событий по категориям
-    total_counts = get_events_count_by_category()
+    # Считаем уникальные события (как после группировки) — title+place
+    category_counts = defaultdict(int)
+    _seen_cats: dict = defaultdict(set)
     
-    # Собираем категории, которые есть в текущей подборке
-    categories_in_current = set()
     for e in events:
-        cat = e.get("category")
-        if cat:
-            categories_in_current.add(cat)
+        cat = e.get("category") if e.get("category") else ("cinema" if e.get("_pre_formatted") else None)
+        if not cat:
+            continue
+        if e.get("_pre_formatted"):
+            category_counts[cat] += 1
+        else:
+            key = (e.get("title", ""), e.get("place") or "")
+            if key not in _seen_cats[cat]:
+                _seen_cats[cat].add(key)
+                category_counts[cat] += 1
     
-    # Добавляем категорию free ТОЛЬКО если есть бесплатные события
-    free_count = total_counts.get("free", 0)
-    if free_count > 0:
-        categories_in_current.add("free")
+    # Получаем количество бесплатных событий на дату
+    free_count = 0
+    if target_date:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) FROM events WHERE event_date = ? AND price = 'Бесплатно'",
+                (target_date,)
+            )
+            free_count = cursor.fetchone()[0]
+    
+    # Если есть бесплатные события и их нет в текущей подборке, добавляем
+    if free_count > 0 and "free" not in category_counts:
+        category_counts["free"] = free_count
     
     # Кнопки фильтрации по категориям
-    if len(categories_in_current) > 1:
+    if len(category_counts) > 1:
         row = []
         for cat_key, cat_name in CATEGORY_NAMES.items():
-            if cat_key in categories_in_current:
-                # Показываем общее количество событий в категории
-                count = total_counts.get(cat_key, 0)
+            if cat_key in category_counts:
+                count = category_counts[cat_key]
                 btn_text = f"{cat_name} ({count})" if count > 0 else cat_name
                 row.append(InlineKeyboardButton(btn_text, callback_data=f"filter_{cat_key}"))
                 if len(row) == 2:
@@ -845,7 +861,7 @@ def build_page_keyboard(data: dict):
         if row:
             keyboard.append(row)
     
-    # Кнопки пагинации (если есть)
+    # Кнопки пагинации
     if max_page > 0:
         keyboard.append([
             InlineKeyboardButton("◀️", callback_data="page_prev") if page > 0 else InlineKeyboardButton(" ", callback_data="page_noop"),
