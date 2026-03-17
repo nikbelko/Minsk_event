@@ -159,13 +159,23 @@ def categories_counts():
     today = today_str()
     with get_db() as conn:
         cursor = conn.cursor()
+        
+        # Обычные категории - ВСЕ события (и платные, и бесплатные)
         cursor.execute(
             "SELECT category, COUNT(*) as cnt FROM events WHERE event_date >= ? GROUP BY category",
             (today,)
         )
         data = {row["category"]: row["cnt"] for row in cursor.fetchall()}
+        
+        # Категория free - все бесплатные события (независимо от категории)
+        cursor.execute(
+            "SELECT COUNT(*) FROM events WHERE event_date >= ? AND price = 'Бесплатно'",
+            (today,)
+        )
+        free_count = cursor.fetchone()[0]
+        data["free"] = free_count
+        
     return CategoryCounts(**data)
-
 
 # ── Даты с событиями (для календаря) ────────────────────────────────────────
 
@@ -179,9 +189,14 @@ def calendar_dates(
     until = (now_minsk() + timedelta(days=30 * months_ahead)).strftime("%Y-%m-%d")
     params: list = [today, until]
     where = ["event_date >= ?", "event_date <= ?"]
-    if category and category != "all":
+    
+    # КАТЕГОРИЯ FREE - ОСОБАЯ ОБРАБОТКА
+    if category == "free":
+        where.append("price = 'Бесплатно'")
+    elif category and category != "all":
         where.append("category = ?")
         params.append(category)
+        
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -248,8 +263,12 @@ def get_events(
         where.append("(event_date > ? OR show_time = '' OR show_time IS NULL OR show_time > ?)")
         params.extend([today, now_t])
 
-    # Категория
-    if category and category != "all":
+    # КАТЕГОРИЯ FREE - ОСОБАЯ ОБРАБОТКА
+    if category == "free":
+        # Показываем ВСЕ события с ценой "Бесплатно"
+        where.append("price = 'Бесплатно'")
+        # НЕ добавляем условие по category
+    elif category and category != "all":
         where.append("category = ?")
         params.append(category)
 
@@ -309,9 +328,14 @@ def events_today(
         "(show_time = '' OR show_time IS NULL OR show_time > ?)",
     ]
     params: list = [today, now_t]
-    if category and category != "all":
+    
+    # КАТЕГОРИЯ FREE - ОСОБАЯ ОБРАБОТКА
+    if category == "free":
+        where.append("price = 'Бесплатно'")
+    elif category and category != "all":
         where.append("category = ?")
         params.append(category)
+        
     events = fetch_events(where, params)
     page_events, total = paginate(events, page, per_page)
     return EventsResponse(total=total, page=page, per_page=per_page,
@@ -327,9 +351,14 @@ def events_tomorrow(
     tomorrow = (now_minsk() + timedelta(days=1)).strftime("%Y-%m-%d")
     where = ["event_date = ?"]
     params: list = [tomorrow]
-    if category and category != "all":
+    
+    # КАТЕГОРИЯ FREE - ОСОБАЯ ОБРАБОТКА
+    if category == "free":
+        where.append("price = 'Бесплатно'")
+    elif category and category != "all":
         where.append("category = ?")
         params.append(category)
+        
     events = fetch_events(where, params)
     page_events, total = paginate(events, page, per_page)
     return EventsResponse(total=total, page=page, per_page=per_page,
@@ -345,9 +374,14 @@ def events_weekend(
     saturday, sunday = get_weekend_dates()
     where = ["event_date IN (?, ?)"]
     params: list = [saturday, sunday]
-    if category and category != "all":
+    
+    # КАТЕГОРИЯ FREE - ОСОБАЯ ОБРАБОТКА
+    if category == "free":
+        where.append("price = 'Бесплатно'")
+    elif category and category != "all":
         where.append("category = ?")
         params.append(category)
+        
     events = fetch_events(where, params)
     page_events, total = paginate(events, page, per_page)
     return EventsResponse(total=total, page=page, per_page=per_page,
@@ -369,9 +403,14 @@ def events_upcoming(
         "(event_date > ? OR show_time = '' OR show_time IS NULL OR show_time > ?)",
     ]
     params: list = [today, until, today, now_t]
-    if category and category != "all":
+    
+    # КАТЕГОРИЯ FREE - ОСОБАЯ ОБРАБОТКА
+    if category == "free":
+        where.append("price = 'Бесплатно'")
+    elif category and category != "all":
         where.append("category = ?")
         params.append(category)
+        
     events = fetch_events(where, params)
     page_events, total = paginate(events, page, per_page)
     return EventsResponse(total=total, page=page, per_page=per_page,

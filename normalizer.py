@@ -4,7 +4,11 @@
 
 import re
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Tuple
+import logging
+
+# Настраиваем логгер для модуля
+logger = logging.getLogger(__name__)
 
 # ── Словарь нормализации площадок ────────────────────────────────────────────
 # Ключи — любые варианты написания (строчные, без кавычек),
@@ -305,19 +309,20 @@ def normalize_title(title: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  ЦЕНА
+#  ЦЕНА (обновлённая с флагом бесплатной секции)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def normalize_price(raw: str) -> str:
+def normalize_price(raw: str, from_free_section: bool = False) -> str:
     """
     Приводит строку цены к единому формату.
-
-    Варианты:
-      "Бесплатно" / "вход свободный" / "0 BYN" / "0.00 BYN" → "Бесплатно"
-      "от 20 BYN" / "от 20 руб"     → "от 20 руб"
-      "20 BYN"                       → "20 руб"
-      ""  / None                     → ""
+    
+    Args:
+        raw: исходная строка цены
+        from_free_section: событие найдено в разделе "бесплатно" на сайте
     """
+    if not raw and from_free_section:
+        return "Бесплатно"
+    
     if not raw:
         return ""
 
@@ -345,25 +350,38 @@ def normalize_price(raw: str) -> str:
     return text
 
 
-def format_price_from_offers(offers: dict) -> str:
+def format_price_from_offers(offers: dict, from_free_section: bool = False) -> str:
     """
     Форматирует цену из JSON-LD offers (bezkassira-стиль).
+    
+    Args:
+        offers: словарь с ценами из JSON-LD
+        from_free_section: событие найдено в разделе "бесплатно"
     """
+    if not offers and from_free_section:
+        return "Бесплатно"
+    
     if not offers:
         return ""
+    
     # Важно: используем get с None-дефолтом и явную проверку на None,
     # иначе price=0 (falsy) будет заменён lowPrice
     price_val = offers.get("price")
     if price_val is None:
         price_val = offers.get("lowPrice")
+    if price_val is None and from_free_section:
+        return "Бесплатно"
     if price_val is None:
         return ""
+    
     try:
         price_val = float(price_val)
     except (TypeError, ValueError):
-        return ""
+        return "Бесплатно" if from_free_section else ""
+    
     if price_val == 0:
         return "Бесплатно"
+    
     # Убираем лишние нули: 60.00 → 60, 15.50 → 15.5
     amount = f"{price_val:g}"
     high_val = offers.get("highPrice")
@@ -377,7 +395,85 @@ def format_price_from_offers(offers: dict) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  ДАТА И ВРЕМЯ
+#  НОВЫЕ ФУНКЦИИ ДЛЯ ОБРАБОТКИ БЕСПЛАТНЫХ СОБЫТИЙ
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def mark_free_duplicates(all_events: list, free_events: list) -> list:
+    """
+    Проходит по списку бесплатных событий, находит их дубликаты в основном списке
+    и проставляет им цену "Бесплатно".
+    
+    Args:
+        all_events: список всех спарсенных событий (кроме free)
+        free_events: список событий из free-секции
+    
+    Returns:
+        Обновлённый список всех событий (события из free_events НЕ добавляются,
+        а только проставляют цену существующим событиям)
+    """
+    if not free_events:
+        return all_events
+    
+    # Строим индекс бесплатных событий для быстрого поиска
+    free_index = {}
+    for i, fe in enumerate(free_events):
+        key = (
+            normalize_title(fe.get("title", "")),
+            fe.get("event_date", ""),
+            normalize_place(fe.get("place", ""))
+        )
+        free_index[key] = fe
+    
+    # Проходим по основным событиям и ищем совпадения
+    result = []
+    marked_count = 0
+    processed_free_keys = set()
+    
+    for event in all_events:
+        key = (
+            normalize_title(event.get("title", "")),
+            event.get("event_date", ""),
+            normalize_place(event.get("place", ""))
+        )
+        
+        if key in free_index:
+            # Нашли дубликат из free-секции — проставляем бесплатную цену
+            marked_event = event.copy()
+            marked_event["price"] = "Бесплатно"
+            marked_event["_from_free_section"] = True
+            result.append(marked_event)
+            marked_count += 1
+            processed_free_keys.add(key)
+            logger.debug(f"🏷️ Проставлено 'Бесплатно' для: {event.get('title')} (категория: {event.get('category')})")
+        else:
+            result.append(event)
+    
+    if marked_count > 0:
+        logger.info(f"🏷️ Проставлено 'Бесплатно' для {marked_count} событий из free-секции")
+    
+    # ВАЖНО: события из free_events НЕ добавляем в результат!
+    # Они использовались только для проставления цены существующим событиям
+    if len(free_events) - marked_count > 0:
+        logger.info(f"ℹ️ {len(free_events) - marked_count} бесплатных событий не нашли дубликатов (пропущены)")
+    
+    return result
+
+
+def is_likely_free(event: dict) -> bool:
+    """
+    Проверяет, является ли событие вероятно бесплатным.
+    Используется для статистики и отладки.
+    """
+    price = event.get("price", "")
+    if not price:
+        return False
+    
+    price_lower = price.lower()
+    return "бесплатно" in price_lower or price == "0" or event.get("_from_free_section")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ДАТА И ВРЕМЯ (без изменений)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def parse_iso_datetime(iso: str) -> tuple[str, str]:
@@ -478,7 +574,7 @@ def is_future_date(date_str: str, max_days: int = 180) -> bool:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  ДЕДУПЛИКАЦИЯ
+#  ДЕДУПЛИКАЦИЯ (обновлённая с использованием новых функций)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def titles_are_similar(title_a: str, title_b: str, threshold: float = 0.82) -> bool:

@@ -403,20 +403,42 @@ def get_events_by_date_and_category(target_date: datetime, category: str | None 
     today_str = now_minsk.strftime("%Y-%m-%d")
     with get_db_connection() as conn:
         cursor = conn.cursor()
+        
+        # ОСОБЫЙ СЛУЧАЙ: категория "free" показывает ВСЕ бесплатные события
+        if category == "free":
+            query = """
+                SELECT id, title, details, description, event_date, show_time,
+                       place, location, price, category, source_url
+                FROM events 
+                WHERE event_date = ? AND price = 'Бесплатно'
+            """
+            params = [date_str]
+            
+            # Для сегодня — исключаем прошедшие сеансы
+            if date_str == today_str:
+                query += " AND (show_time = '' OR show_time IS NULL OR show_time > ?)"
+                params.append(now_minsk.strftime("%H:%M"))
+            
+            query += " ORDER BY show_time, title"
+            cursor.execute(query, params)
+            return cursor.fetchall()
+        
+        # Обычная категория (не free)
         query = """
             SELECT id, title, details, description, event_date, show_time,
                    place, location, price, category, source_url
             FROM events WHERE event_date = ?
         """
         params = [date_str]
-        if category == "free":
-            query += " AND category = 'free'"
-        elif category and category != "all":
+        
+        if category and category != "all":
             query += " AND category = ?"
             params.append(category)
+        
         if date_str == today_str:
             query += " AND (show_time = '' OR show_time IS NULL OR show_time > ?)"
             params.append(now_minsk.strftime("%H:%M"))
+        
         query += " ORDER BY show_time, title"
         cursor.execute(query, params)
         return cursor.fetchall()

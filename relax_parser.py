@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # relax_parser.py
-# Единый модуль для всех Relax-парсеров (theatre, concert, exhibition, kids)
+# Единый модуль для всех Relax-парсеров (theatre, concert, exhibition, kids, free)
 
 import os
 import re
 import sqlite3
 import logging
 import time
+import json
 from datetime import datetime
 from collections import defaultdict
 
@@ -45,6 +46,8 @@ class RelaxBaseParser:
     emoji = "🎉"
     clear_label = "событий"
     known_venues: list = []
+    # Флаг: если True, парсер не сохраняет в БД, а возвращает события через JSON
+    return_events_json: bool = False
 
     def __init__(self):
         self.base_url = "https://afisha.relax.by"
@@ -281,15 +284,24 @@ class RelaxBaseParser:
         events = self.parse_page(self.section_url)
 
         if events:
-            saved = self.save_events(events)
-            logger.info(f"Итого: найдено {len(events)}, сохранено {saved}")
-            print(f"   🧹 Очищены старые записи ({self.clear_label})")
-            print(f"   📊 Результаты:")
-            print(f"      ✅ Добавлено новых {self.clear_label}: {saved}")
-            print(f"RESULT:{self.clear_label}:{len(events)}:{saved}")
+            if self.return_events_json:
+                # Возвращаем события через JSON для централизованной обработки
+                logger.info(f"📦 Возвращаю {len(events)} событий через JSON")
+                print(f"EVENTS_JSON:{json.dumps(events, ensure_ascii=False)}")
+                # Для статистики всё равно выводим RESULT
+                print(f"RESULT:{self.clear_label}:{len(events)}:0")
+            else:
+                # Стандартное сохранение в БД
+                saved = self.save_events(events)
+                logger.info(f"Итого: найдено {len(events)}, сохранено {saved}")
+                print(f"   🧹 Очищены старые записи ({self.clear_label})")
+                print(f"   📊 Результаты:")
+                print(f"      ✅ Добавлено новых {self.clear_label}: {saved}")
+                print(f"RESULT:{self.clear_label}:{len(events)}:{saved}")
         else:
             logger.warning(f"{self.clear_label.capitalize()} не найдены")
             print(f"   ⚠️ {self.clear_label.capitalize()} не найдено")
+            print(f"RESULT:{self.clear_label}:0:0")
 
         logger.info("=" * 60)
 
@@ -412,8 +424,6 @@ class RelaxKidsParser(RelaxBaseParser):
     ]
 
 
-
-
 class RelaxPartyParser(RelaxBaseParser):
     path = "/clubs/minsk/"
     category = "party"
@@ -432,12 +442,31 @@ class RelaxPartyParser(RelaxBaseParser):
 
 
 class RelaxFreeParser(RelaxBaseParser):
+    """
+    Парсер бесплатных событий.
+    Возвращает события через JSON для обработки в run_all_parsers.py.
+    """
     path = "/free/minsk/"
     category = "free"
     source_name = "relax.by"
     emoji = "🆓"
     clear_label = "бесплатных событий"
     known_venues = []   # принимаем все места — бесплатные мероприятия везде
+    return_events_json = True  # включаем режим возврата JSON
+
+    def parse_page(self, url: str) -> list:
+        """Парсит бесплатные события и проставляет цену, если её нет."""
+        events = super().parse_page(url)
+        
+        # Проставляем цену "Бесплатно" для всех событий из этой секции
+        for event in events:
+            if not event.get("price") or event.get("price") == "":
+                event["price"] = "Бесплатно"
+            # Добавляем флаг, что событие из free-секции
+            event["_from_free_section"] = True
+        
+        logger.info(f"🆓 Бесплатных событий после обработки: {len(events)}")
+        return events
 
 
 class RelaxKinoParser(RelaxBaseParser):
@@ -621,7 +650,13 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         name = sys.argv[1]
         if name in PARSERS:
-            PARSERS[name]().run()
+            parser_class = PARSERS[name]
+            # Специальная обработка для free-парсера
+            if name == "free":
+                parser = parser_class()
+                parser.run()
+            else:
+                parser_class().run()
         else:
             print(f"Неизвестный парсер: {name}")
             print(f"Доступные: {', '.join(PARSERS)}")
@@ -629,4 +664,9 @@ if __name__ == "__main__":
     else:
         # Запуск всех
         for name, cls in PARSERS.items():
-            cls().run()
+            if name == "free":
+                # Для free используем специальную логику
+                parser = cls()
+                parser.run()
+            else:
+                cls().run()

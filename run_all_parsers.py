@@ -1,12 +1,23 @@
 #!/usr/bin/env python3
 # run_all_parsers.py
-# Последовательный запуск всех парсеров
+# Последовательный запуск всех парсеров с обработкой бесплатных событий
 
 import os
 import sys
 import subprocess
 import logging
+import json
+import sqlite3
 from datetime import datetime
+
+# Импортируем функцию из обновлённого нормализатора
+try:
+    from normalizer import mark_free_duplicates
+except ImportError:
+    # Заглушка, если функция ещё не добавлена
+    def mark_free_duplicates(all_events, free_events):
+        logger.warning("⚠️ mark_free_duplicates не найдена в normalizer, использую заглушку")
+        return all_events + free_events
 
 DB_PATH = os.getenv("DB_PATH", "/data/events_final.db")
 
@@ -15,52 +26,172 @@ logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("parser_cron.log"),
+        logging.FileHandler("parser_cron.log", encoding='utf-8'),
     ],
 )
 logger = logging.getLogger(__name__)
 
+# Категории парсеров с указанием, относятся ли они к бесплатным событиям
 PARSERS = [
-    ("relax_parser.py",     "🌐 Relax"),
-    ("ticketpro_parser.py", "🎫 Ticketpro"),
-    ("bezkassira_parser.py", "🎟 BezKassira"),
-    # ("afisha24_parser.py",  "🎭 24Afisha"),   # в разработке
-    # ("bycard_parser.py",    "🎭 Bycard"),      # в разработке
+    # Обычные парсеры
+    ("relax_parser.py theatre",     "🎭 Театр (Relax)",      False),
+    ("relax_parser.py concert",     "🎵 Концерты (Relax)",   False),
+    ("relax_parser.py exhibition",  "🖼️ Выставки (Relax)",   False),
+    ("relax_parser.py kids",        "🧸 Детям (Relax)",      False),
+    ("relax_parser.py party",       "🎉 Вечеринки (Relax)",  False),
+    ("relax_parser.py kino",        "🎬 Кино (Relax)",       False),
+    ("ticketpro_parser.py",         "🎫 Ticketpro",          False),
+    ("bezkassira_parser.py",        "🎟 BezKassira",         False),
+    
+    # Бесплатные парсеры
+    ("relax_parser.py free",        "🆓 Бесплатно (Relax)",  True),
+    
+    # В разработке
+    # ("afisha24_parser.py",        "🎭 24Afisha",           False),
+    # ("bycard_parser.py",          "🎭 Bycard",             False),
 ]
 
 
-def run_parser(cmd: str, parser_name: str) -> tuple[bool, list[str]]:
-    """Возвращает (success, result_lines) где result_lines — список RESULT:... строк."""
+def run_parser(cmd: str, parser_name: str) -> tuple[bool, list[str], list[dict]]:
+    """
+    Запускает парсер и возвращает:
+        success: bool - успешно ли завершился
+        result_lines: list[str] - строки RESULT:... для отчёта
+        events: list[dict] - спарсенные события (только от free-парсеров)
+    """
+    events = []
     try:
         logger.info(f"▶️ Запуск {parser_name} ({cmd})...")
         result = subprocess.run(
             [sys.executable] + cmd.split(),
-            capture_output=True, text=True, timeout=600,
+            capture_output=True, text=True, timeout=900,  # Увеличил таймаут до 15 минут
         )
+        
         if result.returncode == 0:
             logger.info(f"✅ {parser_name} завершён успешно")
             result_lines = []
+            
             if result.stdout:
                 for line in result.stdout.strip().split("\n"):
                     stripped = line.strip()
+                    
+                    # Логируем информационные строки
                     if any(w in stripped for w in ["✅", "❌", "📊", "🧹", "⚠️", "Добавлено", "Найдено"]):
                         logger.info(f"   {stripped}")
+                    
+                    # Собираем RESULT строки для отчёта
                     if stripped.startswith("RESULT:"):
                         result_lines.append(stripped)
-            return True, result_lines
+                    
+                    # Собираем JSON с бесплатными событиями
+                    if stripped.startswith("EVENTS_JSON:"):
+                        try:
+                            events_json = stripped[len("EVENTS_JSON:"):]
+                            events_data = json.loads(events_json)
+                            events.extend(events_data)
+                            logger.info(f"   📦 Получено {len(events_data)} событий")
+                        except Exception as e:
+                            logger.error(f"   ❌ Ошибка парсинга JSON событий: {e}")
+            
+            return True, result_lines, events
         else:
             logger.error(f"❌ {parser_name} завершился с ошибкой (код {result.returncode})")
             if result.stderr:
                 for line in result.stderr.strip().split("\n")[-5:]:
                     if line.strip():
                         logger.error(f"   {line}")
-            return False, []
+            return False, [], []
+            
     except subprocess.TimeoutExpired:
-        logger.error(f"⏰ {parser_name} превысил время ожидания (10 мин)")
-        return False, []
+        logger.error(f"⏰ {parser_name} превысил время ожидания (15 мин)")
+        return False, [], []
     except Exception as e:
         logger.error(f"💥 Ошибка при запуске {parser_name}: {e}")
-        return False, []
+        return False, [], []
+
+
+def load_events_from_db() -> list:
+    """
+    Загружает все события из БД для обработки бесплатных дубликатов.
+    """
+    events = []
+    try:
+        if not os.path.exists(DB_PATH):
+            logger.warning(f"⚠️ БД {DB_PATH} не найдена")
+            return []
+        
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        # Загружаем все события
+        cursor.execute("""
+            SELECT title, details, description, event_date, show_time,
+                   place, location, price, category, source_url, source_name
+            FROM events
+        """)
+        
+        rows = cursor.fetchall()
+        for row in rows:
+            events.append({
+                "title": row["title"],
+                "details": row["details"] or "",
+                "description": row["description"] or "",
+                "event_date": row["event_date"],
+                "show_time": row["show_time"] or "",
+                "place": row["place"] or "",
+                "location": row["location"] or "Минск",
+                "price": row["price"] or "",
+                "category": row["category"] or "other",
+                "source_url": row["source_url"] or "",
+                "source_name": row["source_name"] or "",
+            })
+        
+        conn.close()
+        logger.info(f"📚 Загружено {len(events)} событий из БД")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка загрузки из БД: {e}")
+    
+    return events
+
+
+def update_events_in_db(events: list) -> int:
+    """
+    Обновляет цены событий в БД (только для бесплатных).
+    """
+    if not events:
+        return 0
+    
+    updated = 0
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        for event in events:
+            # Обновляем только если цена изменилась на "Бесплатно"
+            if event.get("price") == "Бесплатно" and event.get("_from_free_section"):
+                cursor.execute("""
+                    UPDATE events 
+                    SET price = ?
+                    WHERE title = ? AND event_date = ? AND place = ?
+                """, (
+                    "Бесплатно",
+                    event["title"],
+                    event["event_date"],
+                    event["place"]
+                ))
+                if cursor.rowcount > 0:
+                    updated += 1
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"🔄 Обновлено цен в БД: {updated}")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка обновления БД: {e}")
+    
+    return updated
 
 
 def main():
@@ -71,19 +202,56 @@ def main():
     logger.info("=" * 60)
 
     success = failed = 0
-    all_results: list[str] = []   # все RESULT:... строки
+    all_results: list[str] = []
     parser_status: list[tuple] = []  # (name, ok, result_lines)
+    
+    # Собираем только бесплатные события через JSON
+    free_events = []
 
-    for cmd, name in PARSERS:
+    # Запускаем все парсеры
+    for cmd, name, is_free in PARSERS:
         logger.info("-" * 40)
-        ok, result_lines = run_parser(cmd, name)
+        ok, result_lines, events = run_parser(cmd, name)
+        
         if ok:
             success += 1
+            # Бесплатные события собираем отдельно
+            if is_free:
+                free_events.extend(events)
+                logger.info(f"   📦 Бесплатных событий получено: {len(events)}")
         else:
             failed += 1
+        
         all_results.extend(result_lines)
         parser_status.append((name, ok, result_lines))
         logger.info("-" * 40)
+
+    # Загружаем все события из БД
+    logger.info("=" * 40)
+    logger.info("📚 ЗАГРУЗКА СОБЫТИЙ ИЗ БД")
+    all_events = load_events_from_db()
+    
+    logger.info(f"📊 Загружено из БД: {len(all_events)}")
+    logger.info(f"🆓 Бесплатных событий из JSON: {len(free_events)}")
+
+    # Обрабатываем бесплатные события
+    logger.info("=" * 40)
+    logger.info("🔄 ОБРАБОТКА БЕСПЛАТНЫХ СОБЫТИЙ")
+    
+    if free_events:
+        # Применяем нормализацию для проставления бесплатных цен
+        final_events = mark_free_duplicates(all_events, free_events)
+        logger.info(f"📦 Событий после обработки: {len(final_events)}")
+        
+        # Подсчитываем статистику по бесплатным событиям
+        free_count = sum(1 for e in final_events if e.get("price") == "Бесплатно")
+        logger.info(f"🆓 Из них бесплатных: {free_count}")
+        
+        # Обновляем цены в БД
+        updated = update_events_in_db(final_events)
+        logger.info(f"💾 Обновлено в БД: {updated}")
+    else:
+        logger.info("ℹ️ Нет бесплатных событий для обработки")
 
     duration = (datetime.now() - start_time).total_seconds()
     logger.info("=" * 60)
@@ -93,10 +261,8 @@ def main():
     logger.info(f"📦 Всего:    {success + failed}")
     logger.info(f"⏱️  Время:    {duration:.1f} сек")
     logger.info("=" * 60)
-    logger.info(f"PARSER_STATS:{success}:{failed}:{success + failed}")
 
     # Машиночитаемый отчёт для бота
-    import json as _json
     report = {
         "success": success,
         "failed": failed,
@@ -105,13 +271,14 @@ def main():
             {
                 "name": name,
                 "ok": ok,
-                "results": result_lines,  # список RESULT:... строк
+                "results": result_lines,
             }
             for name, ok, result_lines in parser_status
         ],
         "all_results": all_results,
     }
-    print(f"PARSER_REPORT:{_json.dumps(report, ensure_ascii=False)}")
+    print(f"PARSER_REPORT:{json.dumps(report, ensure_ascii=False)}")
+    
     return 1 if failed > 0 else 0
 
 
