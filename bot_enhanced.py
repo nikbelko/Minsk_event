@@ -829,12 +829,18 @@ def build_page_keyboard(data: dict):
                 _seen_cats[cat].add(key)
                 category_counts[cat] += 1
     if len(category_counts) > 1:
-        row = []
-        for cat_key, cat_name in CATEGORY_NAMES.items():
-            if cat_key in category_counts:
-                row.append(InlineKeyboardButton(f"{cat_name} ({category_counts[cat_key]})", callback_data=f"filter_{cat_key}"))
-                if len(row) == 2: keyboard.append(row); row = []
-        if row: keyboard.append(row)
+    row = []
+    for cat_key, cat_name in CATEGORY_NAMES.items():
+        if cat_key in category_counts:
+            # Показываем название категории с количеством событий в текущей подборке
+            count = category_counts.get(cat_key, 0)
+            btn_text = f"{cat_name} ({count})" if count > 0 else cat_name
+            row.append(InlineKeyboardButton(btn_text, callback_data=f"filter_{cat_key}"))
+            if len(row) == 2: 
+                keyboard.append(row)
+                row = []
+    if row: 
+        keyboard.append(row))
     if max_page > 0:
         keyboard.append([
             InlineKeyboardButton("◀️", callback_data="page_prev") if page > 0 else InlineKeyboardButton(" ", callback_data="page_noop"),
