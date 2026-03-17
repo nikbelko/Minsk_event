@@ -840,7 +840,7 @@ def build_page_keyboard(data: dict):
                 keyboard.append(row)
                 row = []
     if row: 
-        keyboard.append(row))
+        keyboard.append(row)
     if max_page > 0:
         keyboard.append([
             InlineKeyboardButton("◀️", callback_data="page_prev") if page > 0 else InlineKeyboardButton(" ", callback_data="page_noop"),
