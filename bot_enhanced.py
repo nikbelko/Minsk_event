@@ -814,6 +814,7 @@ def build_page_keyboard(data: dict):
     total = len(events)
     max_page = max(0, (total - 1) // per_page)
     keyboard = []
+    
     # Считаем уникальные события (как после группировки) — title+place
     category_counts = defaultdict(int)
     _seen_cats: dict = defaultdict(set)
@@ -828,30 +829,37 @@ def build_page_keyboard(data: dict):
             if key not in _seen_cats[cat]:
                 _seen_cats[cat].add(key)
                 category_counts[cat] += 1
+    
+    # Кнопки фильтрации по категориям с количеством
     if len(category_counts) > 1:
-    row = []
-    for cat_key, cat_name in CATEGORY_NAMES.items():
-        if cat_key in category_counts:
-            # Показываем название категории с количеством событий в текущей подборке
-            count = category_counts.get(cat_key, 0)
-            btn_text = f"{cat_name} ({count})" if count > 0 else cat_name
-            row.append(InlineKeyboardButton(btn_text, callback_data=f"filter_{cat_key}"))
-            if len(row) == 2: 
-                keyboard.append(row)
-                row = []
-    if row: 
-        keyboard.append(row)
+        row = []
+        for cat_key, cat_name in CATEGORY_NAMES.items():
+            if cat_key in category_counts:
+                count = category_counts.get(cat_key, 0)
+                btn_text = f"{cat_name} ({count})" if count > 0 else cat_name
+                row.append(InlineKeyboardButton(btn_text, callback_data=f"filter_{cat_key}"))
+                if len(row) == 2:
+                    keyboard.append(row)
+                    row = []
+        if row:
+            keyboard.append(row)
+    
+    # Кнопки пагинации
     if max_page > 0:
         keyboard.append([
             InlineKeyboardButton("◀️", callback_data="page_prev") if page > 0 else InlineKeyboardButton(" ", callback_data="page_noop"),
             InlineKeyboardButton(f"{page + 1}/{max_page + 1}", callback_data="page_noop"),
             InlineKeyboardButton("▶️", callback_data="page_next") if page < max_page else InlineKeyboardButton(" ", callback_data="page_noop"),
         ])
+    
+    # Кнопка поделиться
     share_q = data.get("share_query") or ""
     keyboard.append([
         InlineKeyboardButton("📤 Поделиться подборкой", switch_inline_query=share_q)
     ])
+    
     return InlineKeyboardMarkup(keyboard) if keyboard else None
+
 async def show_page(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     data = context.user_data.get("pagination")
     if not data:
