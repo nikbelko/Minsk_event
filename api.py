@@ -482,9 +482,12 @@ def submit_event(event: EventSubmit):
             raise HTTPException(status_code=400, detail="Для одного дня не указывайте дату окончания.")
         if (d_to - d_from).days > 90:
             raise HTTPException(status_code=400, detail="Период не может быть больше 90 дней.")
-        dates = _dates_in_range(event.event_date, event.event_date_to)
+        # НЕ создаем список дат, только проверяем период
+        is_period = True
+        event_date_value = f"{event.event_date}|{event.event_date_to}"
     else:
-        dates = [event.event_date]
+        is_period = False
+        event_date_value = event.event_date
 
     # ── Проверка дубликата ───────────────────────────────────────────────────
     def _norm(s: str) -> str:
@@ -493,90 +496,101 @@ def submit_event(event: EventSubmit):
     t_norm = _norm(event.title)
     p_norm = _norm(event.place)
 
+    # Для проверки дубликата используем первую дату (если период)
+    check_date = event.event_date
+
     with get_db() as conn:
-        for chk_date in dates[:1]:  # проверяем первую дату
-            # Уровень 1: title + date + place
-            rows = conn.execute(
-                "SELECT id, title, event_date, place FROM events "
-                "WHERE event_date = ? AND LOWER(title) LIKE ? AND LOWER(COALESCE(place,'')) LIKE ?",
-                (chk_date, f"%{t_norm[:20]}%", f"%{p_norm[:20]}%")
-            ).fetchall()
-            for r in rows:
-                if _norm(r["title"]) == t_norm and _norm(r["place"] or "") == p_norm:
-                    try:
-                        from datetime import datetime as _dt
-                        d_fmt = _dt.strptime(r["event_date"], "%Y-%m-%d").strftime("%d.%m.%Y")
-                    except Exception:
-                        d_fmt = r["event_date"]
-                    raise HTTPException(status_code=409, detail=f"Событие уже есть в афише: «{r['title']}» {d_fmt}")
+        # Уровень 1: title + date + place
+        rows = conn.execute(
+            "SELECT id, title, event_date, place FROM events "
+            "WHERE event_date = ? AND LOWER(title) LIKE ? AND LOWER(COALESCE(place,'')) LIKE ?",
+            (check_date, f"%{t_norm[:20]}%", f"%{p_norm[:20]}%")
+        ).fetchall()
+        for r in rows:
+            if _norm(r["title"]) == t_norm and _norm(r["place"] or "") == p_norm:
+                try:
+                    from datetime import datetime as _dt
+                    d_fmt = _dt.strptime(r["event_date"], "%Y-%m-%d").strftime("%d.%m.%Y")
+                except Exception:
+                    d_fmt = r["event_date"]
+                raise HTTPException(status_code=409, detail=f"Событие уже есть в афише: «{r['title']}» {d_fmt}")
 
-            # Уровень 2: title + date (без места)
-            rows = conn.execute(
-                "SELECT id, title, event_date, place FROM events "
-                "WHERE event_date = ? AND LOWER(title) LIKE ?",
-                (chk_date, f"%{t_norm[:20]}%")
-            ).fetchall()
-            for r in rows:
-                if _norm(r["title"]) == t_norm:
-                    try:
-                        from datetime import datetime as _dt
-                        d_fmt = _dt.strptime(r["event_date"], "%Y-%m-%d").strftime("%d.%m.%Y")
-                    except Exception:
-                        d_fmt = r["event_date"]
-                    raise HTTPException(status_code=409, detail=f"Событие уже есть в афише: «{r['title']}» {d_fmt}")
+        # Уровень 2: title + date (без места)
+        rows = conn.execute(
+            "SELECT id, title, event_date, place FROM events "
+            "WHERE event_date = ? AND LOWER(title) LIKE ?",
+            (check_date, f"%{t_norm[:20]}%")
+        ).fetchall()
+        for r in rows:
+            if _norm(r["title"]) == t_norm:
+                try:
+                    from datetime import datetime as _dt
+                    d_fmt = _dt.strptime(r["event_date"], "%Y-%m-%d").strftime("%d.%m.%Y")
+                except Exception:
+                    d_fmt = r["event_date"]
+                raise HTTPException(status_code=409, detail=f"Событие уже есть в афише: «{r['title']}» {d_fmt}")
 
-            # Проверяем pending_events
-            rows_p = conn.execute(
-                "SELECT id, title, event_date FROM pending_events "
-                "WHERE event_date LIKE ? AND status NOT IN ('rejected','approved') AND LOWER(title) LIKE ?",
-                (f"%{chk_date}%", f"%{t_norm[:20]}%")
-            ).fetchall()
-            for r in rows_p:
-                if _norm(r["title"]) == t_norm:
-                    raise HTTPException(status_code=409, detail=f"Событие уже отправлено на модерацию: «{r['title']}»")
-
+        # Проверяем pending_events
+        rows_p = conn.execute(
+            "SELECT id, title, event_date FROM pending_events "
+            "WHERE event_date LIKE ? AND status NOT IN ('rejected','approved') AND LOWER(title) LIKE ?",
+            (f"%{check_date}%", f"%{t_norm[:20]}%")
+        ).fetchall()
+        for r in rows_p:
+            if _norm(r["title"]) == t_norm:
+                raise HTTPException(status_code=409, detail=f"Событие уже отправлено на модерацию: «{r['title']}»")
 
     try:
-        pending_ids = []
         user_id   = event.tg_user_id or 0
         username  = event.tg_username or "web_user"
         first_name = event.tg_first_name or "Web"
+        
         with get_db() as conn:
             cursor = conn.cursor()
-            for d in dates:
-                cursor.execute("""
-                    INSERT INTO pending_events
-                        (user_id, username, first_name, title, event_date, show_time,
-                         place, address, category, details, description, price, source_url,
-                         status, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    user_id, username, first_name,
-                    event.title, d, event.show_time or "",
-                    event.place, event.address or "",
-                    event.category,
-                    event.details or "",
-                    event.description or "",
-                    event.price or "", event.source_url or "",
-                    "pending",
-                    datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"),
-                ))
-                pending_ids.append(cursor.lastrowid)
+            
+            # Сохраняем ОДНУ запись, даже если это период
+            cursor.execute("""
+                INSERT INTO pending_events
+                    (user_id, username, first_name, title, event_date, show_time,
+                     place, address, category, details, description, price, source_url,
+                     status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                user_id, username, first_name,
+                event.title,
+                event_date_value,  # ← теперь период или одна дата
+                event.show_time or "",
+                event.place,
+                event.address or "",
+                event.category,
+                event.details or "",
+                event.description or "",
+                event.price or "",
+                event.source_url or "",
+                "pending",
+                datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+            ))
+            pending_id = cursor.lastrowid
+            
             # Логируем в user_stats
             conn.execute(
                 "INSERT INTO user_stats (user_id, username, first_name, action, detail, created_at) VALUES (?,?,?,?,?,?)",
-                (user_id, username, first_name, "web_submit_event", event.title,
+                (user_id, username, first_name, "web_submit_event", 
+                 f"{event.title} ({event_date_value})",
                  datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"))
             )
             conn.commit()
-        pending_id = pending_ids[0]
-        days_info = f" ({len(dates)} дней)" if len(dates) > 1 else ""
+        
+        # Формируем информацию о датах для уведомления
+        days_info = ""
+        date_info = event.event_date
+        if is_period:
+            days_count = (d_to - d_from).days + 1
+            days_info = f" ({days_count} дней)"
+            date_info = f"{event.event_date} → {event.event_date_to}"
 
         # Уведомление админу в Telegram
         if BOT_TOKEN and ADMIN_ID:
-            date_info = event.event_date
-            if event.event_date_to and event.event_date_to > event.event_date:
-                date_info = f"{event.event_date} → {event.event_date_to}{days_info}"
             lines = [
                 "🌐 <b>Новое событие с сайта</b>",
                 f"📌 <b>{event.title}</b>",
@@ -585,7 +599,7 @@ def submit_event(event: EventSubmit):
             if event.details:
                 lines.append(f"📝 Формат: {event.details}")
             lines += [
-                f"📅 Дата: {date_info}" + (f" ⏰ {event.show_time}" if event.show_time else ""),
+                f"📅 Дата: {date_info}{days_info}" + (f" ⏰ {event.show_time}" if event.show_time else ""),
                 f"🏢 Место: {event.place}" + (f", {event.address}" if event.address else ""),
             ]
             if event.price:
@@ -596,6 +610,7 @@ def submit_event(event: EventSubmit):
                 lines.append(f"🔗 {event.source_url}")
             lines.append(f"\n<i>ID в очереди: #{pending_id}</i>")
             text = "\n".join(lines)
+            
             try:
                 with httpx.Client(timeout=5) as client:
                     client.post(
@@ -621,6 +636,7 @@ def submit_event(event: EventSubmit):
                 pass  # не блокируем ответ если TG недоступен
 
         return {"ok": True, "message": "Событие отправлено на модерацию"}
+        
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

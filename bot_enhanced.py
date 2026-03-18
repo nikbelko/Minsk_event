@@ -1892,6 +1892,7 @@ def approve_pending_event(pending_id: int) -> bool:
         row = cursor.fetchone()
         if not row:
             return False
+        
         _addr = (row["address"] or "") if "address" in row.keys() else ""
         # Читаем details и description (с фолбеком на старые БД)
         try:
@@ -1904,6 +1905,7 @@ def approve_pending_event(pending_id: int) -> bool:
             _description = row["description"] or ""
         except Exception:
             _description = ""
+            
         # Период дат: "2026-04-15|2026-04-20" → несколько записей
         event_date_raw = row["event_date"] or ""
         if "|" in event_date_raw:
@@ -1919,6 +1921,7 @@ def approve_pending_event(pending_id: int) -> bool:
                 dates = [_date.fromisoformat(event_date_raw)]
             except Exception:
                 dates = []
+                
         for d in dates:
             try:
                 _end_time = row["end_time"] or ""
@@ -1936,11 +1939,14 @@ def approve_pending_event(pending_id: int) -> bool:
                 d.strftime("%Y-%m-%d"),
                 row["show_time"] or "",
                 _end_time,
-                row["place"] or "", _addr or "Минск",
+                row["place"] or "", 
+                _addr or "Минск",
                 row["price"] or "",
                 row["category"] or "other",
-                "user_submitted", row["source_url"] or "",
+                "user_submitted", 
+                row["source_url"] or "",
             ))
+            
         cursor.execute("UPDATE pending_events SET status = 'approved' WHERE id = ?", (pending_id,))
         conn.commit()
         return True
