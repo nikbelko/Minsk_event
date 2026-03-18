@@ -47,6 +47,9 @@ HEADERS = {
 CATEGORIES = [
     {"url": f"{BASE_URL}/events/concert/", "category": "concert",  "label": "концертов"},
     {"url": f"{BASE_URL}/events/party/",   "category": "party",    "label": "вечеринок"},
+    {"url": f"{BASE_URL}/events/humor-minsk/",  "category": "concert",  "label": "юмора"},
+    {"url": f"{BASE_URL}/events/biznes/",  "category": "education",  "label": "обучений"},
+    {"url": f"{BASE_URL}/events/it_i_internet/",  "category": "education",  "label": "обучений"},
 ]
 
 
@@ -99,8 +102,8 @@ class BezkassiraParser:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT title, event_date, place, show_time
-            FROM events WHERE source_name != ?
-        """, (SOURCE_NAME,))
+            FROM events
+        """)
         rows = cursor.fetchall()
         conn.close()
         index = {}
@@ -256,7 +259,7 @@ class BezkassiraParser:
         self.stats["found"] += len(thumbnails)
         self.stats["by_category"][label] = {
             "found": len(thumbnails),
-            "parsed": len(events),
+            "saved": len(events),
         }
         logger.info(f"  → Минск / не дубль: {len(events)}")
         return events
@@ -268,6 +271,13 @@ class BezkassiraParser:
             return 0
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
+
+        # удаляем все свои старые записи
+        cursor.execute("DELETE FROM events WHERE source_name = ?", (SOURCE_NAME,))
+        deleted = cursor.rowcount
+        if deleted:
+            logger.info(f"🗑️ Удалено {deleted} старых записей {SOURCE_NAME}")
+
         saved = 0
         for ev in events:
             try:

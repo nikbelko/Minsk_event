@@ -231,23 +231,29 @@ class RelaxBaseParser:
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
 
-            cursor.execute("DELETE FROM events WHERE category = ?", (self.category,))
+            # Удаляем ТОЛЬКО свои старые записи этой категории
+            cursor.execute("DELETE FROM events WHERE source_name = 'relax.by' AND category = ?", (self.category,))
             deleted = cursor.rowcount
-            logger.info(f"Удалено старых записей: {deleted}")
+            logger.info(f"Удалено старых записей relax: {deleted}")
 
-            # Загружаем ключи других relax-категорий чтобы не дублировать
-            # (выставка для детей может попасть и в exhibition и в kids)
+            # Загружаем для проверки дубликатов:
+            # 1. Другие категории relax (чтобы не дублировать внутри relax)
+            # 2. Пользовательские события (чтобы не создавать дубли с пользователями)
             cursor.execute("""
                 SELECT title, event_date, place FROM events
-                WHERE category != ? AND source_name = 'relax.by'
+                WHERE (source_name = 'relax.by' AND category != ?)  -- другие категории relax
+                   OR source_name = 'user_submitted'                 -- пользовательские события
             """, (self.category,))
+            
             existing_other = set((r[0], r[1], r[2]) for r in cursor.fetchall())
+            logger.info(f"Загружено для проверки дублей: {len(existing_other)} записей")
 
             new_count = skip_dup = 0
             for event in events:
                 dup_key = (event["title"], event["event_date"], event["place"])
                 if dup_key in existing_other:
                     skip_dup += 1
+                    logger.debug(f"Дубликат с другой категорией relax или пользователем: {event['title']}")
                     continue
                 try:
                     cursor.execute("""
@@ -598,8 +604,8 @@ class RelaxKinoParser(RelaxBaseParser):
         try:
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM events WHERE category = 'cinema'")
-            logger.info(f"Удалено старых сеансов: {cursor.rowcount}")
+            cursor.execute("DELETE FROM events WHERE source_name = 'relax.by' AND category = 'cinema'")
+            logger.info(f"Удалено старых сеансов relax: {cursor.rowcount}")
 
             seen = set()
             new_count = 0
