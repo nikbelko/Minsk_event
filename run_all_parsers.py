@@ -42,13 +42,13 @@ PARSERS = [
     ("relax_parser.py kino",        "🎬 Кино (Relax)",       False),
     ("ticketpro_parser.py",         "🎫 Ticketpro",          False),
     ("bezkassira_parser.py",        "🎟 BezKassira",         False),
+    ("bycard_parser.py",            "🎭 Bycard",             False),
     
     # Бесплатные парсеры
     ("relax_parser.py free",        "🆓 Бесплатно (Relax)",  True),
     
     # В разработке
     # ("afisha24_parser.py",        "🎭 24Afisha",           False),
-    # ("bycard_parser.py",          "🎭 Bycard",             False),
 ]
 
 

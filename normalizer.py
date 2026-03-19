@@ -138,9 +138,10 @@ PLACE_ALIASES: dict[str, str] = {
 
     # ДК Ветеранов
     "дк «ветеранов»":                  "ДК Ветеранов",
-    "дк \"ветеранов\"":                 "ДК Ветеранов",
+    "дк \"ветеранов\"":                "ДК Ветеранов",
     "дк ветеранов":                    "ДК Ветеранов",
     "дворец культуры ветеранов":       "ДК Ветеранов",
+    "дворец ветеранов":                "ДК Ветеранов",
 
     # Верхний город
     "верхний город":                   "Концертный зал Верхний город",
@@ -227,11 +228,20 @@ def normalize_place(place: str, known_venues: list | None = None) -> str:
     if not place:
         return ""
 
-    # Проверяем known_venues до любой очистки — relax передаёт канонические имена напрямую
+    # Проверяем known_venues до любой очистки — relax передаёт канонические имена напрямую.
+    # После матча прогоняем через PLACE_ALIASES чтобы получить канонический вариант
+    # (например "Филармония" → "Белорусская государственная филармония").
     if known_venues:
         place_lower = place.lower()
         for venue in known_venues:
             if venue.lower() in place_lower:
+                # Ищем канонический вариант в PLACE_ALIASES
+                venue_lower = venue.lower()
+                for alias, canonical in PLACE_ALIASES.items():
+                    alias_clean = re.sub(r'[«»"„"]', "", alias).strip()
+                    if alias_clean == venue_lower or alias_clean in venue_lower:
+                        return canonical
+                # Не нашли в словаре — возвращаем как есть из known_venues
                 return venue
 
     # Убираем «Минск,» в начале
