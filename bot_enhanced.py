@@ -831,18 +831,19 @@ def build_page_keyboard(data: dict):
                 _seen_cats[cat].add(key)
                 category_counts[cat] += 1
     
-    # Считаем бесплатные события из raw_events (по price='Бесплатно')
-    # Работает для любого режима: сегодня/завтра/выходные/ближайшие
+    # Считаем бесплатные события из raw_events по price='Бесплатно' —
+    # сюда попадают события ЛЮБОЙ категории с этой ценой, не только category='free'.
+    # Всегда перезаписываем category_counts["free"], чтобы не занижать счётчик
+    # в случае когда среди событий есть и category='free' (1 шт.) и price='Бесплатно'
+    # у событий других категорий (ещё N шт.).
     raw_events = data.get("events", [])
     free_count = len({
         (e.get("title", ""), e.get("event_date", ""), e.get("place") or "")
         for e in raw_events
         if (e.get("price") or "") == "Бесплатно"
     })
-    
-    # Если есть бесплатные события и их нет в текущей подборке — добавляем кнопку
-    if free_count > 0 and "free" not in category_counts:
-        category_counts["free"] = free_count
+    if free_count > 0:
+        category_counts["free"] = free_count  # перезаписываем всегда
     
     # Кнопки фильтрации по категориям
     if len(category_counts) > 1:
