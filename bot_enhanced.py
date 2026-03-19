@@ -813,7 +813,6 @@ def build_page_keyboard(data: dict):
     per_page = data["per_page"]
     total = len(events)
     max_page = max(0, (total - 1) // per_page)
-    target_date = data.get("target_date")
     keyboard = []
     
     # Считаем уникальные события (как после группировки) — title+place
@@ -832,18 +831,16 @@ def build_page_keyboard(data: dict):
                 _seen_cats[cat].add(key)
                 category_counts[cat] += 1
     
-    # Получаем количество бесплатных событий на дату
-    free_count = 0
-    if target_date:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT COUNT(*) FROM events WHERE event_date = ? AND price = 'Бесплатно'",
-                (target_date,)
-            )
-            free_count = cursor.fetchone()[0]
+    # Считаем бесплатные события из raw_events (по price='Бесплатно')
+    # Работает для любого режима: сегодня/завтра/выходные/ближайшие
+    raw_events = data.get("events", [])
+    free_count = len({
+        (e.get("title", ""), e.get("event_date", ""), e.get("place") or "")
+        for e in raw_events
+        if (e.get("price") or "") == "Бесплатно"
+    })
     
-    # Если есть бесплатные события и их нет в текущей подборке, добавляем
+    # Если есть бесплатные события и их нет в текущей подборке — добавляем кнопку
     if free_count > 0 and "free" not in category_counts:
         category_counts["free"] = free_count
     
