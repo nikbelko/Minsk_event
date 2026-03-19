@@ -813,7 +813,6 @@ def build_page_keyboard(data: dict):
     per_page = data["per_page"]
     total = len(events)
     max_page = max(0, (total - 1) // per_page)
-    target_date = data.get("target_date")
     keyboard = []
     
     # Считаем уникальные события (как после группировки) — title+place
@@ -832,20 +831,19 @@ def build_page_keyboard(data: dict):
                 _seen_cats[cat].add(key)
                 category_counts[cat] += 1
     
-    # Получаем количество бесплатных событий на дату
-    free_count = 0
-    if target_date:
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT COUNT(*) FROM events WHERE event_date = ? AND price = 'Бесплатно'",
-                (target_date,)
-            )
-            free_count = cursor.fetchone()[0]
-    
-    # Если есть бесплатные события и их нет в текущей подборке, добавляем
-    if free_count > 0 and "free" not in category_counts:
-        category_counts["free"] = free_count
+    # Считаем бесплатные события из raw_events по price='Бесплатно' —
+    # сюда попадают события ЛЮБОЙ категории с этой ценой, не только category='free'.
+    # Всегда перезаписываем category_counts["free"], чтобы не занижать счётчик
+    # в случае когда среди событий есть и category='free' (1 шт.) и price='Бесплатно'
+    # у событий других категорий (ещё N шт.).
+    raw_events = data.get("events", [])
+    free_count = len({
+        (e.get("title", ""), e.get("event_date", ""), e.get("place") or "")
+        for e in raw_events
+        if (e.get("price") or "") == "Бесплатно"
+    })
+    if free_count > 0:
+        category_counts["free"] = free_count  # перезаписываем всегда
     
     # Кнопки фильтрации по категориям
     if len(category_counts) > 1:
@@ -1269,7 +1267,7 @@ async def show_pending_list(update_or_query, context: ContextTypes.DEFAULT_TYPE)
 
     text = "\n".join(lines)[:4000]
     kbd = InlineKeyboardMarkup(keyboard)
-    # Всегда отправляем новым сообщением — чтобы /admin панель оставалась видна
+    # Всегда reply_text — чтобы /admin панель оставалась видна
     await update_or_query.message.reply_text(text, reply_markup=kbd, parse_mode="HTML")
 
 
@@ -2648,8 +2646,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "🎯 Категории":
         log_user_action(user.id, user.username, user.first_name, "menu_categories")
         counts = get_events_count_by_category()
-        # Строим список: сначала известные категории в нужном порядке,
-        # потом неизвестные из БД — чтобы новые категории появлялись автоматически
+        # Сначала известные категории в нужном порядке,
+        # потом любые новые из БД — появляются автоматически
         ordered = {}
         for cat in CATEGORY_NAMES:
             if counts.get(cat, 0) > 0:
