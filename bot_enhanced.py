@@ -162,6 +162,7 @@ def init_db():
         for col_sql in [
             "ALTER TABLE pending_events ADD COLUMN details TEXT DEFAULT ''",
             "ALTER TABLE pending_events ADD COLUMN end_time TEXT DEFAULT ''",
+            "ALTER TABLE pending_events ADD COLUMN is_promo INTEGER DEFAULT 0",
             "ALTER TABLE events ADD COLUMN end_time TEXT DEFAULT ''",
             "ALTER TABLE subscriptions ADD COLUMN status TEXT DEFAULT 'active'",
         ]:
@@ -1653,7 +1654,7 @@ def build_fields_keyboard(data: dict, mode: str = "submit") -> InlineKeyboardMar
         if required:
             mark = " ✅" if val else " ❗"
         else:
-            mark = " ✅" if val else ""   # все галочки одинаковые
+            mark = " ✅" if val else ""
         btn = InlineKeyboardButton(f"{emoji} {label}{mark}",
                                    callback_data=f"{mode}_field_{field}")
         row.append(btn)
@@ -1662,6 +1663,10 @@ def build_fields_keyboard(data: dict, mode: str = "submit") -> InlineKeyboardMar
     if row:
         rows.append(row)
     if mode == "submit":
+        # Кнопка промо-публикации (тоггл)
+        is_promo = data.get("is_promo", False)
+        promo_label = "📣 Промо: ВКЛ ✅" if is_promo else "📣 Промо: ВЫКЛ"
+        rows.append([InlineKeyboardButton(promo_label, callback_data="submit_toggle_promo")])
         rows.append([InlineKeyboardButton("👁 Предпросмотр", callback_data="submit_preview")])
         rows.append([
             InlineKeyboardButton("✅ Отправить на модерацию", callback_data="submit_confirm"),
@@ -1675,6 +1680,87 @@ def build_fields_keyboard(data: dict, mode: str = "submit") -> InlineKeyboardMar
             InlineKeyboardButton("❌ Отмена", callback_data=f"mod_edit_cancel_{pending_id}"),
         ])
     return InlineKeyboardMarkup(rows)
+
+
+def format_promo_post(data: dict) -> str:
+    """Форматирует промо-анонс события для публикации в канал."""
+    import html as _html
+    cat_emoji = CATEGORY_EMOJI.get(data.get("category", "other"), "🎉")
+    title = _html.escape(data.get("title", ""))
+
+    # Дата
+    ed = data.get("event_date", "")
+    if "|" in str(ed):
+        parts = ed.split("|", 1)
+        try:
+            d1 = datetime.strptime(parts[0].strip(), "%Y-%m-%d").strftime("%d.%m.%Y")
+            d2 = datetime.strptime(parts[1].strip(), "%Y-%m-%d").strftime("%d.%m.%Y")
+            date_str = f"{d1} — {d2}"
+        except Exception:
+            date_str = ed
+    else:
+        try:
+            date_str = datetime.strptime(ed, "%Y-%m-%d").strftime("%d.%m.%Y")
+        except Exception:
+            date_str = ed
+
+    lines = [
+        f"🔥 <b>Новое событие в Минске!</b>",
+        "",
+        f"{cat_emoji} <b>{title}</b>",
+    ]
+    if data.get("details"):
+        lines.append(f"📖 {_html.escape(data['details'][:200])}")
+    lines.append(f"📅 {date_str}" + (f" ⏰ {data['show_time']}" if data.get("show_time") else ""))
+    if data.get("place"):
+        lines.append(f"🏢 {_html.escape(data['place'])}")
+    if data.get("address"):
+        lines.append(f"📍 {_html.escape(data['address'])}")
+    if data.get("price"):
+        lines.append(f"💰 {_html.escape(data['price'])}")
+    if data.get("description"):
+        lines.append(f"\n{_html.escape(data['description'][:400])}")
+    if data.get("source_url"):
+        lines.append(f"\n🔗 <a href=\"{_html.escape(data['source_url'])}\">Подробнее</a>")
+    lines.append("\n👉 @Minskdvizh_bot | #афишаминск")
+    return "\n".join(lines)
+
+
+async def send_promo_to_subscribers(bot, row_data: dict) -> int:
+    """Рассылает промо-анонс подписчикам категории события.
+    Возвращает количество успешно отправленных сообщений."""
+    category = row_data.get("category", "")
+    if not category:
+        return 0
+
+    # Берём подписчиков всех date_type этой категории — дедупликация по user_id
+    subscribers = get_all_subscribers()
+    user_ids = set()
+    for (cat, _dt), ids in subscribers.items():
+        if cat == category:
+            user_ids.update(ids)
+
+    if not user_ids:
+        logger.info(f"Промо: нет подписчиков категории {category}")
+        return 0
+
+    text = format_promo_post(row_data)
+    sent = 0
+    for user_id in user_ids:
+        try:
+            await bot.send_message(
+                chat_id=user_id,
+                text=text,
+                parse_mode="HTML",
+                disable_web_page_preview=False,
+            )
+            sent += 1
+            await asyncio.sleep(0.05)  # вежливая пауза
+        except Exception as e:
+            logger.warning(f"Промо подписчику {user_id}: {e}")
+
+    logger.info(f"📣 Промо разослано {sent} подписчикам категории {category}")
+    return sent
 
 
 def validate_field(field: str, text: str):
@@ -1763,8 +1849,8 @@ def save_pending_event(user_id, username, first_name, data: dict) -> int:
         cursor.execute("""
             INSERT INTO pending_events
               (user_id, username, first_name, title, event_date, show_time, end_time,
-               place, address, category, details, description, price, source_url, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               place, address, category, details, description, price, source_url, is_promo, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             user_id, username, first_name,
             data.get("title", ""),
@@ -1778,6 +1864,7 @@ def save_pending_event(user_id, username, first_name, data: dict) -> int:
             data.get("description", ""),
             data.get("price", ""),
             data.get("source_url", ""),
+            1 if data.get("is_promo") else 0,
             datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"),
         ))
         conn.commit()
@@ -1874,29 +1961,28 @@ def _fmt_duplicate_reason(dup: dict) -> str:
     )
 
 
-def approve_pending_event(pending_id: int) -> bool:
+def approve_pending_event(pending_id: int) -> tuple[bool, dict | None]:
+    """Одобряет событие. Возвращает (success, row_data) — row_data нужен для промо."""
     from datetime import date as _date, timedelta as _td
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM pending_events WHERE id = ?", (pending_id,))
         row = cursor.fetchone()
         if not row:
-            return False
-        
+            return False, None
+
         _addr = (row["address"] or "") if "address" in row.keys() else ""
-        # Читаем details и description (с фолбеком на старые БД)
         try:
             _details = row["details"] or ""
         except Exception:
             _details = ""
         if not _details:
-            _details = row["description"] or ""  # фолбек для старых записей
+            _details = row["description"] or ""
         try:
             _description = row["description"] or ""
         except Exception:
             _description = ""
-            
-        # Период дат: "2026-04-15|2026-04-20" → несколько записей
+
         event_date_raw = row["event_date"] or ""
         if "|" in event_date_raw:
             parts = event_date_raw.split("|", 1)
@@ -1911,7 +1997,7 @@ def approve_pending_event(pending_id: int) -> bool:
                 dates = [_date.fromisoformat(event_date_raw)]
             except Exception:
                 dates = []
-                
+
         for d in dates:
             try:
                 _end_time = row["end_time"] or ""
@@ -1929,17 +2015,20 @@ def approve_pending_event(pending_id: int) -> bool:
                 d.strftime("%Y-%m-%d"),
                 row["show_time"] or "",
                 _end_time,
-                row["place"] or "", 
+                row["place"] or "",
                 _addr or "Минск",
                 row["price"] or "",
                 row["category"] or "other",
-                "user_submitted", 
+                "user_submitted",
                 row["source_url"] or "",
             ))
-            
+
         cursor.execute("UPDATE pending_events SET status = 'approved' WHERE id = ?", (pending_id,))
         conn.commit()
-        return True
+
+        # Возвращаем данные для промо-публикации
+        row_data = dict(row)
+        return True, row_data
 
 
 def reject_pending_event(pending_id: int):
@@ -2833,19 +2922,32 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     ).fetchall()]
                 cnt = 0
                 for pid in ids:
-                    if approve_pending_event(pid):
+                    ok, row_data = approve_pending_event(pid)
+                    if ok:
                         cnt += 1
-                        with get_db_connection() as conn:
-                            r = conn.execute("SELECT user_id, title FROM pending_events WHERE id=?", (pid,)).fetchone()
-                        if r:
+                        if row_data:
                             try:
                                 await context.bot.send_message(
-                                    chat_id=r["user_id"],
-                                    text=f"✅ Ваше событие <b>{r['title']}</b> одобрено и добавлено в афишу! 🎉",
+                                    chat_id=row_data["user_id"],
+                                    text=f"✅ Ваше событие <b>{row_data['title']}</b> одобрено и добавлено в афишу! 🎉",
                                     parse_mode="HTML"
                                 )
                             except Exception:
                                 pass
+                            # Промо-публикация при массовом одобрении
+                            if row_data.get("is_promo"):
+                                promo_text = format_promo_post(row_data)
+                                if CHANNEL_ID:
+                                    try:
+                                        await context.bot.send_message(
+                                            chat_id=CHANNEL_ID,
+                                            text=promo_text,
+                                            parse_mode="HTML",
+                                            disable_web_page_preview=False,
+                                        )
+                                    except Exception as e:
+                                        logger.error(f"Промо в канал (approve_all): {e}")
+                                await send_promo_to_subscribers(context.bot, row_data)
                 await query.message.reply_text(f"✅ Одобрено событий: <b>{cnt}</b>", parse_mode="HTML")
                 await show_pending_list(query, context)
             elif cmd == "reject_all":
@@ -2898,6 +3000,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # Подтверждение/отмена отправки события
+        if data == "submit_toggle_promo":
+            submit_data = context.user_data.get("submit", {})
+            submit_data["is_promo"] = not submit_data.get("is_promo", False)
+            context.user_data["submit"] = submit_data
+            await query.answer(
+                "📣 Промо включено!" if submit_data["is_promo"] else "Промо отключено",
+                show_alert=False
+            )
+            await query.edit_message_reply_markup(
+                reply_markup=build_fields_keyboard(submit_data, mode="submit")
+            )
+            return
+
         if data == "submit_confirm":
             user = query.from_user
             data_form = context.user_data.get("submit", {})
@@ -2938,6 +3053,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             log_user_action(user.id, user.username, user.first_name, "submit_event_sent", data_form.get("title"))
             preview = format_pending_preview(data_form, user)
+            if data_form.get("is_promo"):
+                preview += "\n\n📣 <b>Пользователь запросил промо-публикацию в канале</b>"
             admin_keyboard = InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton("✅ Одобрить", callback_data=f"mod_approve_{pending_id}"),
@@ -2970,7 +3087,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Сохраняем title до approve (статус изменится)
             with get_db_connection() as conn:
                 _row = conn.execute("SELECT user_id, title FROM pending_events WHERE id=?", (pending_id,)).fetchone()
-            ok = approve_pending_event(pending_id)
+            ok, row_data = approve_pending_event(pending_id)
             if ok:
                 await query.answer("✅ Одобрено!")
                 if _row:
@@ -2982,7 +3099,23 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         )
                     except Exception:
                         pass
-                # Показываем статус + обновлённый список
+                # Промо-публикация в канал + рассылка подписчикам категории
+                if row_data and row_data.get("is_promo"):
+                    promo_text = format_promo_post(row_data)
+                    if CHANNEL_ID:
+                        try:
+                            await context.bot.send_message(
+                                chat_id=CHANNEL_ID,
+                                text=promo_text,
+                                parse_mode="HTML",
+                                disable_web_page_preview=False,
+                            )
+                        except Exception as e:
+                            logger.error(f"Промо в канал: {e}")
+                    subs_sent = await send_promo_to_subscribers(context.bot, row_data)
+                    await query.message.reply_text(
+                        f"📣 Промо опубликовано в канале и разослано {subs_sent} подписчикам."
+                    )
                 import html as _html
                 title_escaped = _html.escape(_row["title"] if _row else f"#{pending_id}")
                 await query.message.reply_text(
@@ -3113,7 +3246,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if data.startswith("user_accept_edit_"):
             pending_id = int(data.split("_")[-1])
-            ok = approve_pending_event(pending_id)
+            ok, row_data = approve_pending_event(pending_id)
             await query.answer()
             if ok:
                 await query.edit_message_text(
@@ -3125,6 +3258,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         text=f"✅ Пользователь принял правки события #{pending_id} — добавлено в афишу.")
                 except Exception:
                     pass
+                # Промо при принятии пользователем
+                if row_data and row_data.get("is_promo"):
+                    promo_text = format_promo_post(row_data)
+                    if CHANNEL_ID:
+                        try:
+                            await context.bot.send_message(
+                                chat_id=CHANNEL_ID,
+                                text=promo_text,
+                                parse_mode="HTML",
+                                disable_web_page_preview=False,
+                            )
+                        except Exception as e:
+                            logger.error(f"Промо (user_accept): {e}")
+                    await send_promo_to_subscribers(context.bot, row_data)
             else:
                 await query.edit_message_text("⚠️ Ошибка при добавлении.", parse_mode="HTML")
             return

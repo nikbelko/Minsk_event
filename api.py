@@ -434,6 +434,7 @@ class EventSubmit(BaseModel):
     tg_user_id: Optional[int] = None      # ID пользователя из Telegram WebApp
     tg_username: Optional[str] = None
     tg_first_name: Optional[str] = None
+    is_promo: Optional[bool] = False       # Промо-публикация в канал после одобрения
 
 
 def _dates_in_range(date_from: str, date_to: str) -> list[str]:
@@ -553,12 +554,12 @@ def submit_event(event: EventSubmit):
                 INSERT INTO pending_events
                     (user_id, username, first_name, title, event_date, show_time,
                      place, address, category, details, description, price, source_url,
-                     status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     is_promo, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 user_id, username, first_name,
                 event.title,
-                event_date_value,  # ← теперь период или одна дата
+                event_date_value,
                 event.show_time or "",
                 event.place,
                 event.address or "",
@@ -567,6 +568,7 @@ def submit_event(event: EventSubmit):
                 event.description or "",
                 event.price or "",
                 event.source_url or "",
+                1 if event.is_promo else 0,
                 "pending",
                 datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"),
             ))
@@ -609,6 +611,8 @@ def submit_event(event: EventSubmit):
             if event.source_url:
                 lines.append(f"🔗 {event.source_url}")
             lines.append(f"\n<i>ID в очереди: #{pending_id}</i>")
+            if event.is_promo:
+                lines.append("📣 <b>Запрошена промо-публикация в канале</b>")
             text = "\n".join(lines)
             
             try:
