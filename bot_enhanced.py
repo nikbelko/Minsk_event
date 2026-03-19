@@ -813,6 +813,7 @@ def build_page_keyboard(data: dict):
     per_page = data["per_page"]
     total = len(events)
     max_page = max(0, (total - 1) // per_page)
+    target_date = data.get("target_date")
     keyboard = []
     
     # Считаем уникальные события (как после группировки) — title+place
@@ -831,19 +832,20 @@ def build_page_keyboard(data: dict):
                 _seen_cats[cat].add(key)
                 category_counts[cat] += 1
     
-    # Считаем бесплатные события из raw_events по price='Бесплатно' —
-    # сюда попадают события ЛЮБОЙ категории с этой ценой, не только category='free'.
-    # Всегда перезаписываем category_counts["free"], чтобы не занижать счётчик
-    # в случае когда среди событий есть и category='free' (1 шт.) и price='Бесплатно'
-    # у событий других категорий (ещё N шт.).
-    raw_events = data.get("events", [])
-    free_count = len({
-        (e.get("title", ""), e.get("event_date", ""), e.get("place") or "")
-        for e in raw_events
-        if (e.get("price") or "") == "Бесплатно"
-    })
-    if free_count > 0:
-        category_counts["free"] = free_count  # перезаписываем всегда
+    # Получаем количество бесплатных событий на дату
+    free_count = 0
+    if target_date:
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) FROM events WHERE event_date = ? AND price = 'Бесплатно'",
+                (target_date,)
+            )
+            free_count = cursor.fetchone()[0]
+    
+    # Если есть бесплатные события и их нет в текущей подборке, добавляем
+    if free_count > 0 and "free" not in category_counts:
+        category_counts["free"] = free_count
     
     # Кнопки фильтрации по категориям
     if len(category_counts) > 1:
@@ -1233,10 +1235,7 @@ async def show_pending_list(update_or_query, context: ContextTypes.DEFAULT_TYPE)
 
     if not rows:
         text = "✅ <b>Очередь модерации пуста</b>\n\nНет событий ожидающих проверки."
-        if hasattr(update_or_query, 'edit_message_text'):
-            await update_or_query.edit_message_text(text, parse_mode="HTML")
-        else:
-            await update_or_query.message.reply_text(text, parse_mode="HTML")
+        await update_or_query.message.reply_text(text, parse_mode="HTML")
         return
 
     import html as _html
@@ -1270,13 +1269,8 @@ async def show_pending_list(update_or_query, context: ContextTypes.DEFAULT_TYPE)
 
     text = "\n".join(lines)[:4000]
     kbd = InlineKeyboardMarkup(keyboard)
-    if hasattr(update_or_query, 'edit_message_text'):
-        try:
-            await update_or_query.edit_message_text(text, reply_markup=kbd, parse_mode="HTML")
-        except Exception:
-            await update_or_query.message.reply_text(text, reply_markup=kbd, parse_mode="HTML")
-    else:
-        await update_or_query.message.reply_text(text, reply_markup=kbd, parse_mode="HTML")
+    # Всегда отправляем новым сообщением — чтобы /admin панель оставалась видна
+    await update_or_query.message.reply_text(text, reply_markup=kbd, parse_mode="HTML")
 
 
 async def pending_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2293,8 +2287,8 @@ async def custom_donate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ Используйте: `/donate <сумма>`\nНапример: `/donate 150`", parse_mode=ParseMode.MARKDOWN)
             return
         amount = int(context.args[0])
-        if amount < 10:
-            await update.message.reply_text("❌ Минимальная сумма — 10 Stars")
+        if amount < 1:
+            await update.message.reply_text("❌ Минимальная сумма — 1 Star")
             return
         if amount > 2500:
             await update.message.reply_text("❌ Максимальная сумма — 2500 Stars")
@@ -2525,8 +2519,18 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cat_lines = [
         f"  {CATEGORY_NAMES[cat]} — {cnt}"
         for cat, cnt in counts.items()
-        if cat in CATEGORY_NAMES and cnt > 0
+        if cat in CATEGORY_NAMES and cat != "free" and cnt > 0
     ]
+    # Бесплатные события — все с price='Бесплатно', независимо от категории
+    today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
+    with get_db_connection() as conn:
+        free_cnt = conn.execute(
+            "SELECT COUNT(DISTINCT title || '|' || COALESCE(place,'') || '|' || event_date) "
+            "FROM events WHERE event_date >= ? AND price = 'Бесплатно'",
+            (today,)
+        ).fetchone()[0]
+    if free_cnt > 0:
+        cat_lines.append(f"  🆓 Бесплатно — {free_cnt}")
     text = (
         "🌟 **MinskDvizh** — твой гид по событиям Минска!\n\n"
         "📅 **О проекте:**\n"
@@ -2644,18 +2648,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "🎯 Категории":
         log_user_action(user.id, user.username, user.first_name, "menu_categories")
         counts = get_events_count_by_category()
-        def btn(emoji, name, cat):
-            n = counts.get(cat, 0)
-            label = f"{emoji} {name} ({n})" if n else f"{emoji} {name}"
-            return InlineKeyboardButton(label, callback_data=f"cat_{cat}")
+        # Строим список: сначала известные категории в нужном порядке,
+        # потом неизвестные из БД — чтобы новые категории появлялись автоматически
+        ordered = {}
+        for cat in CATEGORY_NAMES:
+            if counts.get(cat, 0) > 0:
+                ordered[cat] = CATEGORY_NAMES[cat]
+        for cat in counts:
+            if cat not in ordered and counts[cat] > 0:
+                emoji = CATEGORY_EMOJI.get(cat, "📌")
+                ordered[cat] = f"{emoji} {cat.replace('_', ' ').capitalize()}"
+        keyboard = []
+        row = []
+        for cat, name in ordered.items():
+            n = counts[cat]
+            label = f"{name} ({n})"
+            row.append(InlineKeyboardButton(label, callback_data=f"cat_{cat}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+        if not keyboard:
+            await update.message.reply_text("😔 Пока нет доступных событий.")
+            return
         await update.message.reply_text(
             "🎯 **Выберите категорию:**",
-            reply_markup=InlineKeyboardMarkup([
-                [btn("🎬", "Кино", "cinema"), btn("🎵", "Концерты", "concert")],
-                [btn("🎭", "Театр", "theater"), btn("🖼️", "Выставки", "exhibition")],
-                [btn("🧸", "Детям", "kids"), btn("⚽", "Спорт", "sport")],
-                [btn("🌟", "Движ", "party"), btn("🆓", "Бесплатно", "free")],
-            ]),
+            reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown",
         )
         return
