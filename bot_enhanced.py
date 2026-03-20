@@ -156,6 +156,17 @@ def init_db():
                 created_at TEXT NOT NULL
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS flash_subscriptions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                query TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                status TEXT DEFAULT 'active'
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_flash_user ON flash_subscriptions(user_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_flash_status ON flash_subscriptions(status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_stats_user_id ON user_stats(user_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_stats_created_at ON user_stats(created_at)")
         # Миграции для существующих БД
@@ -589,6 +600,122 @@ def get_all_subscribers() -> dict:
         for row in cursor.fetchall():
             result[(row["category"], row["date_type"])].append(row["user_id"])
         return result
+
+
+# ── Флеш-подписки ──────────────────────────────────────────────────────────
+
+def add_flash_subscription(user_id: int, query: str) -> bool:
+    """Добавляет флеш-подписку. Возвращает False если такая уже есть."""
+    with get_db_connection() as conn:
+        # Проверяем дубликат
+        existing = conn.execute(
+            "SELECT id FROM flash_subscriptions WHERE user_id=? AND LOWER(query)=LOWER(?) AND status='active'",
+            (user_id, query)
+        ).fetchone()
+        if existing:
+            return False
+        conn.execute(
+            "INSERT INTO flash_subscriptions (user_id, query, created_at, status) VALUES (?,?,?,'active')",
+            (user_id, query, datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"))
+        )
+        conn.commit()
+        return True
+
+
+def remove_flash_subscription(flash_id: int, user_id: int):
+    with get_db_connection() as conn:
+        conn.execute(
+            "UPDATE flash_subscriptions SET status='inactive' WHERE id=? AND user_id=?",
+            (flash_id, user_id)
+        )
+        conn.commit()
+
+
+def get_user_flash_subscriptions(user_id: int) -> list:
+    with get_db_connection() as conn:
+        return conn.execute(
+            "SELECT id, query, created_at FROM flash_subscriptions WHERE user_id=? AND status='active' ORDER BY created_at DESC",
+            (user_id,)
+        ).fetchall()
+
+
+def get_all_flash_subscriptions() -> list:
+    """Все активные флеш-подписки для проверки после парсинга."""
+    with get_db_connection() as conn:
+        return conn.execute(
+            "SELECT id, user_id, query FROM flash_subscriptions WHERE status='active'"
+        ).fetchall()
+
+
+async def check_flash_subscriptions(bot) -> int:
+    """Проверяет новые события против всех флеш-подписок и рассылает совпадения.
+    Вызывается после каждого парсинга."""
+    subs = get_all_flash_subscriptions()
+    if not subs:
+        return 0
+
+    today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
+    sent_total = 0
+
+    # Группируем подписки по запросу чтобы не делать N запросов к БД
+    from collections import defaultdict as _dd
+    query_to_users: dict = _dd(list)
+    for sub in subs:
+        query_to_users[sub["query"].lower()].append(sub["user_id"])
+
+    with get_db_connection() as conn:
+        for q, user_ids in query_to_users.items():
+            ql = q.lower()
+            sp = f"%{q}%"
+            spl = f"%{ql}%"
+            # Ищем события добавленные сегодня (свежие после парсинга)
+            rows = conn.execute("""
+                SELECT DISTINCT id, title, details, event_date, show_time, place, price, category, source_url
+                FROM events
+                WHERE event_date >= ?
+                AND (LOWER(title) LIKE ? OR title LIKE ?
+                     OR LOWER(details) LIKE ? OR details LIKE ?)
+                ORDER BY event_date, show_time
+                LIMIT 5
+            """, (today, spl, sp, spl, sp)).fetchall()
+
+            if not rows:
+                continue
+
+            # Формируем сообщение
+            import html as _html
+            lines = [f"⚡ <b>Флеш-подписка: «{_html.escape(q)}»</b>\n"]
+            for e in rows:
+                cat_emoji = CATEGORY_EMOJI.get(e["category"] or "", "🎉")
+                title = _html.escape(e["title"] or "")
+                try:
+                    date_str = datetime.strptime(e["event_date"], "%Y-%m-%d").strftime("%d.%m.%Y")
+                except Exception:
+                    date_str = e["event_date"] or ""
+                time_str = f" ⏰ {e['show_time']}" if e["show_time"] else ""
+                place_str = f"\n🏢 {_html.escape(e['place'])}" if e["place"] else ""
+                price_str = f" | 💰 {e['price']}" if e["price"] else ""
+                url = e["source_url"] or ""
+                title_link = f"<a href=\"{url}\">{title}</a>" if url else title
+                lines.append(f"{cat_emoji} {title_link}\n📅 {date_str}{time_str}{place_str}{price_str}\n")
+
+            lines.append("👉 @Minskdvizh_bot")
+            text = "\n".join(lines)
+
+            # Рассылаем всем подписчикам этого запроса
+            for user_id in set(user_ids):
+                try:
+                    await bot.send_message(
+                        chat_id=user_id, text=text,
+                        parse_mode="HTML", disable_web_page_preview=True
+                    )
+                    sent_total += 1
+                    await asyncio.sleep(0.05)
+                except Exception as e:
+                    logger.warning(f"Флеш-рассылка {user_id}: {e}")
+
+    logger.info(f"⚡ Флеш-подписки: разослано {sent_total} уведомлений")
+    return sent_total
 
 
 # ---------------------- Форматирование ----------------------
@@ -1099,11 +1226,13 @@ async def send_subscription_prompt(query_or_update, category: str, date_type: st
     await send(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 
-def _build_subs_keyboard(subs: list) -> tuple:
+def _build_subs_keyboard(subs: list, flash_subs: list = None) -> tuple:
     """Строит текст и клавиатуру экрана подписок (галочки)."""
     dt_names = {"today": "сегодня", "tomorrow": "завтра", "upcoming": "ближайшие", "weekend": "выходные"}
     keyboard = []
-    if not subs:
+    flash_subs = flash_subs or []
+
+    if not subs and not flash_subs:
         text = (
             "🔔 <b>Мои подписки</b>\n\n"
             "У вас нет активных подписок.\n"
@@ -1112,30 +1241,49 @@ def _build_subs_keyboard(subs: list) -> tuple:
         keyboard.append([InlineKeyboardButton("🎯 Перейти к категориям", callback_data="show_categories")])
         return text, InlineKeyboardMarkup(keyboard)
 
-    lines = ["🔔 <b>Мои подписки</b>\n", "Нажмите ✅ чтобы <b>отписаться</b>:\n"]
-    for s in subs:
-        cat_name = CATEGORY_NAMES.get(s["category"], s["category"])
-        dt_name = dt_names.get(s["date_type"], s["date_type"])
-        keyboard.append([
-            InlineKeyboardButton(
-                f"✅  {cat_name} / {dt_name}",
-                callback_data=f"unsub_{s['category']}_{s['date_type']}"
-            )
-        ])
+    lines = ["🔔 <b>Мои подписки</b>\n"]
+
+    if subs:
+        lines.append("Нажмите ✅ чтобы <b>отписаться</b>:\n")
+        for s in subs:
+            cat_name = CATEGORY_NAMES.get(s["category"], s["category"])
+            dt_name = dt_names.get(s["date_type"], s["date_type"])
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"✅  {cat_name} / {dt_name}",
+                    callback_data=f"unsub_{s['category']}_{s['date_type']}"
+                )
+            ])
+
+    if flash_subs:
+        lines.append("\n⚡ <b>Флеш-подписки</b> (нажмите чтобы отписаться):\n")
+        for f in flash_subs:
+            q = f["query"]
+            keyboard.append([
+                InlineKeyboardButton(
+                    f"⚡ {q[:35]}",
+                    callback_data=f"flash_unsub_{f['id']}"
+                )
+            ])
+
     keyboard.append([InlineKeyboardButton("➕ Добавить подписки", callback_data="show_categories")])
     return "\n".join(lines), InlineKeyboardMarkup(keyboard)
 
 
 async def show_subscriptions(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    subs = get_user_subscriptions(update.effective_user.id)
-    text, keyboard = _build_subs_keyboard(subs)
+    user_id = update.effective_user.id
+    subs = get_user_subscriptions(user_id)
+    flash_subs = get_user_flash_subscriptions(user_id)
+    text, keyboard = _build_subs_keyboard(subs, flash_subs)
     await update.message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
 
 
 async def show_subscriptions_query(query, context: ContextTypes.DEFAULT_TYPE):
     """Версия для callback — обновляет то же сообщение."""
-    subs = get_user_subscriptions(query.from_user.id)
-    text, keyboard = _build_subs_keyboard(subs)
+    user_id = query.from_user.id
+    subs = get_user_subscriptions(user_id)
+    flash_subs = get_user_flash_subscriptions(user_id)
+    text, keyboard = _build_subs_keyboard(subs, flash_subs)
     try:
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
     except Exception:
@@ -1464,6 +1612,10 @@ async def run_parsers_job(bot=None):
             if bot:
                 report = _parse_parser_report(output)
                 await _send_parser_report(bot, report or [], elapsed)
+                # Проверяем флеш-подписки после обновления базы
+                flash_sent = await check_flash_subscriptions(bot)
+                if flash_sent:
+                    logger.info(f"⚡ Флеш-подписки: отправлено {flash_sent} уведомлений")
         else:
             error_msg = stderr.decode()[:300] if stderr else "неизвестная ошибка"
             logger.error(f"❌ Парсеры упали: {error_msg}")
@@ -2659,10 +2811,30 @@ async def search_by_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     events = search_events_by_title(query)
     if events:
         set_pagination(context, events, f"<b>Результаты: «{query}»</b>",
-                       share_query=query)  # передаём текст → inline покажет те же результаты
+                       share_query=query)
         await show_page(update, context)
+        # Предлагаем флеш-подписку
+        await update.message.reply_text(
+            f"⚡ <b>Флеш-подписка</b>\n\nХотите получить уведомление когда появятся новые события по запросу «{query}»?",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    f"🔔 Подписаться на «{query[:30]}»",
+                    callback_data=f"flash_sub_{query[:50]}"
+                )
+            ]]),
+            parse_mode="HTML"
+        )
     else:
-        await update.message.reply_text(f"По запросу «{query}» ничего не найдено.", parse_mode="Markdown")
+        await update.message.reply_text(
+            f"По запросу «{query}» ничего не найдено.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    f"🔔 Уведомить когда появится",
+                    callback_data=f"flash_sub_{query[:50]}"
+                )
+            ]]),
+            parse_mode="Markdown"
+        )
 
 
 async def search_by_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3365,6 +3537,30 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]]))
             except Exception: pass
             await query.answer("Подписка оформлена 🔔", show_alert=False)
+            return
+        if data.startswith("flash_sub_"):
+            user = query.from_user
+            flash_query = data[len("flash_sub_"):]
+            added = add_flash_subscription(user.id, flash_query)
+            log_user_action(user.id, user.username, user.first_name, "flash_subscribe", flash_query)
+            if added:
+                await query.answer("⚡ Флеш-подписка оформлена!", show_alert=False)
+                try:
+                    await query.edit_message_reply_markup(reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("✅ Подписан", callback_data="page_noop")
+                    ]]))
+                except Exception:
+                    pass
+            else:
+                await query.answer("Вы уже подписаны на этот запрос", show_alert=True)
+            return
+        if data.startswith("flash_unsub_"):
+            user = query.from_user
+            flash_id = int(data[len("flash_unsub_"):])
+            remove_flash_subscription(flash_id, user.id)
+            log_user_action(user.id, user.username, user.first_name, "flash_unsubscribe", str(flash_id))
+            await query.answer("⚡ Флеш-подписка отменена", show_alert=False)
+            await show_subscriptions_query(query, context)
             return
         if data.startswith("unsub_"):
             _, category, date_type = data.split("_", 2)

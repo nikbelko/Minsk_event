@@ -801,3 +801,91 @@ def get_available_categories():
             "weekly": "📆 Дайджест на выходные"
         }
     }
+
+
+# ── Флеш-подписки ─────────────────────────────────────────────────────────────
+
+class FlashSubscriptionRequest(BaseModel):
+    user_id: int
+    query: str
+
+
+class FlashSubscriptionRemoveRequest(BaseModel):
+    user_id: int
+    flash_id: int
+
+
+@app.get("/api/flash-subscriptions")
+def get_flash_subscriptions(user_id: int = Query(..., description="ID пользователя Telegram")):
+    """Получить все активные флеш-подписки пользователя."""
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, query, created_at FROM flash_subscriptions WHERE user_id = ? AND status = 'active' ORDER BY created_at DESC",
+            (user_id,)
+        )
+        subs = [{"id": row[0], "query": row[1], "created_at": row[2]} for row in cursor.fetchall()]
+    return {"flash_subscriptions": subs}
+
+
+@app.post("/api/flash-subscriptions/add")
+def add_flash_subscription(req: FlashSubscriptionRequest):
+    """Добавить флеш-подписку. Возвращает 409 если такая уже есть."""
+    if not req.query or len(req.query.strip()) < 2:
+        raise HTTPException(status_code=400, detail="Запрос слишком короткий (минимум 2 символа)")
+
+    query_clean = req.query.strip()
+
+    with get_db() as conn:
+        # Проверяем дубликат
+        existing = conn.execute(
+            "SELECT id FROM flash_subscriptions WHERE user_id = ? AND LOWER(query) = LOWER(?) AND status = 'active'",
+            (req.user_id, query_clean)
+        ).fetchone()
+        if existing:
+            raise HTTPException(status_code=409, detail="Вы уже подписаны на этот запрос")
+
+        conn.execute(
+            "INSERT INTO flash_subscriptions (user_id, query, created_at, status) VALUES (?, ?, ?, 'active')",
+            (req.user_id, query_clean, datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"))
+        )
+        conn.commit()
+
+    # Логируем
+    try:
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO user_stats (user_id, action, detail, created_at) VALUES (?, ?, ?, ?)",
+                (req.user_id, "web_flash_subscribe", query_clean,
+                 datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"))
+            )
+            conn.commit()
+    except Exception:
+        pass
+
+    return {"ok": True, "message": "Флеш-подписка оформлена"}
+
+
+@app.post("/api/flash-subscriptions/remove")
+def remove_flash_subscription(req: FlashSubscriptionRemoveRequest):
+    """Деактивировать флеш-подписку по id."""
+    with get_db() as conn:
+        conn.execute(
+            "UPDATE flash_subscriptions SET status = 'inactive' WHERE id = ? AND user_id = ?",
+            (req.flash_id, req.user_id)
+        )
+        conn.commit()
+
+    # Логируем
+    try:
+        with get_db() as conn:
+            conn.execute(
+                "INSERT INTO user_stats (user_id, action, detail, created_at) VALUES (?, ?, ?, ?)",
+                (req.user_id, "web_flash_unsubscribe", str(req.flash_id),
+                 datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"))
+            )
+            conn.commit()
+    except Exception:
+        pass
+
+    return {"ok": True, "message": "Флеш-подписка отменена"}

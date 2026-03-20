@@ -42,6 +42,7 @@ class TicketproParser:
             ('/bilety-na-koncert/', 'concert', 'Концерты'),
             ('/bilety-v-teatr/', 'theater', 'Театр'),
             ('/detskie-meropriyatiya/', 'kids', 'Детям'),
+            ('/bilety-na-shou/yumor/', 'concert', 'Концерты'),
         ]
         
         self.session = requests.Session()
