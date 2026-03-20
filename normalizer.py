@@ -103,6 +103,12 @@ PLACE_ALIASES: dict[str, str] = {
     # Re:Public
     "re:public":                       "Club Re:Public",
     "club re:public":                  "Club Re:Public",
+    "клуб ре: паблик":                 "Club Re:Public",
+    "ре: паблик":                      "Club Re:Public",
+    "re: public":                      "Club Re:Public",
+    "club re: public":                 "Club Re:Public",
+    "клуб ре:паблик":                  "Club Re:Public",
+    "ре:паблик":                       "Club Re:Public",
 
     # DoZari
     "dozari":                          "DoZari Club",
