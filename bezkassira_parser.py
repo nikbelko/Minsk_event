@@ -103,7 +103,8 @@ class BezkassiraParser:
         cursor.execute("""
             SELECT title, event_date, place, show_time
             FROM events
-        """)
+            WHERE source_name != ?
+        """, (SOURCE_NAME,))
         rows = cursor.fetchall()
         conn.close()
         index = {}
@@ -199,6 +200,8 @@ class BezkassiraParser:
             # 6. URL
             a = caption.find("a", href=True)
             url = a["href"] if a else ""
+            if url and not url.startswith('http'):
+                url = BASE_URL + url
 
             # 7. Цена
             price = ""
@@ -257,18 +260,31 @@ class BezkassiraParser:
                 events.append(ev)
 
         self.stats["found"] += len(thumbnails)
-        self.stats["by_category"][label] = {
-            "found": len(thumbnails),
-            "saved": len(events),
-        }
+        if label not in self.stats["by_category"]:
+            self.stats["by_category"][label] = {"found": 0, "saved": 0}
+        self.stats["by_category"][label]["found"] += len(thumbnails)
+
         logger.info(f"  → Минск / не дубль: {len(events)}")
         return events
 
     # ── Сохранение в БД ──
-
     def save_events(self, events: List[Dict]) -> int:
         if not events:
             return 0
+
+        # Дедупликация внутри текущего запуска
+        seen = set()
+        unique_events = []
+        for ev in events:
+            key = (ev['title'], ev['event_date'], ev.get('show_time', ''), ev.get('place', ''))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_events.append(ev)
+
+        if len(unique_events) != len(events):
+            logger.info(f"🔂 Убрано дублей внутри запуска: {len(events) - len(unique_events)}")
+
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
 
@@ -279,10 +295,10 @@ class BezkassiraParser:
             logger.info(f"🗑️ Удалено {deleted} старых записей {SOURCE_NAME}")
 
         saved = 0
-        for ev in events:
+        for ev in unique_events:
             try:
                 cursor.execute("""
-                    INSERT OR IGNORE INTO events
+                    INSERT INTO events
                       (title, details, description, event_date, show_time,
                        place, location, price, category, source_name, source_url)
                     VALUES (?,?,?,?,?,?,?,?,?,?,?)
@@ -292,8 +308,7 @@ class BezkassiraParser:
                     ev["place"], ev["location"], ev["price"],
                     ev["category"], ev["source_name"], ev["source_url"],
                 ))
-                if cursor.rowcount > 0:
-                    saved += 1
+                saved += 1
             except Exception as e:
                 logger.error(f"Ошибка сохранения: {ev.get('title')} — {e}")
         conn.commit()
@@ -346,19 +361,41 @@ class BezkassiraParser:
         logger.info("🚀 BezKassira парсер запущен")
         logger.info("=" * 50)
 
+        # 1. Очищаем старые записи ОДИН РАЗ
         self.clean_old_events()
+    
+        # 2. Удаляем ВСЕ старые bezkassira записи ДО парсинга
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM events WHERE source_name = ?", (SOURCE_NAME,))
+        deleted = cursor.rowcount
+        conn.close()
+        if deleted:
+            logger.info(f"🗑️ Удалено {deleted} старых записей {SOURCE_NAME}")
+    
+        # 3. Загружаем индекс для проверки дублей с другими источниками
         index = self.load_existing_index()
 
-        all_events = []
         for cat in CATEGORIES:
             events = self.parse_category(
                 cat["url"], cat["category"], cat["label"], index
             )
-            # Сохраняем каждую категорию отдельно — чтобы знать точное кол-во saved
-            cat_saved = self.save_events(events)
+        
+            # Сохраняем события ЭТОЙ категории (не удаляя другие)
+            cat_saved = self._save_category_events(events)
+
             self.stats["by_category"][cat["label"]]["saved"] = cat_saved
             self.stats["saved"] += cat_saved
-            time.sleep(1)  # вежливая пауза между запросами
+        
+            # Обновляем индекс для дедупликации между категориями
+            for ev in events:
+                norm = normalize_title(ev['title'])
+                index.setdefault(ev['event_date'], []).append(
+                    (norm, ev.get('place', ''), ev.get('show_time', ''))
+                )
+
+            time.sleep(1)
+
 
         saved = self.stats["saved"]
 
@@ -375,6 +412,51 @@ class BezkassiraParser:
             print(f"RESULT:{label}:{s['found']}:{s.get('saved', 0)}")
 
         return saved
+
+    def _save_category_events(self, events: List[Dict]) -> int:
+        """Сохраняет события категории без удаления других записей."""
+        if not events:
+            return 0
+
+        # Дедупликация внутри текущего запуска
+        seen = set()
+        unique_events = []
+        for ev in events:
+            key = (ev['title'], ev['event_date'], ev.get('show_time', ''), ev.get('place', ''))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_events.append(ev)
+
+        if len(unique_events) != len(events):
+            logger.info(f"🔂 Убрано дублей внутри запуска: {len(events) - len(unique_events)}")
+
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        saved = 0
+        for ev in unique_events:
+            try:
+                cursor.execute("""
+                    INSERT INTO events
+                      (title, details, description, event_date, show_time,
+                       place, location, price, category, source_name, source_url)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                """, (
+                    ev["title"], ev["details"], ev["description"],
+                    ev["event_date"], ev["show_time"],
+                    ev["place"], ev["location"], ev["price"],
+                    ev["category"], ev["source_name"], ev["source_url"],
+                ))
+                saved += 1
+            except Exception as e:
+                logger.error(f"Ошибка сохранения: {ev.get('title')} — {e}")
+    
+        conn.commit()
+        conn.close()
+        return saved
+
+
 
 
 if __name__ == "__main__":

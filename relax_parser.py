@@ -170,50 +170,84 @@ class RelaxBaseParser:
                 details_a = item.find("a", class_="schedule__event-dscr")
                 details = details_a.get_text(strip=True) if details_a else ""
 
-                # Время — <a> для активных сеансов, <span> для закрытых
-                time_elem = (item.find("a", class_="schedule__seance-time") or
-                             item.find("span", class_="schedule__seance-time"))
-                if time_elem:
-                    raw_time = time_elem.get_text(strip=True)
-                    # Только формат HH:MM — отбрасываем "Купить", "Билеты" и т.п.
-                    show_time = raw_time if re.match(r"^\d{1,2}:\d{2}$", raw_time) else ""
-                else:
-                    show_time = ""
+                # Итерируемся по всем сеансам события (обычно 1, иногда 2+)
+                # Каждый div.schedule__seance = отдельное время начала
+                seances = item.find_all("div", class_="schedule__seance")
+                if not seances:
+                    # Нет сеансов — берём хотя бы время из любого элемента
+                    seances = [item]  # fallback на весь item
 
-                # Цена: span.seance-price или data-summ на div.schedule__seance
-                price_span = item.find("span", class_="seance-price")
-                if price_span:
-                    price = price_span.get_text(strip=True)
-                else:
-                    seance_div = item.find("div", class_="schedule__seance")
-                    price = seance_div.get("data-summ", "").strip() if seance_div else ""
-                price = normalize_price(price)
+                for seance_div in seances:
+                    # Время начала — <a> для активных, <span> для закрытых
+                    time_a    = seance_div.find("a",    class_="schedule__seance-time")
+                    time_span = seance_div.find("span", class_="schedule__seance-time")
+                    time_elem = time_a or time_span
 
-                description = f"{self.emoji} {title}"
-                if details:
-                    description += f"\n📖 {details}"
-                if location:
-                    description += f"\n📍 {location}"
-                if price:
-                    description += f"\n💰 {price}"
+                    if time_elem:
+                        raw_time = time_elem.get_text(strip=True)
+                        show_time = raw_time if re.match(r"^\d{1,2}:\d{2}$", raw_time) else ""
+                    else:
+                        show_time = ""
 
-                events.append({
-                    "title": title,
-                    "details": details,
-                    "description": description,
-                    "event_date": event_date,
-                    "show_time": show_time,
-                    "place": place,
-                    "location": location,
-                    "price": price,
-                    "category": self.category,
-                    "source_url": source_url,
-                    "source_name": self.source_name,
-                })
+                    # Наличие билетов:
+                    # schedule__seance--buy      → есть онлайн-покупка (активная кнопка)
+                    # schedule__seance--buy-timeout → продажа закрыта
+                    # schedule__seance--timeout  → нет билетов / продажа закончена
+                    # span (не a)                → нет онлайн-продажи (касса театра)
+                    tickets = ""
+                    if time_a:
+                        cls = time_a.get("class", [])
+                        if "schedule__seance--buy" in cls and "schedule__seance--buy-timeout" not in cls:
+                            tickets = "buy"      # есть онлайн-билеты
+                        else:
+                            tickets = "timeout"  # продажа закончена
+                    elif time_span:
+                        cls = time_span.get("class", [])
+                        if "schedule__seance--timeout" in cls or "schedule__seance--buy-timeout" in cls:
+                            tickets = "timeout"  # нет билетов
+                        # иначе — span без timeout = просто нет онлайн-продажи (касса театра)
 
-                t = show_time or "     "
-                p = price or "без цены"
-                logger.info(f"  ✅ {event_date} | {t:5} | {title[:25]:25} | {place[:20]:20} | {p}")
+                    # Цена: span.seance-price или data-summ на seance_div
+                    price_span = seance_div.find("span", class_="seance-price")
+                    if price_span:
+                        price = price_span.get_text(strip=True)
+                    else:
+                        price = seance_div.get("data-summ", "").strip() if seance_div.name != "div" or "schedule__seance" in seance_div.get("class", []) else ""
+                        if not price:
+                            # fallback: ищем в родительском item
+                            seance_any = item.find("div", class_="schedule__seance")
+                            price = seance_any.get("data-summ", "").strip() if seance_any else ""
+                    price = normalize_price(price)
+
+                    # Если билеты закончились — отмечаем в цене
+                    if tickets == "timeout" and not price:
+                        price = "Нет билетов"
+
+                    description = f"{self.emoji} {title}"
+                    if details:
+                        description += f"\n📖 {details}"
+                    if location:
+                        description += f"\n📍 {location}"
+                    if price:
+                        description += f"\n💰 {price}"
+
+                    events.append({
+                        "title":       title,
+                        "details":     details,
+                        "description": description,
+                        "event_date":  event_date,
+                        "show_time":   show_time,
+                        "place":       place,
+                        "location":    location,
+                        "price":       price,
+                        "category":    self.category,
+                        "source_url":  source_url,
+                        "source_name": self.source_name,
+                    })
+
+                    t = show_time or "     "
+                    p = price or "без цены"
+                    logger.info(f"  ✅ {event_date} | {t:5} | {title[:25]:25} | {place[:20]:20} | {p}")
 
         logger.info(f"Всего найдено {self.clear_label}: {len(events)}")
         logger.info(f"Пропущено: нет даты={skip_no_date}, нет места={skip_no_place}, нет названия={skip_no_title}")
