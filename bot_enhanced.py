@@ -649,6 +649,7 @@ def get_all_flash_subscriptions() -> list:
 
 async def check_flash_subscriptions(bot) -> int:
     """Проверяет новые события против всех флеш-подписок и рассылает совпадения.
+    Каждая подписка — отдельное сообщение пользователю.
     Вызывается после каждого парсинга."""
     subs = get_all_flash_subscriptions()
     if not subs:
@@ -656,19 +657,16 @@ async def check_flash_subscriptions(bot) -> int:
 
     today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
     sent_total = 0
-
-    # Группируем подписки по запросу чтобы не делать N запросов к БД
-    from collections import defaultdict as _dd
-    query_to_users: dict = _dd(list)
-    for sub in subs:
-        query_to_users[sub["query"].lower()].append(sub["user_id"])
+    import html as _html
 
     with get_db_connection() as conn:
-        for q, user_ids in query_to_users.items():
+        for sub in subs:
+            user_id = sub["user_id"]
+            q = sub["query"]
             ql = q.lower()
             sp = f"%{q}%"
             spl = f"%{ql}%"
-            # Ищем события добавленные сегодня (свежие после парсинга)
+
             rows = conn.execute("""
                 SELECT DISTINCT id, title, details, event_date, show_time, place, price, category, source_url
                 FROM events
@@ -682,8 +680,6 @@ async def check_flash_subscriptions(bot) -> int:
             if not rows:
                 continue
 
-            # Формируем сообщение
-            import html as _html
             lines = [f"⚡ <b>Флеш-подписка: «{_html.escape(q)}»</b>\n"]
             for e in rows:
                 cat_emoji = CATEGORY_EMOJI.get(e["category"] or "", "🎉")
@@ -702,17 +698,15 @@ async def check_flash_subscriptions(bot) -> int:
             lines.append("👉 @Minskdvizh_bot")
             text = "\n".join(lines)
 
-            # Рассылаем всем подписчикам этого запроса
-            for user_id in set(user_ids):
-                try:
-                    await bot.send_message(
-                        chat_id=user_id, text=text,
-                        parse_mode="HTML", disable_web_page_preview=True
-                    )
-                    sent_total += 1
-                    await asyncio.sleep(0.05)
-                except Exception as e:
-                    logger.warning(f"Флеш-рассылка {user_id}: {e}")
+            try:
+                await bot.send_message(
+                    chat_id=user_id, text=text,
+                    parse_mode="HTML", disable_web_page_preview=True
+                )
+                sent_total += 1
+                await asyncio.sleep(0.05)
+            except Exception as e:
+                logger.warning(f"Флеш-рассылка {user_id} «{q}»: {e}")
 
     logger.info(f"⚡ Флеш-подписки: разослано {sent_total} уведомлений")
     return sent_total
@@ -1289,7 +1283,9 @@ async def show_subscriptions_query(query, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         await query.message.reply_text(text, reply_markup=keyboard, parse_mode="HTML")
 async def send_subscriptions_digest(bot, date_type: str):
-    """Рассылает дайджест подписчикам после обновления парсеров."""
+    """Рассылает дайджест подписчикам после обновления парсеров.
+    Каждая категория — отдельное сообщение каждому подписчику.
+    Если событий нет — не отправляем."""
     logger.info(f"📬 Рассылка дайджеста: {date_type}")
     subscribers = get_all_subscribers()
     today = datetime.now(MINSK_TZ)
@@ -1310,7 +1306,7 @@ async def send_subscriptions_digest(bot, date_type: str):
             events = get_events_by_date_and_category(tomorrow, category)
             period_label = f"завтра ({tomorrow.strftime('%d.%m')})"
         elif date_type == "upcoming":
-            events = get_upcoming_events(limit=10, category=category)
+            events = get_upcoming_events(limit=20, category=category)
             period_label = "ближайшие дни"
         elif date_type == "weekend":
             events, saturday, sunday = get_weekend_events(category=category)
@@ -1318,30 +1314,39 @@ async def send_subscriptions_digest(bot, date_type: str):
         else:
             continue
 
+        # Не отправляем если нет событий
         if not events:
+            logger.info(f"  ↩ {category}/{date_type}: нет событий, пропускаем")
             continue
 
         display_name = CATEGORY_NAMES.get(category, category)
-        preview = list(events)[:5]
+        events_list = [dict(e) if not isinstance(e, dict) else e for e in events]
+
+        # Группируем как в боте
+        if category == "cinema":
+            grouped_items = format_grouped_cinema_events(group_cinema_events(events_list[:10]))
+            event_lines = []
+            for text, url in grouped_items[:5]:
+                link = f"\n🔗 <a href=\"{url}\">Подробнее</a>" if url else ""
+                event_lines.append(text + link)
+        else:
+            grouped_items = group_other_events(events_list[:10])
+            event_lines = []
+            for item in grouped_items[:5]:
+                link = f"\n🔗 <a href=\"{item['url']}\">Подробнее</a>" if item.get("url") else ""
+                event_lines.append(item["text"] + link)
+
         lines = [
             "🔔 С добрым утром! Пора начинать новый 🌟 Dvizh!\n",
             f"🔔 <b>{display_name} на {period_label}</b> — {len(events)} событий\n",
-        ]
-
-        if category == "cinema":
-            for text, url in format_grouped_cinema_events(group_cinema_events(preview)):
-                link = f"\n🔗 <a href=\"{url}\">Подробнее</a>" if url else ""
-                lines.append(text + link + "\n")
-        else:
-            grouped_preview = group_other_events([dict(e) if not isinstance(e, dict) else e for e in preview])
-            for item in grouped_preview:
-                link = f"\n🔗 <a href=\"{item['url']}\">Подробнее</a>" if item.get("url") else ""
-                lines.append(item["text"] + link + "\n")
+        ] + event_lines
 
         if len(events) > 5:
-            lines.append(f"<i>...и ещё {len(events) - 5} событий. Откройте бот для просмотра всех.</i>")
+            lines.append(f"\n<i>...и ещё {len(events) - 5} событий. Откройте бот для просмотра всех.</i>")
 
-        message_text = "\n".join(lines)
+        message_text = "\n\n".join(lines)
+        if len(message_text) > 4000:
+            message_text = message_text[:3950] + "\n\n<i>...открой бот чтобы увидеть все.</i>"
 
         unsubscribe_keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("🔕 Отписаться", callback_data=f"unsub_{category}_{date_type}")
@@ -1699,8 +1704,9 @@ async def _send_parser_report(bot, report_or_results, elapsed: float):
 async def send_digest_job(bot=None):
     """Рассылает дайджест подписчикам в 8:00 (после обновления парсеров в 6:00)."""
     if bot:
-        sent, errors = await send_subscriptions_digest(bot, "today")
-        logger.info(f"📬 Дайджест отправлен: {sent} польз., {errors} ошибок")
+        for date_type in ("today", "tomorrow", "upcoming", "weekend"):
+            sent, errors = await send_subscriptions_digest(bot, date_type)
+            logger.info(f"📬 Дайджест [{date_type}]: отправлено {sent} польз., {errors} ошибок")
 
 
 # ---------------------- Добавление событий (модерация) ----------------------
@@ -2384,13 +2390,27 @@ async def post_to_channel(bot, post_type: str = "today"):
         ]
         from collections import defaultdict as _dd
         by_cat = _dd(list)
-        for e in list(events)[:30]:
+        # Дедупликация между категориями — глобальный set по (title, place)
+        seen_global: set = set()
+        for e in list(events)[:60]:
+            key = (e["title"] or "", e.get("place") or "")
+            if key in seen_global:
+                continue
+            seen_global.add(key)
             by_cat[e["category"]].append(dict(e))
         for cat, evs in by_cat.items():
             emoji = CAT_POST_EMOJI.get(cat, "📌")
             cat_name = CAT_POST_NAMES.get(cat, cat.upper())
+            # Дедупликация внутри категории по title
+            seen_cat: set = set()
+            unique_evs = []
+            for e in evs:
+                t = e["title"] or ""
+                if t not in seen_cat:
+                    seen_cat.add(t)
+                    unique_evs.append(e)
             lines.append(f"\n{emoji} {cat_name}")
-            for e in evs[:5]:
+            for e in unique_evs[:5]:
                 lines.append(_fmt_event_line(e))
         lines.append(f"\nА вечером тебя ждет ДВИЖ 🌟")
         lines.append(f"\n👉 Ищи все события: @Minskdvizh_bot")
@@ -2415,13 +2435,27 @@ async def post_to_channel(bot, post_type: str = "today"):
         ]
         from collections import defaultdict as _dd
         by_cat = _dd(list)
+        # Дедупликация между категориями
+        seen_global: set = set()
         for e in all_events:
+            key = (e["title"] or "", e.get("place") or "")
+            if key in seen_global:
+                continue
+            seen_global.add(key)
             by_cat[e["category"]].append(dict(e))
         for cat, evs in by_cat.items():
             emoji = CAT_POST_EMOJI.get(cat, "📌")
             cat_name = CAT_POST_NAMES.get(cat, cat.upper())
+            # Дедупликация внутри категории по title
+            seen_cat: set = set()
+            unique_evs = []
+            for e in evs:
+                t = e["title"] or ""
+                if t not in seen_cat:
+                    seen_cat.add(t)
+                    unique_evs.append(e)
             lines.append(f"\n{emoji} {cat_name}")
-            for e in evs[:4]:
+            for e in unique_evs[:4]:
                 date_str = datetime.strptime(e["event_date"], "%Y-%m-%d").strftime("%d.%m")
                 day_n = DAY_NAMES[datetime.strptime(e["event_date"], "%Y-%m-%d").weekday()].lower()[:2]
                 time_str = f" {e['show_time']}" if e.get("show_time") else ""
