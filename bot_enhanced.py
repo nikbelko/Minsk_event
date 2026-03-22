@@ -2332,7 +2332,6 @@ async def handle_submit_step(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # _send_next_submit_prompt удалён — заменён на build_fields_keyboard
 
-
 # ---------------------- Публикация в канал ----------------------
 
 async def post_to_channel(bot, post_type: str = "today"):
@@ -2369,21 +2368,22 @@ async def post_to_channel(bot, post_type: str = "today"):
         return p
 
     def _fmt_event_line(e) -> str:
-        title = e["title"] or ""
+        title = e.get("title") or ""
         price = _fmt_price(e.get("price", "") or "")
         url = e.get("source_url") or ""
         title_part = f"<a href=\"{url}\">{title}</a>" if url else title
         return f"→ {title_part}" + (f" | {price}" if price else "")
 
     if post_type == "today":
-        events = get_events_by_date_and_category(now)
+        events_raw = get_events_by_date_and_category(now)
+        events = [dict(e) for e in events_raw] if events_raw else []
         if not events:
             return
         day_name = DAY_NAMES[now.weekday()].lower()
         day_num = now.day
         month_name = MONTH_NAMES[now.month - 1]
         lines = [
-            f"👹 Сегодня {day_num} {month_name} ({day_name}). #минск #дайджест",
+            f"👹 Сегодня {day_num} {month_name} ({day_name}). #афишаминск #дайджест",
             f"😎 Всем доброго утра и продуктивного дня!",
             f"✨ Куда пойти сегодня в Минске?\n",
             f"Планируй когда удобно — всё открыто для тебя.\n",
@@ -2392,12 +2392,12 @@ async def post_to_channel(bot, post_type: str = "today"):
         by_cat = _dd(list)
         # Дедупликация между категориями — глобальный set по (title, place)
         seen_global: set = set()
-        for e in list(events)[:60]:
-            key = (e["title"] or "", e.get("place") or "")
+        for e in events[:60]:
+            key = (e.get("title", ""), e.get("place", ""))
             if key in seen_global:
                 continue
             seen_global.add(key)
-            by_cat[e["category"]].append(dict(e))
+            by_cat[e.get("category")].append(e)
         for cat, evs in by_cat.items():
             emoji = CAT_POST_EMOJI.get(cat, "📌")
             cat_name = CAT_POST_NAMES.get(cat, cat.upper())
@@ -2405,7 +2405,7 @@ async def post_to_channel(bot, post_type: str = "today"):
             seen_cat: set = set()
             unique_evs = []
             for e in evs:
-                t = e["title"] or ""
+                t = e.get("title", "")
                 if t not in seen_cat:
                     seen_cat.add(t)
                     unique_evs.append(e)
@@ -2419,8 +2419,10 @@ async def post_to_channel(bot, post_type: str = "today"):
     elif post_type == "weekend":
         saturday = now + timedelta(days=(5 - now.weekday()) % 7 or 7)
         sunday = saturday + timedelta(days=1)
-        events_sat = get_events_by_date_and_category(saturday)
-        events_sun = get_events_by_date_and_category(sunday)
+        events_sat_raw = get_events_by_date_and_category(saturday)
+        events_sun_raw = get_events_by_date_and_category(sunday)
+        events_sat = [dict(e) for e in events_sat_raw] if events_sat_raw else []
+        events_sun = [dict(e) for e in events_sun_raw] if events_sun_raw else []        
         all_events = list(events_sat)[:15] + list(events_sun)[:15]
         if not all_events:
             return
@@ -2438,11 +2440,11 @@ async def post_to_channel(bot, post_type: str = "today"):
         # Дедупликация между категориями
         seen_global: set = set()
         for e in all_events:
-            key = (e["title"] or "", e.get("place") or "")
+            key = (e.get("title", ""), e.get("place", ""))
             if key in seen_global:
                 continue
             seen_global.add(key)
-            by_cat[e["category"]].append(dict(e))
+            by_cat[e.get("category")].append(e)
         for cat, evs in by_cat.items():
             emoji = CAT_POST_EMOJI.get(cat, "📌")
             cat_name = CAT_POST_NAMES.get(cat, cat.upper())
@@ -2450,15 +2452,18 @@ async def post_to_channel(bot, post_type: str = "today"):
             seen_cat: set = set()
             unique_evs = []
             for e in evs:
-                t = e["title"] or ""
+                t = e.get("title", "")
                 if t not in seen_cat:
                     seen_cat.add(t)
                     unique_evs.append(e)
             lines.append(f"\n{emoji} {cat_name}")
             for e in unique_evs[:4]:
-                date_str = datetime.strptime(e["event_date"], "%Y-%m-%d").strftime("%d.%m")
-                day_n = DAY_NAMES[datetime.strptime(e["event_date"], "%Y-%m-%d").weekday()].lower()[:2]
-                time_str = f" {e['show_time']}" if e.get("show_time") else ""
+                try:
+                    date_str = datetime.strptime(e["event_date"], "%Y-%m-%d").strftime("%d.%m")
+                except Exception:
+                    date_str = e.get("event_date", "")[:5]  
+                day_n = DAY_NAMES[datetime.strptime(e["event_date"], "%Y-%m-%d").weekday()].lower()[:2] if e.get("event_date") else ""
+                time_str = f" {e.get('show_time')}" if e.get("show_time") else ""
                 price = _fmt_price(e.get("price", "") or "")
                 url = e.get("source_url") or ""
                 title = e["title"] or ""
