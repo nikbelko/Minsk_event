@@ -2724,34 +2724,64 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         with get_db_connection() as conn:
             where = []
             params = []
-            if date_filter:
-                where.append("event_date = ?")
-                params.append(date_filter)
-                # Для сегодня — исключаем прошедшие сеансы
-                if date_filter == today:
-                    where.append("(show_time = '' OR show_time IS NULL OR show_time > ?)")
-                    params.append(now_time)
-            elif date_from_filter and date_to_filter:
-                where.append("event_date BETWEEN ? AND ?")
-                params += [date_from_filter, date_to_filter]
-                # Если начало диапазона — сегодня, фильтруем время
-                if date_from_filter == today:
-                    where.append("(event_date > ? OR show_time = '' OR show_time IS NULL OR show_time > ?)")
-                    params += [today, now_time]
-            elif date_from_filter:
-                where.append("event_date >= ?")
-                params.append(date_from_filter)
-                if date_from_filter == today:
+            
+            # 🔧 ОСОБЫЙ СЛУЧАЙ: категория "free" — показываем ВСЕ бесплатные события
+            if cat_filter == "free":
+                where.append("price = 'Бесплатно'")
+                # Даты
+                if date_filter:
+                    where.append("event_date = ?")
+                    params.append(date_filter)
+                    if date_filter == today:
+                        where.append("(show_time = '' OR show_time IS NULL OR show_time > ?)")
+                        params.append(now_time)
+                elif date_from_filter and date_to_filter:
+                    where.append("event_date BETWEEN ? AND ?")
+                    params += [date_from_filter, date_to_filter]
+                    if date_from_filter == today:
+                        where.append("(event_date > ? OR show_time = '' OR show_time IS NULL OR show_time > ?)")
+                        params += [today, now_time]
+                elif date_from_filter:
+                    where.append("event_date >= ?")
+                    params.append(date_from_filter)
+                    if date_from_filter == today:
+                        where.append("(event_date > ? OR show_time = '' OR show_time IS NULL OR show_time > ?)")
+                        params += [today, now_time]
+                else:
+                    where.append("event_date >= ?")
+                    params.append(today)
                     where.append("(event_date > ? OR show_time = '' OR show_time IS NULL OR show_time > ?)")
                     params += [today, now_time]
             else:
-                where.append("event_date >= ?")
-                params.append(today)
-                where.append("(event_date > ? OR show_time = '' OR show_time IS NULL OR show_time > ?)")
-                params += [today, now_time]
-            if cat_filter:
-                where.append("category = ?")
-                params.append(cat_filter)
+                # Обычная категория
+                if date_filter:
+                    where.append("event_date = ?")
+                    params.append(date_filter)
+                    # Для сегодня — исключаем прошедшие сеансы
+                    if date_filter == today:
+                        where.append("(show_time = '' OR show_time IS NULL OR show_time > ?)")
+                        params.append(now_time)
+                elif date_from_filter and date_to_filter:
+                    where.append("event_date BETWEEN ? AND ?")
+                    params += [date_from_filter, date_to_filter]
+                    # Если начало диапазона — сегодня, фильтруем время
+                    if date_from_filter == today:
+                        where.append("(event_date > ? OR show_time = '' OR show_time IS NULL OR show_time > ?)")
+                        params += [today, now_time]
+                elif date_from_filter:
+                    where.append("event_date >= ?")
+                    params.append(date_from_filter)
+                    if date_from_filter == today:
+                        where.append("(event_date > ? OR show_time = '' OR show_time IS NULL OR show_time > ?)")
+                        params += [today, now_time]
+                else:
+                    where.append("event_date >= ?")
+                    params.append(today)
+                    where.append("(event_date > ? OR show_time = '' OR show_time IS NULL OR show_time > ?)")
+                    params += [today, now_time]
+                if cat_filter:
+                    where.append("category = ?")
+                    params.append(cat_filter)
             if text_filter:
                 where.append("(title LIKE ? OR place LIKE ?)")
                 params += [f"%{text_filter}%", f"%{text_filter}%"]
