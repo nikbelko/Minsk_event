@@ -9,7 +9,7 @@ import sys
 import json
 import sqlite3
 from contextlib import contextmanager
-from collections import defaultdictf
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
