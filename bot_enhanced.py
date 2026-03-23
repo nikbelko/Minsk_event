@@ -9,7 +9,7 @@ import sys
 import json
 import sqlite3
 from contextlib import contextmanager
-from collections import defaultdict
+from collections import defaultdictf
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
@@ -2032,7 +2032,7 @@ def save_pending_event(user_id, username, first_name, data: dict) -> int:
 def check_duplicate_event(title: str, event_date: str, place: str) -> dict | None:
     """Проверяет дубликат в таблицах events и pending_events.
 
-    Стратегия (3 уровня строгости):
+    Стратегия (3 уровня):
       1. Точное совпадение: title + event_date + place (нормализованные)
       2. Мягкое: title + event_date (без учёта места — одно событие на разных площадках редкость)
       3. Только дата + место (ловит переименованные события)
@@ -2040,9 +2040,13 @@ def check_duplicate_event(title: str, event_date: str, place: str) -> dict | Non
     Возвращает dict с описанием дубликата или None.
     """
     import re as _re
+    from normalizer import normalize_title
 
-    def _norm(s: str) -> str:
-        """Нормализация: нижний регистр, убираем лишние пробелы и знаки."""
+    def _norm_title(s: str) -> str:
+        return normalize_title(s)
+
+    def _norm_place(s: str) -> str:
+        # Простая очистка для сравнения (без канонизации)
         return _re.sub(r"[\s\-—–,\.!?]+", " ", (s or "").lower()).strip()
 
     t_norm  = _norm(title)
@@ -2122,6 +2126,8 @@ def _fmt_duplicate_reason(dup: dict) -> str:
 def approve_pending_event(pending_id: int) -> tuple[bool, dict | None]:
     """Одобряет событие. Возвращает (success, row_data) — row_data нужен для промо."""
     from datetime import date as _date, timedelta as _td
+    from normalizer import normalize_place
+    
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM pending_events WHERE id = ?", (pending_id,))
@@ -2140,7 +2146,10 @@ def approve_pending_event(pending_id: int) -> tuple[bool, dict | None]:
             _description = row["description"] or ""
         except Exception:
             _description = ""
-
+        # НОРМАЛИЗУЕМ МЕСТО И ЦЕНУ
+        place_normalized = normalize_place(row["place"] or "")
+        price_normalized = normalize_price(row["price"] or "")
+            
         event_date_raw = row["event_date"] or ""
         if "|" in event_date_raw:
             parts = event_date_raw.split("|", 1)
@@ -2173,9 +2182,9 @@ def approve_pending_event(pending_id: int) -> tuple[bool, dict | None]:
                 d.strftime("%Y-%m-%d"),
                 row["show_time"] or "",
                 _end_time,
-                row["place"] or "",
+                place_normalized,  #нормализованное место
                 _addr or "Минск",
-                row["price"] or "",
+                price_normalized,
                 row["category"] or "other",
                 "user_submitted",
                 row["source_url"] or "",
