@@ -2126,7 +2126,7 @@ def _fmt_duplicate_reason(dup: dict) -> str:
 def approve_pending_event(pending_id: int) -> tuple[bool, dict | None]:
     """Одобряет событие. Возвращает (success, row_data) — row_data нужен для промо."""
     from datetime import date as _date, timedelta as _td
-    from normalizer import normalize_place
+    from normalizer import normalize_place, normalize_price
     
     with get_db_connection() as conn:
         cursor = conn.cursor()
