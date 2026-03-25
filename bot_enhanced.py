@@ -77,6 +77,7 @@ CATEGORY_EMOJI = {
     "boardgames": "🎲",
     "broadcast": "📺",
     "education": "📚",
+    "quiz": "❓",
 }
 
 CATEGORY_NAMES = {
@@ -94,6 +95,7 @@ CATEGORY_NAMES = {
     "boardgames": "🎲 Настолки",
     "broadcast": "📺 Трансляции",
     "education": "📚 Обучение",
+    "quiz": "❓ Квизы",
 }
 
 # ---------------------- Работа с БД ----------------------
@@ -1766,7 +1768,8 @@ CATEGORY_KEYBOARD = InlineKeyboardMarkup([
      InlineKeyboardButton("🎲 Настолки", callback_data="sc_boardgames")],
     [InlineKeyboardButton("📺 Трансляция", callback_data="sc_broadcast"),
      InlineKeyboardButton("📚 Обучение", callback_data="sc_education")],
-    [InlineKeyboardButton("📌 Другое", callback_data="sc_other")],
+    [InlineKeyboardButton("❓ Квизы", callback_data="sc_quiz"),
+     InlineKeyboardButton("📌 Другое", callback_data="sc_other")],
 ])
 
 
@@ -1843,6 +1846,8 @@ def build_fields_keyboard(data: dict, mode: str = "submit") -> InlineKeyboardMar
 def format_promo_post(data: dict) -> str:
     """Форматирует промо-анонс события для публикации в канал."""
     import html as _html
+    from normalizer import normalize_price
+
     cat_emoji = CATEGORY_EMOJI.get(data.get("category", "other"), "🎉")
     title = _html.escape(data.get("title", ""))
 
@@ -1862,6 +1867,10 @@ def format_promo_post(data: dict) -> str:
         except Exception:
             date_str = ed
 
+    # Нормализуем цену (на всякий случай, если вдруг пришло сырое)
+    price_raw = data.get("price", "")
+    price_normalized = normalize_price(price_raw) if price_raw else ""
+
     lines = [
         f"🔥 <b>Новое событие в Минске!</b>",
         "",
@@ -1877,7 +1886,7 @@ def format_promo_post(data: dict) -> str:
     if data.get("price"):
         lines.append(f"💰 {_html.escape(data['price'])}")
     if data.get("description"):
-        lines.append(f"\n{_html.escape(data['description'][:400])}")
+        lines.append(f"\n{_html.escape(data['description'][:500])}")
     if data.get("source_url"):
         lines.append(f"\n🔗 <a href=\"{_html.escape(data['source_url'])}\">Подробнее</a>")
     lines.append("\n👉 @Minskdvizh_bot | #афишаминск")
@@ -1887,6 +1896,8 @@ def format_promo_post(data: dict) -> str:
 async def send_promo_to_subscribers(bot, row_data: dict) -> int:
     """Рассылает промо-анонс подписчикам категории события.
     Возвращает количество успешно отправленных сообщений."""
+    from normalizer import normalize_price
+
     category = row_data.get("category", "")
     if not category:
         return 0
@@ -1902,7 +1913,12 @@ async def send_promo_to_subscribers(bot, row_data: dict) -> int:
         logger.info(f"Промо: нет подписчиков категории {category}")
         return 0
 
-    text = format_promo_post(row_data)
+    # Копируем данные и нормализуем цену
+    promo_data = dict(row_data)
+    if promo_data.get("price"):
+        promo_data["price"] = normalize_price(promo_data["price"])
+
+    text = format_promo_post(promo_data)
     sent = 0
     for user_id in user_ids:
         try:
@@ -2195,6 +2211,8 @@ def approve_pending_event(pending_id: int) -> tuple[bool, dict | None]:
 
         # Возвращаем данные для промо-публикации
         row_data = dict(row)
+        row_data["place"] = place_normalized
+        row_data["price"] = price_normalized
         return True, row_data
 
 
@@ -2359,6 +2377,7 @@ async def post_to_channel(bot, post_type: str = "today"):
         "kids": "🧸", "sport": "⚽", "party": "🌟", "free": "🆓",
         "excursion": "🗺", "market": "🛍", "masterclass": "🎨",
         "boardgames": "🎲", "broadcast": "📺", "education": "📚",
+        "quiz": "❓",
     }
     CAT_POST_NAMES = {
         "cinema": "КИНО", "concert": "КОНЦЕРТЫ", "theater": "ТЕАТР",
@@ -2366,6 +2385,7 @@ async def post_to_channel(bot, post_type: str = "today"):
         "party": "ДВИЖ", "free": "БЕСПЛАТНО", "excursion": "ЭКСКУРСИИ",
         "market": "МАРКЕТЫ", "masterclass": "МАСТЕР-КЛАССЫ",
         "boardgames": "НАСТОЛКИ", "broadcast": "ТРАНСЛЯЦИИ", "education": "ОБУЧЕНИЕ",
+        "quiz": "КВИЗЫ",
     }
 
     def _fmt_price(price: str) -> str:
