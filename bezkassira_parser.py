@@ -369,6 +369,7 @@ class BezkassiraParser:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM events WHERE source_name = ?", (SOURCE_NAME,))
         deleted = cursor.rowcount
+        conn.commit()
         conn.close()
         if deleted:
             logger.info(f"🗑️ Удалено {deleted} старых записей {SOURCE_NAME}")
