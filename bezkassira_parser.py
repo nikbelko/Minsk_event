@@ -13,7 +13,7 @@ from typing import List, Dict, Optional
 
 import requests
 from bs4 import BeautifulSoup
-from normalizer import normalize_place, normalize_title, parse_iso_datetime, parse_text_date, format_price_from_offers, is_future_date
+from normalizer import normalize_place, normalize_title, parse_iso_datetime, parse_text_date, format_price_from_offers, is_future_date, normalize_price
 
 # ── БД ──────────────────────────────────────────────────────────────────────
 if os.path.exists('/data'):
@@ -208,6 +208,7 @@ class BezkassiraParser:
             offers = ld.get("offers", {})
             if offers:
                 price = format_price_from_offers(offers)
+            price = normalize_price(price)
 
             # 8. Описание
             description = ld.get("description", "")
