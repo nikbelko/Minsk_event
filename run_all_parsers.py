@@ -15,9 +15,9 @@ try:
     from normalizer import mark_free_duplicates
 except ImportError:
     # Заглушка, если функция ещё не добавлена
-    def mark_free_duplicates(all_events, free_events):
+    def mark_free_duplicates(relax_events, free_events):
         logger.warning("⚠️ mark_free_duplicates не найдена в normalizer, использую заглушку")
-        return all_events + free_events
+        return relax_events + free_events
 
 DB_PATH = os.getenv("DB_PATH", "/data/events_final.db")
 
@@ -129,6 +129,7 @@ def load_events_from_db() -> list:
             SELECT title, details, description, event_date, show_time,
                    place, location, price, category, source_url, source_name
             FROM events
+            WHERE source_name = 'relax.by'
         """)
         
         rows = cursor.fetchall()
@@ -229,9 +230,9 @@ def main():
     # Загружаем все события из БД
     logger.info("=" * 40)
     logger.info("📚 ЗАГРУЗКА СОБЫТИЙ ИЗ БД")
-    all_events = load_events_from_db()
+    relax_events = load_events_from_db()
     
-    logger.info(f"📊 Загружено из БД: {len(all_events)}")
+    logger.info(f"📊 Загружено из БД: {len(relax_events)}")
     logger.info(f"🆓 Бесплатных событий из JSON: {len(free_events)}")
 
     # Обрабатываем бесплатные события
@@ -240,7 +241,7 @@ def main():
     
     if free_events:
         # Применяем нормализацию для проставления бесплатных цен
-        final_events = mark_free_duplicates(all_events, free_events)
+        final_events = mark_free_duplicates(relax_events, free_events)
         logger.info(f"📦 Событий после обработки: {len(final_events)}")
         
         # Подсчитываем статистику по бесплатным событиям

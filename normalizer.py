@@ -456,7 +456,7 @@ def format_price_from_offers(offers: dict, from_free_section: bool = False) -> s
 #  НОВЫЕ ФУНКЦИИ ДЛЯ ОБРАБОТКИ БЕСПЛАТНЫХ СОБЫТИЙ
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def mark_free_duplicates(all_events: list, free_events: list) -> list:
+def mark_free_duplicates(relax_events: list, free_events: list) -> list:
     """
     Проходит по списку бесплатных событий, находит их дубликаты в основном списке
     и проставляет им цену "Бесплатно".
@@ -470,7 +470,7 @@ def mark_free_duplicates(all_events: list, free_events: list) -> list:
         а только проставляют цену существующим событиям)
     """
     if not free_events:
-        return all_events
+        return relax_events
     
     # Строим индекс бесплатных событий для быстрого поиска
     free_index = {}
@@ -487,7 +487,7 @@ def mark_free_duplicates(all_events: list, free_events: list) -> list:
     marked_count = 0
     processed_free_keys = set()
     
-    for event in all_events:
+    for event in relax_events:
         key = (
             normalize_title(event.get("title", "")),
             event.get("event_date", ""),
