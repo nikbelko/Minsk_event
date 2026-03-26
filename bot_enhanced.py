@@ -221,7 +221,7 @@ def _build_time_filter(date_filter: str, today: str, now_time: str) -> tuple[str
         return "", []
     
     return """
-        AND (
+        (
             show_time = '' OR show_time IS NULL 
             OR (
                 (end_time != '' AND end_time IS NOT NULL AND end_time > ?)
