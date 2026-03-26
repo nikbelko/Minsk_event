@@ -61,6 +61,7 @@ class Event(BaseModel):
     description: Optional[str] = ""
     event_date: str
     show_time: Optional[str] = ""
+    end_time: Optional [str] = ""
     place: Optional[str] = ""
     location: Optional[str] = "Минск"
     price: Optional[str] = ""
@@ -124,7 +125,7 @@ def fetch_events(
 ) -> list[dict]:
     where = " AND ".join(where_clauses) if where_clauses else "1=1"
     sql = f"""
-        SELECT id, title, details, description, event_date, show_time,
+        SELECT id, title, details, description, event_date, show_time, end_time,
                place, location, price, category, source_url, source_name
         FROM events
         WHERE {where}
@@ -685,7 +686,7 @@ def get_event(event_id: int):
     with get_db() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            """SELECT id, title, details, description, event_date, show_time,
+            """SELECT id, title, details, description, event_date, show_time, end_time,
                       place, location, price, category, source_url, source_name
                FROM events WHERE id = ?""",
             (event_id,)
