@@ -432,7 +432,7 @@ def events_upcoming(
         "event_date BETWEEN ? AND ?",
         "(event_date > ? OR (show_time = '' OR show_time IS NULL OR (end_time != '' AND end_time IS NOT NULL AND end_time > ?) OR (end_time = '' OR end_time IS NULL AND show_time > ?)))",
     ]
-    params: list = [today, until, today, now_t]
+    params: list = [today, until, today, now_t, now_t]
     
     # КАТЕГОРИЯ FREE - ОСОБАЯ ОБРАБОТКА
     if category == "free":
