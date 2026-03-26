@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # api.py
-# FastAPI backend для MinskDvizh — читает ту же SQLite БД что и бот
+# FastAPI backend для MinskDvizh
 
 import os
 import sqlite3
