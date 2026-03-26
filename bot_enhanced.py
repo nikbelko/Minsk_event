@@ -3121,21 +3121,32 @@ async def handle_filter_buttons(query, context: ContextTypes.DEFAULT_TYPE, categ
     if not data:
         await query.answer("Устарело. Попробуйте снова.")
         return
+    
     user = query.from_user
     log_user_action(user.id, user.username, user.first_name, "filter_category", category)
+    
+    # Удаляем клавиатуру с категориями из текущего сообщения
+    try:
+        await query.edit_message_reply_markup(reply_markup=None)
+    except Exception as e:
+        logger.debug(f"Не удалось убрать клавиатуру: {e}")
+    
     filtered = data["events"] if category == "all" else filter_events_by_category(data["events"], category)
-    # Явно сбрасываем кеш группировки чтобы пересчитался для отфильтрованных событий
+    
+    # Сбрасываем кеш группировки
     data.pop("_grouped", None)
     data.pop("_grouped_key", None)
-    # Обновляем share_query: берём старый и добавляем/заменяем категорию
+    
+    # Обновляем share_query
     old_sq = data.get("share_query") or ""
-    logger.info(f"[filter] old_sq='{old_sq}' → adding cat:{category}")
     sq_parts = [p for p in old_sq.split() if not p.startswith("cat:")]
     if category and category != "all":
         sq_parts.append(f"cat:{category}")
     new_sq = " ".join(sq_parts)
-    logger.info(f"[filter] new_sq='{new_sq}'")
+    
     set_pagination(context, filtered, data["title"], date_info=data["date_info"], share_query=new_sq)
+    
+    # Показываем отфильтрованные события в новом сообщении (как и было)
     await show_page(query, context)
 
 
