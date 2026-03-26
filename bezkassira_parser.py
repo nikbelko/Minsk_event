@@ -208,12 +208,24 @@ class BezkassiraParser:
             offers = ld.get("offers", {})
             if offers:
                 price = format_price_from_offers(offers)
-            price = normalize_price(price)
 
             # 8. Описание
             description = ld.get("description", "")
             if description and len(description) > 300:
                 description = description[:297] + "..."
+
+            # НОВАЯ ЛОГИКА: проверяем цену 0 и наличие слова "бесплатно" в описании ----
+            # Проверяем, есть ли в описании слово "бесплатно"
+            has_free_word = description and re.search(r"(бесплатно|вход\s*свободный|free)", description, re.IGNORECASE)
+
+            # Если цена 0 и нет слова "бесплатно" в описании — очищаем цену
+            if (price == "Бесплатно" or (isinstance(price, str) and price == "0")) and not has_free_word:
+                price = ""
+            # Если есть слово "бесплатно" и цена пустая — ставим "Бесплатно"
+            elif has_free_word and not price:
+                price = "Бесплатно"
+            # Нормализуем цену (пустая останется пустой, "Бесплатно" останется "Бесплатно")
+            price = normalize_price(price)
 
             # 9. Проверка дублей
             if self.is_duplicate(title, event_date, place, show_time, index):

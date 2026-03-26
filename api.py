@@ -425,6 +425,7 @@ class EventSubmit(BaseModel):
     event_date: str
     event_date_to: Optional[str] = None
     show_time: Optional[str] = ""
+    end_time: Optional[str] = ""
     place: str
     address: Optional[str] = ""
     price: Optional[str] = ""
@@ -552,15 +553,16 @@ def submit_event(event: EventSubmit):
             # Сохраняем ОДНУ запись, даже если это период
             cursor.execute("""
                 INSERT INTO pending_events
-                    (user_id, username, first_name, title, event_date, show_time,
+                    (user_id, username, first_name, title, event_date, show_time, end_time,
                      place, address, category, details, description, price, source_url,
                      is_promo, status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 user_id, username, first_name,
                 event.title,
                 event_date_value,
                 event.show_time or "",
+                event.end_time or "",
                 event.place,
                 event.address or "",
                 event.category,
@@ -591,6 +593,13 @@ def submit_event(event: EventSubmit):
             days_info = f" ({days_count} дней)"
             date_info = f"{event.event_date} → {event.event_date_to}"
 
+        # Формируем строку времени для уведомления
+        time_str = ""
+        if event.show_time:
+            time_str = f" ⏰ {event.show_time}"
+            if event.end_time:
+                time_str += f"-{event.end_time}"
+
         # Уведомление админу в Telegram
         if BOT_TOKEN and ADMIN_ID:
             lines = [
@@ -601,13 +610,13 @@ def submit_event(event: EventSubmit):
             if event.details:
                 lines.append(f"📝 Формат: {event.details}")
             lines += [
-                f"📅 Дата: {date_info}{days_info}" + (f" ⏰ {event.show_time}" if event.show_time else ""),
+                f"📅 Дата: {date_info}{days_info}{time_str}",
                 f"🏢 Место: {event.place}" + (f", {event.address}" if event.address else ""),
             ]
             if event.price:
                 lines.append(f"💰 Цена: {event.price}")
             if event.description:
-                lines.append(f"📝 {event.description[:200]}")
+                lines.append(f"📝 {event.description[:500]}")
             if event.source_url:
                 lines.append(f"🔗 {event.source_url}")
             lines.append(f"\n<i>ID в очереди: #{pending_id}</i>")
