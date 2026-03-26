@@ -216,17 +216,21 @@ def log_user_action(user_id: int, username: str | None, first_name: str | None, 
         logger.error(f"Ошибка логирования: {e}")
 
 def _build_time_filter(date_filter: str, today: str, now_time: str) -> tuple[str, list]:
-    """Возвращает SQL условие для фильтрации прошедших событий и параметры."""
+    """Возвращает SQL условие для фильтрации прошедших событий и параметры.
+    Логика: нет show_time → всегда показываем.
+            есть end_time → фильтруем по end_time > now.
+            нет end_time  → фильтруем по show_time > now.
+    """
     if date_filter != today:
         return "", []
-    
+
     return """
         AND (
-            show_time = '' OR show_time IS NULL 
+            show_time = '' OR show_time IS NULL
             OR (
                 (end_time != '' AND end_time IS NOT NULL AND end_time > ?)
-                OR 
-                (end_time = '' OR end_time IS NULL AND show_time > ?)
+                OR
+                ((end_time = '' OR end_time IS NULL) AND show_time > ?)
             )
         )
     """, [now_time, now_time]
@@ -448,17 +452,13 @@ def get_events_by_date_and_category(target_date: datetime, category: str | None 
         # Вспомогательная функция для фильтра времени
         def add_time_filter(query, params, date_str, now_time):
             """Добавляет условие для фильтрации прошедших сеансов."""
-            # Условие: событие ещё не закончилось
-            # Если есть end_time -> end_time > now_time
-            # Если нет end_time -> show_time > now_time
-            # Если нет show_time -> показываем всегда
             time_filter = """
                 AND (
-                    show_time = '' OR show_time IS NULL 
+                    show_time = '' OR show_time IS NULL
                     OR (
                         (end_time != '' AND end_time IS NOT NULL AND end_time > ?)
-                        OR 
-                        (end_time = '' OR end_time IS NULL AND show_time > ?)
+                        OR
+                        ((end_time = '' OR end_time IS NULL) AND show_time > ?)
                     )
                 )
             """
@@ -520,13 +520,13 @@ def get_upcoming_events(limit: int = 20, category: str | None = None):
         # Условие для фильтрации прошедших событий
         time_filter = """
             AND (
-                event_date > ? 
+                event_date > ?
                 OR (
-                    show_time = '' OR show_time IS NULL 
+                    show_time = '' OR show_time IS NULL
                     OR (
                         (end_time != '' AND end_time IS NOT NULL AND end_time > ?)
-                        OR 
-                        (end_time = '' OR end_time IS NULL AND show_time > ?)
+                        OR
+                        ((end_time = '' OR end_time IS NULL) AND show_time > ?)
                     )
                 )
             )

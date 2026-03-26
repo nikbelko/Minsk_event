@@ -145,17 +145,21 @@ def paginate(items: list, page: int, per_page: int) -> tuple[list, int]:
     return items[start:end], total
 
 def _build_time_filter(date_filter: str, today: str, now_time: str) -> tuple[str, list]:
-    """Возвращает SQL условие для фильтрации прошедших событий и параметры."""
+    """Возвращает SQL условие для фильтрации прошедших событий и параметры.
+    Логика: нет show_time → всегда показываем.
+            есть end_time → фильтруем по end_time > now.
+            нет end_time  → фильтруем по show_time > now.
+    """
     if date_filter != today:
         return "", []
-    
+
     return """
         (
-            show_time = '' OR show_time IS NULL 
+            show_time = '' OR show_time IS NULL
             OR (
                 (end_time != '' AND end_time IS NOT NULL AND end_time > ?)
-                OR 
-                (end_time = '' OR end_time IS NULL AND show_time > ?)
+                OR
+                ((end_time = '' OR end_time IS NULL) AND show_time > ?)
             )
         )
     """, [now_time, now_time]
@@ -288,7 +292,7 @@ def get_events(
         where.append("event_date >= ?")
         params.append(today)
         # Фильтруем сегодняшние события по времени
-        where.append("(event_date > ? OR (show_time = '' OR show_time IS NULL OR (end_time != '' AND end_time IS NOT NULL AND end_time > ?) OR (end_time = '' OR end_time IS NULL AND show_time > ?)))")
+        where.append("(event_date > ? OR (show_time = '' OR show_time IS NULL OR (end_time != '' AND end_time IS NOT NULL AND end_time > ?) OR ((end_time = '' OR end_time IS NULL) AND show_time > ?)))")
         params.extend([today, now_t, now_t])
 
     # КАТЕГОРИЯ FREE - ОСОБАЯ ОБРАБОТКА
@@ -430,7 +434,7 @@ def events_upcoming(
     until = (now_minsk() + timedelta(days=days)).strftime("%Y-%m-%d")
     where = [
         "event_date BETWEEN ? AND ?",
-        "(event_date > ? OR (show_time = '' OR show_time IS NULL OR (end_time != '' AND end_time IS NOT NULL AND end_time > ?) OR (end_time = '' OR end_time IS NULL AND show_time > ?)))",
+        "(event_date > ? OR (show_time = '' OR show_time IS NULL OR (end_time != '' AND end_time IS NOT NULL AND end_time > ?) OR ((end_time = '' OR end_time IS NULL) AND show_time > ?)))",
     ]
     params: list = [today, until, today, now_t, now_t]
     
