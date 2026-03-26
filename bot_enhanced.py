@@ -479,8 +479,9 @@ def get_events_by_date_and_category(target_date: datetime, category: str | None 
             
             # Для сегодня — исключаем прошедшие сеансы
             if date_str == today_str:
-                query += " AND (show_time = '' OR show_time IS NULL OR show_time > ?)"
-                params.append(now_minsk.strftime("%H:%M"))
+                time_filter, time_params = _build_time_filter(date_str, today_str, now_time)
+                query += time_filter
+                params.extend(time_params)
             
             query += " ORDER BY show_time, title"
             cursor.execute(query, params)
@@ -499,8 +500,9 @@ def get_events_by_date_and_category(target_date: datetime, category: str | None 
             params.append(category)
         
         if date_str == today_str:
-            query += " AND (show_time = '' OR show_time IS NULL OR show_time > ?)"
-            params.append(now_minsk.strftime("%H:%M"))
+            time_filter, time_params = _build_time_filter(date_str, today_str, now_time)
+            query += time_filter
+            params.extend(time_params)
         
         query += " ORDER BY show_time, title"
         cursor.execute(query, params)
@@ -539,7 +541,7 @@ def get_upcoming_events(limit: int = 20, category: str | None = None):
                 WHERE event_date >= ? AND price = 'Бесплатно'
                 {time_filter}
                 ORDER BY event_date, show_time, title LIMIT ?
-            """, (today, today, now_time, limit * SEARCH_MULTIPLIER))
+            """, (today, today, now_time, now_time, limit * SEARCH_MULTIPLIER))
             return cursor.fetchall()
         
         # Обычная категория (не free)
@@ -550,7 +552,7 @@ def get_upcoming_events(limit: int = 20, category: str | None = None):
                 FROM events WHERE event_date >= ? AND category = ?
                 {time_filter}
                 ORDER BY event_date, show_time, title LIMIT ?
-            """, (today, category, today, now_time, limit * SEARCH_MULTIPLIER))
+            """, (today, category, today, now_time, now_time, limit * SEARCH_MULTIPLIER))
         else:
             cursor.execute(f"""
                 SELECT id, title, details, description, event_date, show_time, end_time,
@@ -558,7 +560,7 @@ def get_upcoming_events(limit: int = 20, category: str | None = None):
                 FROM events WHERE event_date >= ?
                 {time_filter}
                 ORDER BY event_date, show_time, title LIMIT ?
-            """, (today, today, now_time, limit * SEARCH_MULTIPLIER))
+            """, (today, today, now_time, now_time, limit * SEARCH_MULTIPLIER))
         
         return cursor.fetchall()
 
