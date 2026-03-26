@@ -385,7 +385,7 @@ def search_events_by_title(query: str, limit: int = 20):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, title, details, description, event_date, show_time,
+            SELECT id, title, details, description, event_date, show_time, end_time,
                    place, location, price, category, source_url
             FROM events
             WHERE (pylow(title) LIKE ? OR pylow(details) LIKE ? OR pylow(place) LIKE ?)
@@ -412,7 +412,7 @@ def search_events_by_date_raw(date_str: str):
     with get_db_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT id, title, details, description, event_date, show_time,
+            SELECT id, title, details, description, event_date, show_time, end_time,
                    place, location, price, category, source_url
             FROM events WHERE event_date = ? ORDER BY show_time, title LIMIT 300
         """, (search_date,))
@@ -431,7 +431,7 @@ def get_events_by_date_and_category(target_date: datetime, category: str | None 
         # ОСОБЫЙ СЛУЧАЙ: категория "free" показывает ВСЕ бесплатные события
         if category == "free":
             query = """
-                SELECT id, title, details, description, event_date, show_time,
+                SELECT id, title, details, description, event_date, show_time, end_time,
                        place, location, price, category, source_url
                 FROM events 
                 WHERE event_date = ? AND price = 'Бесплатно'
@@ -449,7 +449,7 @@ def get_events_by_date_and_category(target_date: datetime, category: str | None 
         
         # Обычная категория (не free)
         query = """
-            SELECT id, title, details, description, event_date, show_time,
+            SELECT id, title, details, description, event_date, show_time, end_time,
                    place, location, price, category, source_url
             FROM events WHERE event_date = ?
         """
@@ -480,7 +480,7 @@ def get_upcoming_events(limit: int = 20, category: str | None = None):
         # ОСОБЫЙ СЛУЧАЙ: категория "free" показывает ВСЕ бесплатные события
         if category == "free":
             cursor.execute(f"""
-                SELECT id, title, details, description, event_date, show_time,
+                SELECT id, title, details, description, event_date, show_time, end_time,
                        place, location, price, category, source_url
                 FROM events 
                 WHERE event_date >= ? AND price = 'Бесплатно'
@@ -492,7 +492,7 @@ def get_upcoming_events(limit: int = 20, category: str | None = None):
         # Обычная категория (не free)
         if category and category != "all":
             cursor.execute(f"""
-                SELECT id, title, details, description, event_date, show_time,
+                SELECT id, title, details, description, event_date, show_time, end_time,
                        place, location, price, category, source_url
                 FROM events WHERE event_date >= ? AND category = ?
                 {time_filter}
@@ -500,7 +500,7 @@ def get_upcoming_events(limit: int = 20, category: str | None = None):
             """, (today, category, today, now_time, limit * SEARCH_MULTIPLIER))
         else:
             cursor.execute(f"""
-                SELECT id, title, details, description, event_date, show_time,
+                SELECT id, title, details, description, event_date, show_time, end_time,
                        place, location, price, category, source_url
                 FROM events WHERE event_date >= ?
                 {time_filter}
@@ -528,7 +528,7 @@ def get_weekend_events(category: str | None = None):
         # ОСОБЫЙ СЛУЧАЙ: категория "free" показывает ВСЕ бесплатные события
         if category == "free":
             cursor.execute("""
-                SELECT id, title, details, description, event_date, show_time,
+                SELECT id, title, details, description, event_date, show_time, end_time,
                        place, location, price, category, source_url
                 FROM events 
                 WHERE event_date IN (?, ?) AND price = 'Бесплатно'
@@ -539,14 +539,14 @@ def get_weekend_events(category: str | None = None):
         # Обычная категория (не free)
         if category and category != "all":
             cursor.execute("""
-                SELECT id, title, details, description, event_date, show_time,
+                SELECT id, title, details, description, event_date, show_time, end_time,
                        place, location, price, category, source_url
                 FROM events WHERE event_date IN (?, ?) AND category = ?
                 ORDER BY event_date, show_time, title
             """, (saturday_str, sunday_str, category))
         else:
             cursor.execute("""
-                SELECT id, title, details, description, event_date, show_time,
+                SELECT id, title, details, description, event_date, show_time, end_time,
                        place, location, price, category, source_url
                 FROM events WHERE event_date IN (?, ?)
                 ORDER BY event_date, show_time, title
@@ -787,13 +787,9 @@ def format_grouped_cinema_events(grouped):
 
 
 def group_other_events(events: list) -> list:
-    """Группировка для театра/концертов/выставок/детей:
-    title + place → все даты и времена вместе (одна запись в пагинации).
-    Если у события нет place — объединяем с записью по тому же title."""
-    from collections import OrderedDict
-    EMOJI_MAP = CATEGORY_EMOJI  # используем глобальный словарь со всеми категориями
+    from collections import OrderedDict, defaultdict
+    EMOJI_MAP = CATEGORY_EMOJI
     grouped = OrderedDict()
-    # Индекс title → ключ первой записи с непустым place
     title_to_key = {}
 
     for e in events:
@@ -804,7 +800,6 @@ def group_other_events(events: list) -> list:
             key = (title, place)
             title_to_key.setdefault(title, key)
         else:
-            # Нет place — присоединяем к уже существующей записи по title
             key = title_to_key.get(title, (title, ""))
 
         if key not in grouped:
@@ -816,7 +811,6 @@ def group_other_events(events: list) -> list:
             if place:
                 title_to_key[title] = key
         else:
-            # Обновляем place/price/url если у текущей записи они пустые
             if not grouped[key]["place"] and place:
                 grouped[key]["place"] = place
             if not grouped[key]["price"] and e.get("price"):
@@ -824,7 +818,14 @@ def group_other_events(events: list) -> list:
             if not grouped[key]["source_url"] and e.get("source_url"):
                 grouped[key]["source_url"] = e["source_url"]
 
-        grouped[key]["dates"].append((e.get("event_date", ""), e.get("show_time", "")))
+        # Сохраняем show_time и end_time вместе
+        show_time = e.get("show_time", "")
+        end_time = e.get("end_time", "")
+        grouped[key]["dates"].append((
+            e.get("event_date", ""),
+            show_time,
+            end_time
+        ))
         if not grouped[key]["price"] and e.get("price"):
             grouped[key]["price"] = e["price"]
 
@@ -832,22 +833,19 @@ def group_other_events(events: list) -> list:
     for g in grouped.values():
         cat_emoji = EMOJI_MAP.get(g["category"], "🎉")
         text = f"{cat_emoji} <b>{g['title']}</b>"
-        # details намеренно не показываем
         if g["place"]:
             text += f"\n🏢 {g['place']}"
         if g["price"]:
             text += f"\n💰 {g['price']}"
 
-        # Группируем смежные даты с одинаковым временем в диапазоны
-        dates_sorted = sorted(set(g["dates"]))  # [(date_str, time), ...]
-        # Группируем по времени: {time: [date, ...]}
+        # Группируем по времени (show_time + end_time)
+        dates_sorted = sorted(set(g["dates"]))  # [(date_str, show_time, end_time), ...]
         by_time = defaultdict(list)
-        for date_str, time in dates_sorted:
-            by_time[time].append(date_str)
+        for date_str, show_time, end_time in dates_sorted:
+            time_key = f"{show_time}|{end_time}" if end_time else show_time
+            by_time[time_key].append(date_str)
 
-        # Для каждого времени строим компактные диапазоны
         def make_ranges(date_strs):
-            """Смежные даты → диапазон, несмежные — отдельно."""
             try:
                 ds = sorted(datetime.strptime(d, "%Y-%m-%d") for d in date_strs)
             except Exception:
@@ -871,20 +869,24 @@ def group_other_events(events: list) -> list:
                     result.append(f"{s.strftime('%d.%m')}–{e.strftime('%d.%m.%Y')}")
             return result
 
-        # Выводим: сначала события без времени, потом с временем
-        time_groups = sorted(by_time.items(), key=lambda x: (x[0] == "", x[0]))
-        for time, date_strs in time_groups:
+        for time_key, date_strs in by_time.items():
+            if "|" in time_key:
+                show_time, end_time = time_key.split("|")
+                time_display = f"{show_time}–{end_time}"
+            else:
+                time_display = time_key
+            
             ranges = make_ranges(date_strs)
             for r in ranges:
-                text += f"\n📅 {r}" + (f" ⏰ {time}" if time else "")
+                text += f"\n📅 {r}" + (f" ⏰ {time_display}" if time_display else "")
 
-        # Сохраняем ключ сортировки: первая дата + первое время группы
-        first_date, first_time = min(g["dates"]) if g["dates"] else ("9999", "")
-        result.append({"_pre_formatted": True, "text": text,
-                        "url": g["source_url"], "category": g["category"],
-                        "_sort_key": (first_date, first_time)})
+        first_date = min(g["dates"])[0] if g["dates"] else "9999"
+        result.append({
+            "_pre_formatted": True, "text": text,
+            "url": g["source_url"], "category": g["category"],
+            "_sort_key": (first_date, "")
+        })
 
-    # Сортируем по первой дате и времени
     result.sort(key=lambda x: x.get("_sort_key", ("9999", "")))
     return result
 
