@@ -935,11 +935,20 @@ def group_other_events(events: list) -> list:
             for r in ranges:
                 text += f"\n📅 {r}" + (f" ⏰ {time_display}" if time_display else "")
 
-        first_date = min(g["dates"])[0] if g["dates"] else "9999"
+        # _sort_key: (date, show_time) — минимальный первый сеанс
+        # min() по кортежу (date_str, show_time, end_time) → берём date и show_time
+        if g["dates"]:
+            first = min(g["dates"])   # (date_str, show_time, end_time)
+            first_date = first[0]
+            first_time = first[1] or ""
+        else:
+            first_date = "9999"
+            first_time = ""
+
         result.append({
             "_pre_formatted": True, "text": text,
             "url": g["source_url"], "category": g["category"],
-            "_sort_key": (first_date, "")
+            "_sort_key": (first_date, first_time)
         })
 
     result.sort(key=lambda x: x.get("_sort_key", ("9999", "")))
