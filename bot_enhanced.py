@@ -215,6 +215,21 @@ def log_user_action(user_id: int, username: str | None, first_name: str | None, 
     except Exception as e:
         logger.error(f"Ошибка логирования: {e}")
 
+def _build_time_filter(date_filter: str, today: str, now_time: str) -> tuple[str, list]:
+    """Возвращает SQL условие для фильтрации прошедших событий и параметры."""
+    if date_filter != today:
+        return "", []
+    
+    return """
+        AND (
+            show_time = '' OR show_time IS NULL 
+            OR (
+                (end_time != '' AND end_time IS NOT NULL AND end_time > ?)
+                OR 
+                (end_time = '' OR end_time IS NULL AND show_time > ?)
+            )
+        )
+    """, [now_time, now_time]
 
 def get_stats_data(exclude_admin: bool = True) -> dict:
     today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
@@ -425,8 +440,32 @@ def get_events_by_date_and_category(target_date: datetime, category: str | None 
     now_minsk = datetime.now(MINSK_TZ)
     date_str = target_date.strftime("%Y-%m-%d")
     today_str = now_minsk.strftime("%Y-%m-%d")
+    now_time = now_minsk.strftime("%H:%M")
+    
     with get_db_connection() as conn:
         cursor = conn.cursor()
+
+        # Вспомогательная функция для фильтра времени
+        def add_time_filter(query, params, date_str, now_time):
+            """Добавляет условие для фильтрации прошедших сеансов."""
+            # Условие: событие ещё не закончилось
+            # Если есть end_time -> end_time > now_time
+            # Если нет end_time -> show_time > now_time
+            # Если нет show_time -> показываем всегда
+            time_filter = """
+                AND (
+                    show_time = '' OR show_time IS NULL 
+                    OR (
+                        (end_time != '' AND end_time IS NOT NULL AND end_time > ?)
+                        OR 
+                        (end_time = '' OR end_time IS NULL AND show_time > ?)
+                    )
+                )
+            """
+            query += time_filter
+            params.append(now_time)  # для end_time
+            params.append(now_time)  # для show_time
+            return query, params
         
         # ОСОБЫЙ СЛУЧАЙ: категория "free" показывает ВСЕ бесплатные события
         if category == "free":
@@ -472,10 +511,24 @@ def get_upcoming_events(limit: int = 20, category: str | None = None):
     now_minsk = datetime.now(MINSK_TZ)
     today = now_minsk.strftime("%Y-%m-%d")
     now_time = now_minsk.strftime("%H:%M")
-    # Для сегодняшних событий фильтруем прошедшие сеансы (как в get_events_by_date)
-    time_filter = " AND (event_date > ? OR show_time = '' OR show_time IS NULL OR show_time > ?)"
+
     with get_db_connection() as conn:
         cursor = conn.cursor()
+
+        # Условие для фильтрации прошедших событий
+        time_filter = """
+            AND (
+                event_date > ? 
+                OR (
+                    show_time = '' OR show_time IS NULL 
+                    OR (
+                        (end_time != '' AND end_time IS NOT NULL AND end_time > ?)
+                        OR 
+                        (end_time = '' OR end_time IS NULL AND show_time > ?)
+                    )
+                )
+            )
+        """
         
         # ОСОБЫЙ СЛУЧАЙ: категория "free" показывает ВСЕ бесплатные события
         if category == "free":
@@ -2764,8 +2817,9 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     where.append("event_date = ?")
                     params.append(date_filter)
                     if date_filter == today:
-                        where.append("(show_time = '' OR show_time IS NULL OR show_time > ?)")
-                        params.append(now_time)
+                        time_filter, time_params = _build_time_filter(date_filter, today, now_time)
+                        where.append(time_filter)
+                        params.extend(time_params)
                 elif date_from_filter and date_to_filter:
                     where.append("event_date BETWEEN ? AND ?")
                     params += [date_from_filter, date_to_filter]
@@ -2790,8 +2844,9 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     params.append(date_filter)
                     # Для сегодня — исключаем прошедшие сеансы
                     if date_filter == today:
-                        where.append("(show_time = '' OR show_time IS NULL OR show_time > ?)")
-                        params.append(now_time)
+                        time_filter, time_params = _build_time_filter(date_filter, today, now_time)
+                        where.append(time_filter)
+                        params.extend(time_params)
                 elif date_from_filter and date_to_filter:
                     where.append("event_date BETWEEN ? AND ?")
                     params += [date_from_filter, date_to_filter]

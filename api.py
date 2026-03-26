@@ -144,6 +144,22 @@ def paginate(items: list, page: int, per_page: int) -> tuple[list, int]:
     end = start + per_page
     return items[start:end], total
 
+def _build_time_filter(date_filter: str, today: str, now_time: str) -> tuple[str, list]:
+    """Возвращает SQL условие для фильтрации прошедших событий и параметры."""
+    if date_filter != today:
+        return "", []
+    
+    return """
+        AND (
+            show_time = '' OR show_time IS NULL 
+            OR (
+                (end_time != '' AND end_time IS NOT NULL AND end_time > ?)
+                OR 
+                (end_time = '' OR end_time IS NULL AND show_time > ?)
+            )
+        )
+    """, [now_time, now_time]
+
 
 # ── Health ───────────────────────────────────────────────────────────────────
 
@@ -247,22 +263,33 @@ def get_events(
     if date:
         where.append("event_date = ?")
         params.append(date)
-        # Для сегодня — фильтруем прошедшие сеансы
+        # Для сегодня — фильтруем прошедшие сеансы с учётом end_time
         if date == today:
-            where.append("(show_time = '' OR show_time IS NULL OR show_time > ?)")
-            params.append(now_t)
+            time_filter, time_params = _build_time_filter(date, today, now_t)
+            where.append(time_filter)
+            params.extend(time_params)
     elif date_from and date_to:
         where.append("event_date BETWEEN ? AND ?")
         params.extend([date_from, date_to])
+        # Если начало диапазона — сегодня, фильтруем время
+        if date_from == today:
+            time_filter, time_params = _build_time_filter(date_from, today, now_t)
+            where.append(time_filter)
+            params.extend(time_params)
     elif date_from:
         where.append("event_date >= ?")
         params.append(date_from)
+        if date_from == today:
+            time_filter, time_params = _build_time_filter(date_from, today, now_t)
+            where.append(time_filter)
+            params.extend(time_params)
     else:
         # По умолчанию — только будущие
         where.append("event_date >= ?")
         params.append(today)
-        where.append("(event_date > ? OR show_time = '' OR show_time IS NULL OR show_time > ?)")
-        params.extend([today, now_t])
+        # Фильтруем сегодняшние события по времени
+        where.append("(event_date > ? OR (show_time = '' OR show_time IS NULL OR (end_time != '' AND end_time IS NOT NULL AND end_time > ?) OR (end_time = '' OR end_time IS NULL AND show_time > ?)))")
+        params.extend([today, now_t, now_t])
 
     # КАТЕГОРИЯ FREE - ОСОБАЯ ОБРАБОТКА
     if category == "free":
@@ -324,11 +351,13 @@ def events_today(
 ):
     today = today_str()
     now_t = now_time_str()
-    where = [
-        "event_date = ?",
-        "(show_time = '' OR show_time IS NULL OR show_time > ?)",
-    ]
-    params: list = [today, now_t]
+    where = ["event_date = ?"]
+    params: list = [today]
+
+    # Фильтр времени с учётом end_time
+    time_filter, time_params = _build_time_filter(today, today, now_t)
+    where.append(time_filter)
+    params.extend(time_params)
     
     # КАТЕГОРИЯ FREE - ОСОБАЯ ОБРАБОТКА
     if category == "free":
@@ -401,7 +430,7 @@ def events_upcoming(
     until = (now_minsk() + timedelta(days=days)).strftime("%Y-%m-%d")
     where = [
         "event_date BETWEEN ? AND ?",
-        "(event_date > ? OR show_time = '' OR show_time IS NULL OR show_time > ?)",
+        "(event_date > ? OR (show_time = '' OR show_time IS NULL OR (end_time != '' AND end_time IS NOT NULL AND end_time > ?) OR (end_time = '' OR end_time IS NULL AND show_time > ?)))",
     ]
     params: list = [today, until, today, now_t]
     
