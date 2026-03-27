@@ -8,6 +8,9 @@ import re
 import sys
 import json
 import sqlite3
+import csv
+import io
+import tempfile
 from contextlib import contextmanager
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
@@ -2377,7 +2380,8 @@ async def start_submit(update_or_query, context: ContextTypes.DEFAULT_TYPE):
         "Выберите поле для заполнения.\n"
         "❗ — обязательное поле, ✅ — заполнено.\n"
         "Когда всё готово — нажмите <b>Отправить на модерацию</b>.\n"
-        "Для отмены введите /cancel"
+        "Для отмены введите /cancel\n\n"
+        "📦 Чтобы загрузить <b>несколько событий сразу</b> — получите шаблон: /template"
     )
     kbd = build_fields_keyboard({}, mode="submit")
     if isinstance(update_or_query, Update):
@@ -2559,10 +2563,8 @@ async def post_to_channel(bot, post_type: str = "today"):
         sat_d = saturday.day
         sun_d = sunday.day
         mon = MONTH_NAMES[saturday.month - 1]
-        sat_day = DAY_NAMES[saturday.weekday()].lower()
-        sun_day = DAY_NAMES[sunday.weekday()].lower()
         lines = [
-            f"🎉 Выходные {sat_d}-{sun_d} {mon} ({sat_day}-{sun_day}). #минск #выходные",
+            f"🎉 Выходные {sat_d}-{sun_d} {mon} (сб-вск). #минск #выходные",
             f"😎 Планируем яркие выходные в Минске!\n",
         ]
         from collections import defaultdict as _dd
@@ -2592,7 +2594,8 @@ async def post_to_channel(bot, post_type: str = "today"):
                     date_str = datetime.strptime(e["event_date"], "%Y-%m-%d").strftime("%d.%m")
                 except Exception:
                     date_str = e.get("event_date", "")[:5]  
-                day_n = DAY_NAMES[datetime.strptime(e["event_date"], "%Y-%m-%d").weekday()].lower()[:2] if e.get("event_date") else ""
+                _SHORT_DAYS = ["пн","вт","ср","чт","пт","сб","вск"]
+                day_n = _SHORT_DAYS[datetime.strptime(e["event_date"], "%Y-%m-%d").weekday()] if e.get("event_date") else ""
                 time_str = f" {e.get('show_time')}" if e.get("show_time") else ""
                 price = _fmt_price(e.get("price", "") or "")
                 url = e.get("source_url") or ""
@@ -3002,9 +3005,12 @@ async def about(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🌐 Открыть сайт", web_app=WebAppInfo(url=WEB_APP_URL))],
             [
                 InlineKeyboardButton("➕ Добавить событие", callback_data="show_submit"),
-                InlineKeyboardButton("⭐ Поддержать", callback_data="show_donate"),
+                InlineKeyboardButton("📦 Загрузить список", callback_data="show_batch_template"),
             ],
-            [InlineKeyboardButton("🔔 Мои подписки", callback_data="show_subs")],
+            [
+                InlineKeyboardButton("⭐ Поддержать", callback_data="show_donate"),
+                InlineKeyboardButton("🔔 Мои подписки", callback_data="show_subs"),
+            ],
         ]),
         parse_mode=ParseMode.MARKDOWN,
         disable_web_page_preview=True,
@@ -3717,6 +3723,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer()
             await show_subscriptions_query(query, context)
             return
+        if data == "show_batch_template":
+            await query.answer()
+            user = query.from_user
+            log_user_action(user.id, user.username, user.first_name, "batch_template")
+            await send_batch_template(query.message)
+            return
 
         if data == "show_donate":
             await query.answer()
@@ -3835,6 +3847,370 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
+
+# ---------------------- Пакетная загрузка событий из файла ----------------------
+
+BATCH_TEMPLATE_HEADERS = [
+    "title", "details", "category", "event_date", "show_time",
+    "place", "address", "price", "description", "source_url"
+]
+
+BATCH_TEMPLATE_EXAMPLE = [
+    "Концерт джаза", "Вечер живой музыки для всех", "concert",
+    "15.05.2026", "19:00", "Джаз-клуб Blue Note", "ул. Немига, 3",
+    "от 20 руб", "Программа из классики и современного джаза", "https://example.com"
+]
+
+BATCH_CATEGORY_MAP = {
+    "кино": "cinema", "cinema": "cinema",
+    "концерт": "concert", "концерты": "concert", "concert": "concert",
+    "театр": "theater", "theater": "theater",
+    "выставка": "exhibition", "выставки": "exhibition", "exhibition": "exhibition",
+    "детям": "kids", "дети": "kids", "kids": "kids",
+    "спорт": "sport", "sport": "sport",
+    "движ": "party", "вечеринка": "party", "party": "party",
+    "бесплатно": "free", "free": "free",
+    "экскурсия": "excursion", "excursion": "excursion",
+    "маркет": "market", "market": "market",
+    "мастер-класс": "masterclass", "masterclass": "masterclass",
+    "настолки": "boardgames", "boardgames": "boardgames",
+    "трансляция": "broadcast", "broadcast": "broadcast",
+    "обучение": "education", "education": "education",
+    "квиз": "quiz", "quiz": "quiz",
+}
+
+
+async def send_batch_template(message):
+    """Отправляет xlsx-шаблон для пакетной загрузки событий."""
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "События"
+
+        header_fill = PatternFill(start_color="2D6A4F", end_color="2D6A4F", fill_type="solid")
+        header_font = Font(color="FFFFFF", bold=True)
+        for col, h in enumerate(BATCH_TEMPLATE_HEADERS, 1):
+            cell = ws.cell(row=1, column=col, value=h)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center")
+
+        example_fill = PatternFill(start_color="D8F3DC", end_color="D8F3DC", fill_type="solid")
+        for col, val in enumerate(BATCH_TEMPLATE_EXAMPLE, 1):
+            cell = ws.cell(row=2, column=col, value=val)
+            cell.fill = example_fill
+
+        widths = [35, 35, 15, 12, 8, 25, 25, 15, 40, 30]
+        for col, w in enumerate(widths, 1):
+            ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = w
+
+        ws2 = wb.create_sheet("Подсказки")
+        ws2["A1"] = "Поле"
+        ws2["B1"] = "Обязательное"
+        ws2["C1"] = "Формат / пример"
+        hints = [
+            ("title",       "ДА",  "Название события"),
+            ("details",     "ДА",  "Краткое описание — для кого и что"),
+            ("category",    "ДА",  "concert / theater / cinema / exhibition / kids / sport / party / free / excursion / market / masterclass / boardgames / broadcast / education / quiz"),
+            ("event_date",  "ДА",  "ДД.ММ.ГГГГ  или  ДД.ММ.ГГГГ-ДД.ММ.ГГГГ (период)"),
+            ("show_time",   "ДА",  "ЧЧ:ММ  или  ЧЧ:ММ-ЧЧ:ММ"),
+            ("place",       "ДА",  "Название площадки"),
+            ("address",     "нет", "ул. Пример, 1"),
+            ("price",       "нет", "от 20 руб  /  Бесплатно"),
+            ("description", "нет", "Подробное описание, программа"),
+            ("source_url",  "нет", "https://..."),
+        ]
+        for row, (f, req, hint) in enumerate(hints, 2):
+            ws2.cell(row=row, column=1, value=f)
+            ws2.cell(row=row, column=2, value=req)
+            ws2.cell(row=row, column=3, value=hint)
+        ws2.column_dimensions["A"].width = 15
+        ws2.column_dimensions["B"].width = 12
+        ws2.column_dimensions["C"].width = 70
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        caption = (
+            "\U0001f4cb <b>Шаблон для пакетной загрузки событий</b>\n\n"
+            "1. Заполните строки (строка 2 \u2014 пример, её можно удалить)\n"
+            "2. Сохраните файл и отправьте его в этот чат\n"
+            "3. Мы проверим и отправим на модерацию\n\n"
+            "\U0001f4cc Лист <b>Подсказки</b> \u2014 описание каждого поля"
+        )
+        await message.reply_document(
+            document=buf,
+            filename="minskdvizh_events_template.xlsx",
+            caption=caption,
+            parse_mode="HTML",
+        )
+    except ImportError:
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(BATCH_TEMPLATE_HEADERS)
+        writer.writerow(BATCH_TEMPLATE_EXAMPLE)
+        csv_bytes = io.BytesIO(buf.getvalue().encode("utf-8-sig"))
+        await message.reply_document(
+            document=csv_bytes,
+            filename="minskdvizh_events_template.csv",
+            caption="\U0001f4cb <b>Шаблон для пакетной загрузки (CSV)</b>\n\nЗаполните и отправьте обратно.",
+            parse_mode="HTML",
+        )
+
+
+def _parse_batch_date(raw: str) -> tuple[str, str]:
+    """Парсит дату или период. Возвращает (event_date_value, error_str)."""
+    import re as _re
+    from datetime import date as _date
+    raw = (raw or "").strip()
+    if not raw:
+        return "", "пустая дата"
+
+    if _re.match(r"^\d{4}-\d{2}-\d{2}$", raw):
+        try:
+            d = _date.fromisoformat(raw)
+            if d < _date.today():
+                return "", f"дата {raw} в прошлом"
+            return raw, ""
+        except Exception:
+            return "", f"невалидная дата {raw}"
+
+    pm = _re.match(r"^(\d{1,2}\.\d{1,2}\.\d{4})-(\d{1,2}\.\d{1,2}\.\d{4})$", raw)
+    if pm:
+        def _pd(s):
+            d, mo, y = s.split(".")
+            return _date(int(y), int(mo), int(d))
+        try:
+            d1, d2 = _pd(pm.group(1)), _pd(pm.group(2))
+        except Exception:
+            return "", f"невалидный период {raw}"
+        if d2 < d1:
+            return "", f"конец периода раньше начала: {raw}"
+        if d1 < _date.today():
+            return "", f"дата начала {raw} в прошлом"
+        if (d2 - d1).days > 90:
+            return "", f"период > 90 дней: {raw}"
+        return f"{d1.isoformat()}|{d2.isoformat()}", ""
+
+    m = _re.match(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})$", raw)
+    if m:
+        day, month, year = m.groups()
+        try:
+            d = _date(int(year), int(month), int(day))
+        except Exception:
+            return "", f"невалидная дата {raw}"
+        if d < _date.today():
+            return "", f"дата {raw} в прошлом"
+        return f"{year}-{month.zfill(2)}-{day.zfill(2)}", ""
+
+    return "", f"не распознан формат даты: {raw}"
+
+
+def _parse_batch_time(raw: str) -> tuple[str, str]:
+    """Парсит время ЧЧ:ММ или ЧЧ:ММ-ЧЧ:ММ. Возвращает (show_time, end_time)."""
+    import re as _re
+    raw = (raw or "").strip()
+    if not raw:
+        return "", ""
+    rng = _re.match(r"^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$", raw)
+    if rng:
+        return rng.group(1), rng.group(2)
+    if _re.match(r"^\d{1,2}:\d{2}$", raw):
+        return raw, ""
+    return raw, ""
+
+
+def _read_batch_file(data: bytes, filename: str) -> tuple[list[dict], str]:
+    """Читает xlsx/xls/csv и возвращает (rows, error)."""
+    fname = filename.lower()
+    try:
+        if fname.endswith(".csv"):
+            text = data.decode("utf-8-sig", errors="replace")
+            reader = csv.DictReader(io.StringIO(text))
+            return [dict(r) for r in reader], ""
+        elif fname.endswith(".xlsx") or fname.endswith(".xls"):
+            import openpyxl
+            buf = io.BytesIO(data)
+            wb = openpyxl.load_workbook(buf, read_only=True, data_only=True)
+            ws = wb.active
+            rows = list(ws.iter_rows(values_only=True))
+            if not rows:
+                return [], "Файл пустой"
+            headers = [str(h).strip().lower() if h else "" for h in rows[0]]
+            result = []
+            for row in rows[1:]:
+                if all((v is None or str(v).strip() == "") for v in row):
+                    continue
+                result.append({headers[i]: (str(row[i]).strip() if row[i] is not None else "")
+                                for i in range(min(len(headers), len(row)))})
+            return result, ""
+        else:
+            return [], f"Неподдерживаемый формат: {filename}"
+    except ImportError:
+        return [], "openpyxl не установлен — поддерживается только CSV"
+    except Exception as e:
+        return [], f"Ошибка чтения файла: {e}"
+
+
+async def handle_batch_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Хендлер документа — принимает xlsx/csv с событиями, парсит, отправляет на модерацию."""
+    import html as _html
+    user = update.effective_user
+    doc = update.message.document
+    fname = doc.file_name or ""
+
+    if not (fname.lower().endswith(".xlsx") or fname.lower().endswith(".xls") or fname.lower().endswith(".csv")):
+        return
+
+    log_user_action(user.id, user.username, user.first_name, "batch_upload", fname)
+
+    if doc.file_size and doc.file_size > 5 * 1024 * 1024:
+        await update.message.reply_text("\u274c Файл слишком большой. Максимум 5 МБ.")
+        return
+
+    await update.message.chat.send_action(action="upload_document")
+    status_msg = await update.message.reply_text("\u23f3 Читаю файл...")
+
+    try:
+        file = await doc.get_file()
+        buf = io.BytesIO()
+        await file.download_to_memory(buf)
+        data = buf.getvalue()
+    except Exception as e:
+        await status_msg.edit_text(f"\u274c Не удалось скачать файл: {e}")
+        return
+
+    rows, err = _read_batch_file(data, fname)
+    if err:
+        await status_msg.edit_text(f"\u274c {err}")
+        return
+    if not rows:
+        await status_msg.edit_text("\u274c Файл пустой или не содержит данных.")
+        return
+    if len(rows) > 100:
+        await status_msg.edit_text("\u274c Максимум 100 событий за раз.")
+        return
+
+    def _norm_key(k):
+        return (k or "").strip().lower().replace(" ", "_")
+
+    ok_count = 0
+    skip_count = 0
+    errors = []
+    pending_ids = []
+    now_str = datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+    for row_num, raw_row in enumerate(rows, start=2):
+        row = {_norm_key(k): v for k, v in raw_row.items()}
+
+        title = row.get("title", "").strip()
+        if not title or len(title) < 3:
+            errors.append(f"Строка {row_num}: пустое или короткое название")
+            skip_count += 1
+            continue
+
+        date_raw = row.get("event_date", "") or row.get("date", "")
+        event_date, date_err = _parse_batch_date(date_raw)
+        if date_err:
+            errors.append(f"Строка {row_num} «{title[:25]}»: {date_err}")
+            skip_count += 1
+            continue
+
+        time_raw = row.get("show_time", "") or row.get("time", "")
+        show_time, end_time = _parse_batch_time(time_raw)
+
+        place = row.get("place", "").strip()
+        if not place:
+            errors.append(f"Строка {row_num} «{title[:25]}»: не указано место")
+            skip_count += 1
+            continue
+
+        cat_raw = (row.get("category", "") or "").strip().lower()
+        category = BATCH_CATEGORY_MAP.get(cat_raw, "other")
+
+        details = (row.get("details", "") or "")[:300]
+        description = (row.get("description", "") or "")[:1000]
+        address = (row.get("address", "") or "").strip()
+        price = (row.get("price", "") or "").strip()
+        source_url = (row.get("source_url", "") or row.get("url", "") or "").strip()
+
+        dup = check_duplicate_event(title, event_date, place)
+        if dup:
+            errors.append(f"Строка {row_num} «{title[:25]}»: дубликат (уже есть в афише/очереди)")
+            skip_count += 1
+            continue
+
+        try:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO pending_events
+                        (user_id, username, first_name, title, event_date, show_time, end_time,
+                         place, address, category, details, description, price, source_url,
+                         is_promo, status, created_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,'pending',?)
+                """, (
+                    user.id, user.username, user.first_name,
+                    title, event_date, show_time, end_time,
+                    place, address, category,
+                    details, description, price, source_url,
+                    now_str,
+                ))
+                conn.commit()
+                pending_ids.append(cursor.lastrowid)
+                ok_count += 1
+        except Exception as e:
+            errors.append(f"Строка {row_num} «{title[:25]}»: ошибка БД — {e}")
+            skip_count += 1
+
+    if ok_count > 0:
+        reply = (
+            f"\u2705 <b>Загрузка завершена!</b>\n\n"
+            f"\U0001f4e5 Принято на модерацию: <b>{ok_count}</b>\n"
+        )
+        if skip_count:
+            reply += f"\u26a0\ufe0f Пропущено: <b>{skip_count}</b>\n"
+        if errors:
+            err_lines = "\n".join(f"• {_html.escape(e)}" for e in errors[:10])
+            if len(errors) > 10:
+                err_lines += f"\n• ...и ещё {len(errors)-10} ошибок"
+            reply += f"\n<b>Причины пропуска:</b>\n{err_lines}"
+        reply += "\n\n\U0001f50d События проверит модератор и добавит в афишу."
+    else:
+        reply = "\u274c <b>Ни одно событие не принято.</b>\n\n"
+        if errors:
+            err_lines = "\n".join(f"• {_html.escape(e)}" for e in errors[:15])
+            reply += f"<b>Причины:</b>\n{err_lines}"
+
+    await status_msg.edit_text(reply, parse_mode="HTML")
+
+    if ok_count > 0 and pending_ids:
+        try:
+            admin_text = (
+                f"\U0001f4e6 <b>Пакетная загрузка от @{_html.escape(user.username or '')} "
+                f"({_html.escape(user.first_name or '')}, ID {user.id})</b>\n\n"
+                f"\U0001f4e5 Добавлено в очередь: <b>{ok_count}</b> событий\n"
+                f"\u26a0\ufe0f Пропущено: <b>{skip_count}</b>\n"
+                f"\U0001f4c1 Файл: {_html.escape(fname)}\n\n"
+                f"Откройте /pending для просмотра."
+            )
+            await context.bot.send_message(
+                chat_id=ADMIN_ID, text=admin_text, parse_mode="HTML"
+            )
+        except Exception as e:
+            logger.warning(f"Не удалось уведомить админа о batch upload: {e}")
+
+
+async def batch_template_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /template — отправляет шаблон xlsx для пакетной загрузки."""
+    user = update.effective_user
+    log_user_action(user.id, user.username, user.first_name, "batch_template")
+    await send_batch_template(update.message)
+
+
+
 # ---------------------- main ----------------------
 
 
@@ -3865,6 +4241,10 @@ def build_application() -> Application:
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(PreCheckoutQueryHandler(precheckout_callback))
     application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
+    application.add_handler(CommandHandler("template", batch_template_command))
+    application.add_handler(MessageHandler(filters.Document.FileExtension("xlsx"), handle_batch_file))
+    application.add_handler(MessageHandler(filters.Document.FileExtension("xls"), handle_batch_file))
+    application.add_handler(MessageHandler(filters.Document.FileExtension("csv"), handle_batch_file))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     return application
