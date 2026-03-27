@@ -3,6 +3,8 @@
 # FastAPI backend для MinskDvizh
 
 import os
+import io
+import csv
 import sqlite3
 import httpx
 from contextlib import contextmanager
@@ -10,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from collections import defaultdict
 
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, UploadFile, File, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -932,3 +934,387 @@ def remove_flash_subscription(req: FlashSubscriptionRemoveRequest):
         pass
 
     return {"ok": True, "message": "Флеш-подписка отменена"}
+
+
+# ==================== ПАКЕТНАЯ ЗАГРУЗКА СОБЫТИЙ ====================
+
+BATCH_CATEGORY_MAP = {
+    "кино": "cinema", "cinema": "cinema",
+    "концерт": "concert", "концерты": "concert", "concert": "concert",
+    "театр": "theater", "theater": "theater",
+    "выставка": "exhibition", "выставки": "exhibition", "exhibition": "exhibition",
+    "детям": "kids", "дети": "kids", "kids": "kids",
+    "спорт": "sport", "sport": "sport",
+    "движ": "party", "вечеринка": "party", "party": "party",
+    "бесплатно": "free", "free": "free",
+    "экскурсия": "excursion", "excursion": "excursion",
+    "маркет": "market", "market": "market",
+    "мастер-класс": "masterclass", "masterclass": "masterclass",
+    "настолки": "boardgames", "boardgames": "boardgames",
+    "трансляция": "broadcast", "broadcast": "broadcast",
+    "обучение": "education", "education": "education",
+    "квиз": "quiz", "quiz": "quiz",
+}
+
+BATCH_TEMPLATE_HEADERS = [
+    "title", "details", "category", "event_date", "show_time",
+    "place", "address", "price", "description", "source_url"
+]
+
+BATCH_TEMPLATE_EXAMPLE = [
+    "Концерт джаза", "Вечер живой музыки для всех", "concert",
+    "15.05.2026", "19:00", "Джаз-клуб Blue Note", "ул. Немига, 3",
+    "от 20 руб", "Программа из классики и современного джаза", "https://example.com"
+]
+
+
+def _batch_parse_date(raw: str):
+    """Парсит дату или период. Возвращает (value, error)."""
+    import re as _re
+    from datetime import date as _date
+    raw = (raw or "").strip()
+    if not raw:
+        return None, "пустая дата"
+    if _re.match(r"^\d{4}-\d{2}-\d{2}$", raw):
+        try:
+            d = _date.fromisoformat(raw)
+            if d < _date.today():
+                return None, f"дата {raw} в прошлом"
+            return raw, None
+        except Exception:
+            return None, f"невалидная дата {raw}"
+    pm = _re.match(r"^(\d{1,2}\.\d{1,2}\.\d{4})-(\d{1,2}\.\d{1,2}\.\d{4})$", raw)
+    if pm:
+        def _pd(s):
+            d, mo, y = s.split(".")
+            return _date(int(y), int(mo), int(d))
+        try:
+            d1, d2 = _pd(pm.group(1)), _pd(pm.group(2))
+        except Exception:
+            return None, f"невалидный период {raw}"
+        if d2 < d1:
+            return None, "конец периода раньше начала"
+        if d1 < _date.today():
+            return None, "дата начала в прошлом"
+        if (d2 - d1).days > 90:
+            return None, "период > 90 дней"
+        return f"{d1.isoformat()}|{d2.isoformat()}", None
+    m = _re.match(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})$", raw)
+    if m:
+        day, month, year = m.groups()
+        try:
+            d = _date(int(year), int(month), int(day))
+        except Exception:
+            return None, f"невалидная дата {raw}"
+        if d < _date.today():
+            return None, f"дата {raw} в прошлом"
+        return f"{year}-{month.zfill(2)}-{day.zfill(2)}", None
+    return None, f"не распознан формат: {raw}"
+
+
+def _batch_parse_time(raw: str) -> tuple:
+    """Парсит ЧЧ:ММ или ЧЧ:ММ-ЧЧ:ММ. Возвращает (show_time, end_time)."""
+    import re as _re
+    raw = (raw or "").strip()
+    if not raw:
+        return "", ""
+    rng = _re.match(r"^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$", raw)
+    if rng:
+        return rng.group(1), rng.group(2)
+    if _re.match(r"^\d{1,2}:\d{2}$", raw):
+        return raw, ""
+    return raw, ""
+
+
+def _batch_check_duplicate(title: str, event_date: str, place: str) -> bool:
+    """Проверяет дубликат в events и pending_events. Возвращает True если дубль."""
+    import re as _re
+    def _norm(s):
+        return _re.sub(r"[\s\-—–,\.!?]+", " ", (s or "").lower()).strip()
+    t_norm = _norm(title)
+    p_norm = _norm(place)
+    date_chk = event_date.split("|")[0].strip() if "|" in (event_date or "") else event_date
+    if not date_chk or not t_norm:
+        return False
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT title, place FROM events WHERE event_date = ? AND LOWER(title) LIKE ?",
+            (date_chk, f"%{t_norm[:20]}%")
+        ).fetchall()
+        for r in rows:
+            if _norm(r[0]) == t_norm:
+                return True
+        rows_p = conn.execute(
+            "SELECT title FROM pending_events "
+            "WHERE event_date LIKE ? AND status NOT IN ('rejected','approved') AND LOWER(title) LIKE ?",
+            (f"%{date_chk}%", f"%{t_norm[:20]}%")
+        ).fetchall()
+        for r in rows_p:
+            if _norm(r[0]) == t_norm:
+                return True
+    return False
+
+
+def _read_batch_rows(data: bytes, filename: str) -> tuple:
+    """Читает xlsx/xls/csv, возвращает (rows: list[dict], error: str)."""
+    fname = filename.lower()
+    try:
+        if fname.endswith(".csv"):
+            text = data.decode("utf-8-sig", errors="replace")
+            reader = csv.DictReader(io.StringIO(text))
+            return [dict(r) for r in reader], ""
+        elif fname.endswith(".xlsx") or fname.endswith(".xls"):
+            import openpyxl
+            buf = io.BytesIO(data)
+            wb = openpyxl.load_workbook(buf, read_only=True, data_only=True)
+            ws = wb.active
+            all_rows = list(ws.iter_rows(values_only=True))
+            if not all_rows:
+                return [], "Файл пустой"
+            headers = [str(h).strip().lower() if h else "" for h in all_rows[0]]
+            result = []
+            for row in all_rows[1:]:
+                if all(v is None or str(v).strip() == "" for v in row):
+                    continue
+                result.append({
+                    headers[i]: (str(row[i]).strip() if row[i] is not None else "")
+                    for i in range(min(len(headers), len(row)))
+                })
+            return result, ""
+        else:
+            return [], f"Неподдерживаемый формат: {filename}"
+    except ImportError:
+        return [], "openpyxl не установлен — используйте CSV"
+    except Exception as e:
+        return [], f"Ошибка чтения файла: {e}"
+
+
+class BatchUploadRequest(BaseModel):
+    """Метаданные пользователя при batch-загрузке через API."""
+    tg_user_id: Optional[int] = None
+    tg_username: Optional[str] = None
+    tg_first_name: Optional[str] = None
+
+
+@app.post("/api/events/batch")
+async def batch_upload_events(
+    file: UploadFile = File(...),
+    tg_user_id: Optional[int] = Query(None),
+    tg_username: Optional[str] = Query(None),
+    tg_first_name: Optional[str] = Query(None),
+):
+    """
+    Пакетная загрузка событий из xlsx/xls/csv.
+    Файл содержит столбцы: title, details, category, event_date, show_time,
+    place, address, price, description, source_url.
+    Каждое валидное событие попадает в pending_events со статусом pending.
+    Возвращает детальный отчёт.
+    """
+    fname = file.filename or "upload"
+
+    if not (fname.lower().endswith(".xlsx") or fname.lower().endswith(".xls") or fname.lower().endswith(".csv")):
+        raise HTTPException(status_code=400, detail="Поддерживаются только .xlsx, .xls, .csv")
+
+    contents = await file.read()
+    if len(contents) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Файл слишком большой, максимум 5 МБ")
+
+    rows, err = _read_batch_rows(contents, fname)
+    if err:
+        raise HTTPException(status_code=400, detail=err)
+    if not rows:
+        raise HTTPException(status_code=400, detail="Файл пустой или не содержит данных")
+    if len(rows) > 100:
+        raise HTTPException(status_code=400, detail="Максимум 100 событий за раз")
+
+    user_id = tg_user_id or 0
+    username = tg_username or "web_user"
+    first_name = tg_first_name or "Web"
+    now_str = datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+    seen_in_file: set = set()
+    results = []
+
+    for row_num, raw_row in enumerate(rows, start=2):
+        row = {(k or "").strip().lower(): v for k, v in raw_row.items()}
+
+        title = row.get("title", "").strip()
+        if not title or len(title) < 3:
+            results.append({"row": row_num, "title": title[:30], "status": "error", "reason": "пустое или короткое название"})
+            continue
+
+        date_raw = row.get("event_date", "") or row.get("date", "")
+        event_date, date_err = _batch_parse_date(date_raw)
+        if date_err:
+            results.append({"row": row_num, "title": title[:30], "status": "error", "reason": date_err})
+            continue
+
+        time_raw = row.get("show_time", "") or row.get("time", "")
+        show_time, end_time = _batch_parse_time(time_raw)
+
+        place = row.get("place", "").strip()
+        if not place:
+            results.append({"row": row_num, "title": title[:30], "status": "error", "reason": "не указано место"})
+            continue
+
+        cat_raw = row.get("category", "").strip().lower()
+        category = BATCH_CATEGORY_MAP.get(cat_raw, "other")
+
+        details     = (row.get("details", "") or "")[:300]
+        description = (row.get("description", "") or "")[:1000]
+        address     = (row.get("address", "") or "").strip()
+        price       = (row.get("price", "") or "").strip()
+        source_url  = (row.get("source_url", "") or row.get("url", "") or "").strip()
+
+        # Дубликат внутри файла
+        key = (title.lower(), event_date, place.lower())
+        if key in seen_in_file:
+            results.append({"row": row_num, "title": title[:30], "status": "error", "reason": "дубликат внутри файла"})
+            continue
+        seen_in_file.add(key)
+
+        # Дубликат в БД
+        if _batch_check_duplicate(title, event_date, place):
+            results.append({"row": row_num, "title": title[:30], "status": "error", "reason": "уже есть в афише/очереди"})
+            continue
+
+        # Сохраняем в pending_events
+        try:
+            with get_db() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO pending_events
+                        (user_id, username, first_name, title, event_date, show_time, end_time,
+                         place, address, category, details, description, price, source_url,
+                         is_promo, status, created_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,'pending',?)
+                """, (
+                    user_id, username, first_name,
+                    title, event_date, show_time, end_time,
+                    place, address, category,
+                    details, description, price, source_url,
+                    now_str,
+                ))
+                conn.execute(
+                    "INSERT INTO user_stats (user_id, username, first_name, action, detail, created_at) VALUES (?,?,?,?,?,?)",
+                    (user_id, username, first_name, "web_batch_upload",
+                     f"{title} ({event_date})", now_str)
+                )
+                conn.commit()
+                pending_id = cursor.lastrowid
+            results.append({"row": row_num, "title": title[:30], "status": "accepted", "id": pending_id})
+        except Exception as e:
+            results.append({"row": row_num, "title": title[:30], "status": "error", "reason": str(e)})
+
+    accepted = [r for r in results if r["status"] == "accepted"]
+    errors   = [r for r in results if r["status"] == "error"]
+
+    # Уведомляем админа если есть принятые
+    if accepted and BOT_TOKEN and ADMIN_ID:
+        try:
+            msg = (
+                f"\U0001f4e6 <b>Пакетная загрузка с сайта</b>\n"
+                f"\U0001f464 {first_name} (@{username}, ID {user_id})\n"
+                f"\U0001f4e5 Принято: <b>{len(accepted)}</b> | "
+                f"\u26a0\ufe0f Пропущено: <b>{len(errors)}</b>\n"
+                f"\U0001f4c1 Файл: {fname}\n\n"
+                f"\U0001f50d /pending — просмотр очереди"
+            )
+            with httpx.Client(timeout=5) as client:
+                client.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                    json={"chat_id": ADMIN_ID, "text": msg, "parse_mode": "HTML"}
+                )
+        except Exception:
+            pass
+
+    return {
+        "success": True,
+        "total": len(rows),
+        "accepted": len(accepted),
+        "errors": len(errors),
+        "results": results,
+    }
+
+
+@app.get("/api/events/batch/template")
+async def get_batch_template(format: str = Query("xlsx", description="Формат: xlsx или csv")):
+    """
+    Возвращает шаблон для пакетной загрузки событий.
+    ?format=xlsx (по умолчанию) или ?format=csv
+    """
+    if format == "csv":
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(BATCH_TEMPLATE_HEADERS)
+        writer.writerow(BATCH_TEMPLATE_EXAMPLE)
+        return Response(
+            content=output.getvalue().encode("utf-8-sig"),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=minskdvizh_template.csv"},
+        )
+
+    # xlsx
+    try:
+        import openpyxl
+        from openpyxl.styles import Font, PatternFill, Alignment
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "События"
+
+        header_fill = PatternFill(start_color="2D6A4F", end_color="2D6A4F", fill_type="solid")
+        header_font = Font(color="FFFFFF", bold=True)
+        for col, h in enumerate(BATCH_TEMPLATE_HEADERS, 1):
+            cell = ws.cell(row=1, column=col, value=h)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center")
+
+        example_fill = PatternFill(start_color="D8F3DC", end_color="D8F3DC", fill_type="solid")
+        for col, val in enumerate(BATCH_TEMPLATE_EXAMPLE, 1):
+            ws.cell(row=2, column=col, value=val).fill = example_fill
+
+        widths = [35, 35, 15, 12, 8, 25, 25, 15, 40, 30]
+        for col, w in enumerate(widths, 1):
+            ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = w
+
+        ws2 = wb.create_sheet("Подсказки")
+        hints = [
+            ("Поле", "Обязательное", "Формат / пример"),
+            ("title",       "ДА",  "Название события"),
+            ("details",     "ДА",  "Краткое описание — для кого и что"),
+            ("category",    "ДА",  "concert / theater / cinema / exhibition / kids / sport / party / free / excursion / market / masterclass / boardgames / broadcast / education / quiz"),
+            ("event_date",  "ДА",  "ДД.ММ.ГГГГ  или  ДД.ММ.ГГГГ-ДД.ММ.ГГГГ (период)"),
+            ("show_time",   "ДА",  "ЧЧ:ММ  или  ЧЧ:ММ-ЧЧ:ММ"),
+            ("place",       "ДА",  "Название площадки"),
+            ("address",     "нет", "ул. Пример, 1"),
+            ("price",       "нет", "от 20 руб  /  Бесплатно"),
+            ("description", "нет", "Подробное описание, программа"),
+            ("source_url",  "нет", "https://..."),
+        ]
+        for row_idx, row_data in enumerate(hints, 1):
+            for col_idx, val in enumerate(row_data, 1):
+                ws2.cell(row=row_idx, column=col_idx, value=val)
+        ws2.column_dimensions["A"].width = 15
+        ws2.column_dimensions["B"].width = 12
+        ws2.column_dimensions["C"].width = 70
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return Response(
+            content=buf.read(),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": "attachment; filename=minskdvizh_template.xlsx"},
+        )
+    except ImportError:
+        # Fallback на CSV если openpyxl не установлен
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(BATCH_TEMPLATE_HEADERS)
+        writer.writerow(BATCH_TEMPLATE_EXAMPLE)
+        return Response(
+            content=output.getvalue().encode("utf-8-sig"),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=minskdvizh_template.csv"},
+        )
