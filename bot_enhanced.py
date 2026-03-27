@@ -178,6 +178,7 @@ def init_db():
             "ALTER TABLE pending_events ADD COLUMN is_promo INTEGER DEFAULT 0",
             "ALTER TABLE events ADD COLUMN end_time TEXT DEFAULT ''",
             "ALTER TABLE subscriptions ADD COLUMN status TEXT DEFAULT 'active'",
+            "ALTER TABLE flash_subscriptions ADD COLUMN last_notified_at TEXT DEFAULT ''",
         ]:
             try:
                 cursor.execute(col_sql)
@@ -707,6 +708,7 @@ def get_all_flash_subscriptions() -> list:
 async def check_flash_subscriptions(bot) -> int:
     """Проверяет новые события против всех флеш-подписок и рассылает совпадения.
     Каждая подписка — отдельное сообщение пользователю.
+    Повторно не уведомляет: сравнивает created_at события с last_notified_at подписки.
     Вызывается после каждого парсинга."""
     subs = get_all_flash_subscriptions()
     if not subs:
@@ -715,6 +717,7 @@ async def check_flash_subscriptions(bot) -> int:
     today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
     sent_total = 0
     import html as _html
+    from telegram.error import RetryAfter
 
     with get_db_connection() as conn:
         for sub in subs:
@@ -724,15 +727,28 @@ async def check_flash_subscriptions(bot) -> int:
             sp = f"%{q}%"
             spl = f"%{ql}%"
 
-            rows = conn.execute("""
+            # Берём last_notified_at для этой подписки (может отсутствовать в старых записях)
+            sub_row = conn.execute(
+                "SELECT last_notified_at FROM flash_subscriptions WHERE id = ?",
+                (sub["id"],)
+            ).fetchone()
+            last_notified = (sub_row["last_notified_at"] or "") if sub_row else ""
+
+            # Показываем только события добавленные ПОСЛЕ последнего уведомления
+            # Для новых подписок (last_notified пуст) — показываем все актуальные события
+            date_condition = "AND event_date >= ?" if not last_notified else "AND event_date >= ? AND (created_at IS NULL OR created_at > ?)"
+            date_params = (today,) if not last_notified else (today, last_notified)
+
+            rows = conn.execute(f"""
                 SELECT DISTINCT id, title, details, event_date, show_time, place, price, category, source_url
                 FROM events
                 WHERE event_date >= ?
                 AND (LOWER(title) LIKE ? OR title LIKE ?
                      OR LOWER(details) LIKE ? OR details LIKE ?)
+                {"AND (created_at IS NULL OR created_at > ?)" if last_notified else ""}
                 ORDER BY event_date, show_time
                 LIMIT 5
-            """, (today, spl, sp, spl, sp)).fetchall()
+            """, (today, spl, sp, spl, sp, *((last_notified,) if last_notified else ()))).fetchall()
 
             if not rows:
                 continue
@@ -761,7 +777,16 @@ async def check_flash_subscriptions(bot) -> int:
                     parse_mode="HTML", disable_web_page_preview=True
                 )
                 sent_total += 1
-                await asyncio.sleep(0.05)
+                # Обновляем время последнего уведомления
+                conn.execute(
+                    "UPDATE flash_subscriptions SET last_notified_at = ? WHERE id = ?",
+                    (datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"), sub["id"])
+                )
+                conn.commit()
+                await asyncio.sleep(0.1)
+            except RetryAfter as e:
+                logger.warning(f"Флеш-рассылка RetryAfter {e.retry_after}с для {user_id}")
+                await asyncio.sleep(e.retry_after + 1)
             except Exception as e:
                 logger.warning(f"Флеш-рассылка {user_id} «{q}»: {e}")
 
@@ -1118,7 +1143,7 @@ async def show_page(update_or_query, context: ContextTypes.DEFAULT_TYPE):
         lines.append("")
     text = "\n".join(lines).strip()
     keyboard = build_page_keyboard(data)
-    if len(text) <= 4000:
+    if len(text) <= 4096:
         await send(text, reply_markup=keyboard, parse_mode="HTML", disable_web_page_preview=True)
     else:
         # Текст >4000 — делим на части, склеивая события в блоки до 4000 символов
@@ -1137,7 +1162,7 @@ async def show_page(update_or_query, context: ContextTypes.DEFAULT_TYPE):
         current = header
         for t in all_texts:
             candidate = current + "\n" + t + "\n"
-            if len(candidate) > 4000 and current != header:
+            if len(candidate) > 4096 and current != header:
                 parts.append(current.strip())
                 current = header + t + "\n"
             else:
@@ -1413,19 +1438,31 @@ async def send_subscriptions_digest(bot, date_type: str):
             lines.append(f"\n<i>...и ещё {len(events) - 5} событий. Откройте бот для просмотра всех.</i>")
 
         message_text = "\n\n".join(lines)
-        if len(message_text) > 4000:
-            message_text = message_text[:3950] + "\n\n<i>...открой бот чтобы увидеть все.</i>"
+        if len(message_text) > 4096:
+            message_text = message_text[:4040] + "\n\n<i>...открой бот чтобы увидеть все.</i>"
 
         unsubscribe_keyboard = InlineKeyboardMarkup([[
             InlineKeyboardButton("🔕 Отписаться", callback_data=f"unsub_{category}_{date_type}")
         ]])
+        from telegram.error import RetryAfter
         for user_id in user_ids:
             try:
                 await bot.send_message(chat_id=user_id, text=message_text,
                                        reply_markup=unsubscribe_keyboard,
                                        parse_mode="HTML", disable_web_page_preview=True)
                 sent_count += 1
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.1)
+            except RetryAfter as e:
+                logger.warning(f"Дайджест RetryAfter {e.retry_after}с для {user_id}")
+                await asyncio.sleep(e.retry_after + 1)
+                try:
+                    await bot.send_message(chat_id=user_id, text=message_text,
+                                           reply_markup=unsubscribe_keyboard,
+                                           parse_mode="HTML", disable_web_page_preview=True)
+                    sent_count += 1
+                except Exception as retry_e:
+                    error_count += 1
+                    logger.warning(f"Повтор после RetryAfter не удался {user_id}: {retry_e}")
             except Exception as e:
                 error_count += 1
                 logger.warning(f"Не удалось отправить подписчику {user_id}: {e}")
@@ -1487,7 +1524,7 @@ async def show_pending_list(update_or_query, context: ContextTypes.DEFAULT_TYPE)
         InlineKeyboardButton("❌ Отклонить все", callback_data="adm_reject_all"),
     ])
 
-    text = "\n".join(lines)[:4000]
+    text = "\n".join(lines)[:4096]
     kbd = InlineKeyboardMarkup(keyboard)
     # Всегда reply_text — чтобы /admin панель оставалась видна
     await update_or_query.message.reply_text(text, reply_markup=kbd, parse_mode="HTML")
@@ -2131,8 +2168,8 @@ def check_duplicate_event(title: str, event_date: str, place: str) -> dict | Non
         # Простая очистка для сравнения (без канонизации)
         return _re.sub(r"[\s\-—–,\.!?]+", " ", (s or "").lower()).strip()
 
-    t_norm  = _norm(title)
-    p_norm  = _norm(place)
+    t_norm  = _norm_title(title)
+    p_norm  = _norm_place(place)
 
     # Для периода берём начальную дату
     if "|" in (event_date or ""):
@@ -2153,7 +2190,7 @@ def check_duplicate_event(title: str, event_date: str, place: str) -> dict | Non
                     (chk_date, f"%{t_norm[:20]}%", f"%{p_norm[:20]}%")
                 ).fetchall()
                 for r in rows:
-                    if _norm(r["title"]) == t_norm and _norm(r["place"] or "") == p_norm:
+                    if _norm_title(r["title"]) == t_norm and _norm_place(r["place"] or "") == p_norm:
                         return {"level": 1, "source": "events", "id": r["id"],
                                 "title": r["title"], "date": r["event_date"], "place": r["place"] or ""}
 
@@ -2164,7 +2201,7 @@ def check_duplicate_event(title: str, event_date: str, place: str) -> dict | Non
                 (chk_date, f"%{t_norm[:20]}%")
             ).fetchall()
             for r in rows:
-                if _norm(r["title"]) == t_norm:
+                if _norm_title(r["title"]) == t_norm:
                     return {"level": 2, "source": "events", "id": r["id"],
                             "title": r["title"], "date": r["event_date"], "place": r["place"] or ""}
 
@@ -2175,7 +2212,7 @@ def check_duplicate_event(title: str, event_date: str, place: str) -> dict | Non
                 (f"%{chk_date}%", f"%{t_norm[:20]}%")
             ).fetchall()
             for r in rows_p:
-                if _norm(r["title"]) == t_norm:
+                if _norm_title(r["title"]) == t_norm:
                     return {"level": 2, "source": "pending", "id": r["id"],
                             "title": r["title"], "date": r["event_date"], "place": r["place"] or ""}
 
@@ -2570,9 +2607,10 @@ async def post_to_channel(bot, post_type: str = "today"):
         return
 
     text = "\n".join(lines)
-    if len(text) > 4000:
-        text = text[:4000] + "...\n\n👉 @Minskdvizh_bot"
+    if len(text) > 4096:
+        text = text[:4040] + "...\n\n👉 @Minskdvizh_bot"
 
+    from telegram.error import RetryAfter
     try:
         await bot.send_message(
             chat_id=CHANNEL_ID,
@@ -2581,6 +2619,15 @@ async def post_to_channel(bot, post_type: str = "today"):
             disable_web_page_preview=True,
         )
         logger.info(f"📢 Пост в канал ({post_type}) опубликован")
+    except RetryAfter as e:
+        logger.warning(f"post_to_channel RetryAfter {e.retry_after}с, повтор...")
+        await asyncio.sleep(e.retry_after + 1)
+        try:
+            await bot.send_message(chat_id=CHANNEL_ID, text=text,
+                                   parse_mode="HTML", disable_web_page_preview=True)
+            logger.info(f"📢 Пост в канал ({post_type}) опубликован (повтор)")
+        except Exception as e2:
+            logger.error(f"Ошибка публикации в канал (повтор): {e2}")
     except Exception as e:
         logger.error(f"Ошибка публикации в канал: {e}")
 
@@ -2589,14 +2636,14 @@ def setup_scheduler(application):
     scheduler = AsyncIOScheduler()
     scheduler.add_job(
         run_parsers_job,
-        trigger=CronTrigger(hour=3, minute=0),  # UTC+3 = 6:00 Минск
+        trigger=CronTrigger(hour=3, minute=0, timezone="UTC"),  # UTC = 6:00 Минск
         kwargs={"bot": application.bot},
         id="daily_parsers",
         replace_existing=True,
     )
     scheduler.add_job(
         send_digest_job,
-        trigger=CronTrigger(hour=5, minute=0),  # UTC+3 = 8:00 Минск
+        trigger=CronTrigger(hour=5, minute=0, timezone="UTC"),  # UTC = 8:00 Минск
         kwargs={"bot": application.bot},
         id="daily_digest",
         replace_existing=True,
@@ -2606,7 +2653,7 @@ def setup_scheduler(application):
             await post_to_channel(bot, "today")
     scheduler.add_job(
         channel_today_job,
-        trigger=CronTrigger(hour=5, minute=5),  # UTC = 8:05 Минск
+        trigger=CronTrigger(hour=5, minute=5, timezone="UTC"),  # UTC = 8:05 Минск
         kwargs={"bot": application.bot},
         id="channel_today", replace_existing=True,
     )
@@ -2615,7 +2662,7 @@ def setup_scheduler(application):
             await post_to_channel(bot, "weekend")
     scheduler.add_job(
         channel_weekend_job,
-        trigger=CronTrigger(day_of_week="fri", hour=8, minute=0),  # UTC = 11:00 Минск
+        trigger=CronTrigger(day_of_week="fri", hour=8, minute=0, timezone="UTC"),  # UTC = 11:00 Минск
         kwargs={"bot": application.bot},
         id="channel_weekend", replace_existing=True,
     )
