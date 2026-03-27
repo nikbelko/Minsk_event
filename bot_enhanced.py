@@ -217,7 +217,9 @@ def log_user_action(user_id: int, username: str | None, first_name: str | None, 
         logger.error(f"Ошибка логирования: {e}")
 
 def _build_time_filter(date_filter: str, today: str, now_time: str) -> tuple[str, list]:
-    """Возвращает SQL условие для фильтрации прошедших событий и параметры.
+    """Возвращает чистое SQL условие БЕЗ 'AND' для фильтрации прошедших событий.
+    - Для where.append(): добавлять напрямую, ' AND '.join() сам добавит AND.
+    - Для query +=: использовать query += ' AND ' + time_filter.
     Логика: нет show_time → всегда показываем.
             есть end_time → фильтруем по end_time > now.
             нет end_time  → фильтруем по show_time > now.
@@ -225,17 +227,11 @@ def _build_time_filter(date_filter: str, today: str, now_time: str) -> tuple[str
     if date_filter != today:
         return "", []
 
-    return """
-        AND (
-            show_time = '' OR show_time IS NULL
-            OR (
-                (end_time != '' AND end_time IS NOT NULL AND end_time > ?)
-                OR
-                ((end_time = '' OR end_time IS NULL) AND show_time > ?)
-            )
-        )
-    """, [now_time, now_time]
-
+    return (
+        "(show_time = '' OR show_time IS NULL "
+        "OR ((end_time != '' AND end_time IS NOT NULL AND end_time > ?) "
+        "OR ((end_time = '' OR end_time IS NULL) AND show_time > ?)))"
+    ), [now_time, now_time]
 def get_stats_data(exclude_admin: bool = True) -> dict:
     today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
     admin_filter = ADMIN_ID if exclude_admin else -1  # -1 никогда не совпадёт
@@ -481,7 +477,8 @@ def get_events_by_date_and_category(target_date: datetime, category: str | None 
             # Для сегодня — исключаем прошедшие сеансы
             if date_str == today_str:
                 time_filter, time_params = _build_time_filter(date_str, today_str, now_time)
-                query += time_filter
+                if time_filter:
+                    query += " AND " + time_filter
                 params.extend(time_params)
             
             query += " ORDER BY show_time, title"
@@ -502,7 +499,8 @@ def get_events_by_date_and_category(target_date: datetime, category: str | None 
         
         if date_str == today_str:
             time_filter, time_params = _build_time_filter(date_str, today_str, now_time)
-            query += time_filter
+            if time_filter:
+                query += " AND " + time_filter
             params.extend(time_params)
         
         query += " ORDER BY show_time, title"
@@ -2032,7 +2030,7 @@ async def send_promo_to_subscribers(bot, row_data: dict) -> int:
                 disable_web_page_preview=False,
             )
             sent += 1
-            await asyncio.sleep(0.05)  # вежливая пауза
+            await asyncio.sleep(0.1)  # вежливая пауза
         except Exception as e:
             logger.warning(f"Промо подписчику {user_id}: {e}")
 
