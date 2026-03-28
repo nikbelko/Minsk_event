@@ -3852,13 +3852,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 BATCH_TEMPLATE_HEADERS = [
     "title", "details", "category", "event_date", "show_time",
-    "place", "address", "price", "description", "source_url"
+    "place", "address", "price", "description", "source_url", "is_promo"
 ]
 
 BATCH_TEMPLATE_EXAMPLE = [
     "Концерт джаза", "Вечер живой музыки для всех", "concert",
     "15.05.2026", "19:00", "Джаз-клуб Blue Note", "ул. Немига, 3",
-    "от 20 руб", "Программа из классики и современного джаза", "https://example.com"
+    "от 20 руб", "Программа из классики и современного джаза", "https://example.com", "0"
 ]
 
 BATCH_CATEGORY_MAP = {
@@ -3902,7 +3902,7 @@ async def send_batch_template(message):
             cell = ws.cell(row=2, column=col, value=val)
             cell.fill = example_fill
 
-        widths = [35, 35, 15, 12, 8, 25, 25, 15, 40, 30]
+        widths = [35, 35, 15, 12, 8, 25, 25, 15, 40, 30, 10]
         for col, w in enumerate(widths, 1):
             ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = w
 
@@ -3921,6 +3921,7 @@ async def send_batch_template(message):
             ("price",       "нет", "от 20 руб  /  Бесплатно"),
             ("description", "нет", "Подробное описание, программа"),
             ("source_url",  "нет", "https://..."),
+            ("is_promo",    "нет", "1 = анонсировать в канал и подписчикам, 0 = нет (по умолчанию)"),
         ]
         for row, (f, req, hint) in enumerate(hints, 2):
             ws2.cell(row=row, column=1, value=f)
@@ -3961,12 +3962,23 @@ async def send_batch_template(message):
 
 
 def _parse_batch_date(raw: str) -> tuple[str, str]:
-    """Парсит дату или период. Возвращает (event_date_value, error_str)."""
+    """Парсит дату или период. Возвращает (event_date_value, error_str).
+    Поддерживает форматы:
+      - YYYY-MM-DD (ISO, в т.ч. datetime из Excel: "2026-03-29 00:00:00")
+      - ДД.ММ.ГГГГ
+      - ДД.ММ.ГГГГ-ДД.ММ.ГГГГ (период)
+    """
     import re as _re
-    from datetime import date as _date
+    from datetime import date as _date, datetime as _dt
     raw = (raw or "").strip()
     if not raw:
         return "", "пустая дата"
+
+    # Excel/openpyxl часто возвращает datetime как строку "2026-03-29 00:00:00"
+    # или "2026-03-29 19:00:00" — берём только дату
+    excel_dt = _re.match(r"^(\d{4}-\d{2}-\d{2})\s+\d{2}:\d{2}(:\d{2})?$", raw)
+    if excel_dt:
+        raw = excel_dt.group(1)
 
     if _re.match(r"^\d{4}-\d{2}-\d{2}$", raw):
         try:
@@ -4009,11 +4021,15 @@ def _parse_batch_date(raw: str) -> tuple[str, str]:
 
 
 def _parse_batch_time(raw: str) -> tuple[str, str]:
-    """Парсит время ЧЧ:ММ или ЧЧ:ММ-ЧЧ:ММ. Возвращает (show_time, end_time)."""
+    """Парсит время ЧЧ:ММ или ЧЧ:ММ-ЧЧ:ММ. Возвращает (show_time, end_time).
+    Также обрабатывает Excel-формат "19:00:00" → "19:00".
+    """
     import re as _re
     raw = (raw or "").strip()
     if not raw:
         return "", ""
+    # Excel может отдать "19:00:00" — обрезаем секунды
+    raw = _re.sub(r"^(\d{1,2}:\d{2}):\d{2}$", r"\1", raw)
     rng = _re.match(r"^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$", raw)
     if rng:
         return rng.group(1), rng.group(2)
@@ -4135,6 +4151,9 @@ async def handle_batch_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         address = (row.get("address", "") or "").strip()
         price = (row.get("price", "") or "").strip()
         source_url = (row.get("source_url", "") or row.get("url", "") or "").strip()
+        # is_promo: "1", "да", "yes", "true" → 1, всё остальное → 0
+        promo_raw = (row.get("is_promo", "") or "").strip().lower()
+        is_promo = 1 if promo_raw in ("1", "да", "yes", "true", "+") else 0
 
         dup = check_duplicate_event(title, event_date, place)
         if dup:
@@ -4150,13 +4169,13 @@ async def handle_batch_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         (user_id, username, first_name, title, event_date, show_time, end_time,
                          place, address, category, details, description, price, source_url,
                          is_promo, status, created_at)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,'pending',?)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?)
                 """, (
                     user.id, user.username, user.first_name,
                     title, event_date, show_time, end_time,
                     place, address, category,
                     details, description, price, source_url,
-                    now_str,
+                    is_promo, now_str,
                 ))
                 conn.commit()
                 pending_ids.append(cursor.lastrowid)

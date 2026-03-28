@@ -958,23 +958,32 @@ BATCH_CATEGORY_MAP = {
 
 BATCH_TEMPLATE_HEADERS = [
     "title", "details", "category", "event_date", "show_time",
-    "place", "address", "price", "description", "source_url"
+    "place", "address", "price", "description", "source_url", "is_promo"
 ]
 
 BATCH_TEMPLATE_EXAMPLE = [
     "Концерт джаза", "Вечер живой музыки для всех", "concert",
     "15.05.2026", "19:00", "Джаз-клуб Blue Note", "ул. Немига, 3",
-    "от 20 руб", "Программа из классики и современного джаза", "https://example.com"
+    "от 20 руб", "Программа из классики и современного джаза", "https://example.com", "0"
 ]
 
 
 def _batch_parse_date(raw: str):
-    """Парсит дату или период. Возвращает (value, error)."""
+    """Парсит дату или период. Возвращает (value, error).
+    Поддерживает форматы:
+      - YYYY-MM-DD (ISO, в т.ч. datetime из Excel: "2026-03-29 00:00:00")
+      - ДД.ММ.ГГГГ
+      - ДД.ММ.ГГГГ-ДД.ММ.ГГГГ (период)
+    """
     import re as _re
     from datetime import date as _date
     raw = (raw or "").strip()
     if not raw:
         return None, "пустая дата"
+    # Excel/openpyxl возвращает datetime как "2026-03-29 00:00:00" — берём только дату
+    excel_dt = _re.match(r"^(\d{4}-\d{2}-\d{2})\s+\d{2}:\d{2}(:\d{2})?$", raw)
+    if excel_dt:
+        raw = excel_dt.group(1)
     if _re.match(r"^\d{4}-\d{2}-\d{2}$", raw):
         try:
             d = _date.fromisoformat(raw)
@@ -1013,11 +1022,15 @@ def _batch_parse_date(raw: str):
 
 
 def _batch_parse_time(raw: str) -> tuple:
-    """Парсит ЧЧ:ММ или ЧЧ:ММ-ЧЧ:ММ. Возвращает (show_time, end_time)."""
+    """Парсит ЧЧ:ММ или ЧЧ:ММ-ЧЧ:ММ. Возвращает (show_time, end_time).
+    Обрабатывает Excel-формат "19:00:00" → "19:00".
+    """
     import re as _re
     raw = (raw or "").strip()
     if not raw:
         return "", ""
+    # Excel может отдать "19:00:00" — обрезаем секунды
+    raw = _re.sub(r"^(\d{1,2}:\d{2}):\d{2}$", r"\1", raw)
     rng = _re.match(r"^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})$", raw)
     if rng:
         return rng.group(1), rng.group(2)
@@ -1165,6 +1178,9 @@ async def batch_upload_events(
         address     = (row.get("address", "") or "").strip()
         price       = (row.get("price", "") or "").strip()
         source_url  = (row.get("source_url", "") or row.get("url", "") or "").strip()
+        # is_promo: "1", "да", "yes", "true", "+" → 1, всё остальное → 0
+        promo_raw = (row.get("is_promo", "") or "").strip().lower()
+        is_promo = 1 if promo_raw in ("1", "да", "yes", "true", "+") else 0
 
         # Дубликат внутри файла
         key = (title.lower(), event_date, place.lower())
@@ -1187,13 +1203,13 @@ async def batch_upload_events(
                         (user_id, username, first_name, title, event_date, show_time, end_time,
                          place, address, category, details, description, price, source_url,
                          is_promo, status, created_at)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,'pending',?)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',?)
                 """, (
                     user_id, username, first_name,
                     title, event_date, show_time, end_time,
                     place, address, category,
                     details, description, price, source_url,
-                    now_str,
+                    is_promo, now_str,
                 ))
                 conn.execute(
                     "INSERT INTO user_stats (user_id, username, first_name, action, detail, created_at) VALUES (?,?,?,?,?,?)",
@@ -1274,7 +1290,7 @@ async def get_batch_template(format: str = Query("xlsx", description="Форма
         for col, val in enumerate(BATCH_TEMPLATE_EXAMPLE, 1):
             ws.cell(row=2, column=col, value=val).fill = example_fill
 
-        widths = [35, 35, 15, 12, 8, 25, 25, 15, 40, 30]
+        widths = [35, 35, 15, 12, 8, 25, 25, 15, 40, 30, 10]
         for col, w in enumerate(widths, 1):
             ws.column_dimensions[ws.cell(row=1, column=col).column_letter].width = w
 
@@ -1291,6 +1307,7 @@ async def get_batch_template(format: str = Query("xlsx", description="Форма
             ("price",       "нет", "от 20 руб  /  Бесплатно"),
             ("description", "нет", "Подробное описание, программа"),
             ("source_url",  "нет", "https://..."),
+            ("is_promo",    "нет", "1 = анонсировать в канал и подписчикам, 0 = нет (по умолчанию)"),
         ]
         for row_idx, row_data in enumerate(hints, 1):
             for col_idx, val in enumerate(row_data, 1):
