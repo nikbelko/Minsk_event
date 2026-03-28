@@ -14,6 +14,7 @@ __pycache__/
 
 # Logs
 *.log
+*.log.*
 
 # IDE
 .vscode/
@@ -24,6 +25,7 @@ __pycache__/
 
 # Environment variables
 .env
+.env.local
 *.env
 
 # OS files
@@ -36,3 +38,54 @@ Desktop.ini
 msedgedriver
 geckodriver
 chromedriver
+Driver_Notes/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Session files
+*.session
+user_session.session
+
+# Bytecode
+__pycache__/
+*.py[cod]
+
+# Data files (исключаем всё, кроме шаблонов)
+/data/
+*.csv
+*.xlsx
+*.xls
+!minskdvizh_template.csv
+!minskdvizh_template.xlsx
+
+# Deployment
+railway.json
+.railway/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
+*.pid
+*.lock
+
+# Test coverage
+.coverage
+htmlcov/
+.tox/
+
+# Package manager
+.pip/
+.pip-cache/
+
+# Python packaging
+*.egg-info/
+dist/
+build/
