@@ -88,4 +88,4 @@ htmlcov/
 # Python packaging
 *.egg-info/
 dist/
-build/
+build/.vscode/
