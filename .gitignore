@@ -88,4 +88,7 @@ htmlcov/
 # Python packaging
 *.egg-info/
 dist/
-build/.vscode/
+build/
+telegram_parser.py
+telegram_parser_web.py
+afisha24_parser.py
