@@ -1651,6 +1651,89 @@ async def show_ustats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(_format_stats(stats, "📊 СТАТИСТИКА ПОЛЬЗОВАТЕЛЕЙ"), parse_mode="HTML")
 
 
+# ---------------------- Чистка дубликатов ----------------------
+
+
+def _find_duplicates(conn) -> list[dict]:
+    """Возвращает группы дубликатов: (keep_id, delete_ids, title, event_date, place, cnt)."""
+    cursor = conn.execute("""
+        SELECT MIN(id) AS keep_id,
+               GROUP_CONCAT(id) AS all_ids,
+               title, event_date,
+               COALESCE(place, '') AS place,
+               COUNT(*) AS cnt
+        FROM events
+        GROUP BY LOWER(title), event_date, LOWER(COALESCE(place, ''))
+        HAVING COUNT(*) > 1
+        ORDER BY cnt DESC
+    """)
+    result = []
+    for row in cursor.fetchall():
+        all_ids = [int(x) for x in str(row[1]).split(',')]
+        keep_id = int(row[0])
+        delete_ids = [i for i in all_ids if i != keep_id]
+        result.append({
+            'keep_id': keep_id,
+            'delete_ids': delete_ids,
+            'title': row[2],
+            'event_date': row[3],
+            'place': row[4],
+            'cnt': int(row[5]),
+        })
+    return result
+
+
+async def dedup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/dedup — поиск и удаление дубликатов в БД (только для админа).
+    /dedup         — показать статистику без удаления
+    /dedup confirm — удалить дубликаты
+    """
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Нет доступа.")
+        return
+
+    confirm = bool(context.args and context.args[0].lower() == 'confirm')
+
+    with get_db_connection() as conn:
+        conn.row_factory = sqlite3.Row
+        groups = _find_duplicates(conn)
+
+    total_groups = len(groups)
+    total_delete = sum(len(g['delete_ids']) for g in groups)
+
+    if total_groups == 0:
+        await update.message.reply_text("✅ Дубликатов не найдено — база чистая.")
+        return
+
+    if not confirm:
+        # Показываем превью первых 10 групп
+        lines = [f"🔍 <b>Найдено дубликатов:</b> {total_groups} групп → {total_delete} лишних записей\n"]
+        for g in groups[:10]:
+            lines.append(
+                f"• <b>{g['title'][:50]}</b>\n"
+                f"  📅 {g['event_date']} · 📍 {g['place'][:30] or '—'}\n"
+                f"  Копий: {g['cnt']} → оставим id={g['keep_id']}, удалим {len(g['delete_ids'])} шт."
+            )
+        if total_groups > 10:
+            lines.append(f"\n<i>...и ещё {total_groups - 10} групп</i>")
+        lines.append(f"\n⚠️ Для удаления: /dedup confirm")
+        await update.message.reply_text('\n'.join(lines), parse_mode="HTML")
+        return
+
+    # Выполняем удаление
+    all_delete_ids = [i for g in groups for i in g['delete_ids']]
+    with get_db_connection() as conn:
+        placeholders = ','.join('?' * len(all_delete_ids))
+        conn.execute(f"DELETE FROM events WHERE id IN ({placeholders})", all_delete_ids)
+        conn.commit()
+
+    await update.message.reply_text(
+        f"🧹 <b>Удалено {total_delete} дубликатов</b> из {total_groups} групп.\n"
+        f"База очищена.",
+        parse_mode="HTML"
+    )
+
+
 # ---------------------- Планировщик парсеров ----------------------
 
 
@@ -4260,6 +4343,7 @@ def build_application() -> Application:
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(PreCheckoutQueryHandler(precheckout_callback))
     application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
+    application.add_handler(CommandHandler("dedup", dedup_command))
     application.add_handler(CommandHandler("template", batch_template_command))
     application.add_handler(MessageHandler(filters.Document.FileExtension("xlsx"), handle_batch_file))
     application.add_handler(MessageHandler(filters.Document.FileExtension("xls"), handle_batch_file))
