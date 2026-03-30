@@ -240,110 +240,162 @@ def get_stats_data(exclude_admin: bool = True) -> dict:
     admin_filter = ADMIN_ID if exclude_admin else -1  # -1 никогда не совпадёт
     with get_db_connection() as conn:
         cursor = conn.cursor()
+
+        # ── Всего пользователей (all-time) ──────────────────────────
         cursor.execute("SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE user_id != ?", (admin_filter,))
         total_users = cursor.fetchone()[0]
         cursor.execute("SELECT COUNT(*) FROM user_stats WHERE user_id != ?", (admin_filter,))
         total_actions = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE user_id != ? AND created_at LIKE ?", (admin_filter, f"{today}%"))
-        users_today = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM user_stats WHERE user_id != ? AND created_at LIKE ?", (admin_filter, f"{today}%"))
+
+        # ── DAU / WAU / MAU ─────────────────────────────────────────
+        cursor.execute("""SELECT COUNT(DISTINCT user_id) FROM user_stats
+            WHERE user_id != ? AND created_at LIKE ?""", (admin_filter, f"{today}%"))
+        dau = cursor.fetchone()[0]
+        cursor.execute("""SELECT COUNT(*) FROM user_stats
+            WHERE user_id != ? AND created_at LIKE ?""", (admin_filter, f"{today}%"))
         actions_today = cursor.fetchone()[0]
+        cursor.execute("""SELECT COUNT(DISTINCT user_id) FROM user_stats
+            WHERE user_id != ? AND created_at >= DATE('now', '-7 days')""", (admin_filter,))
+        wau = cursor.fetchone()[0]
+        cursor.execute("""SELECT COUNT(DISTINCT user_id) FROM user_stats
+            WHERE user_id != ? AND created_at >= DATE('now', '-30 days')""", (admin_filter,))
+        mau = cursor.fetchone()[0]
+
+        # ── Новые пользователи ───────────────────────────────────────
+        cursor.execute("""SELECT COUNT(*) FROM (
+            SELECT user_id FROM user_stats WHERE user_id != ?
+            GROUP BY user_id HAVING MIN(DATE(created_at)) = ?
+        )""", (admin_filter, today))
+        new_today = cursor.fetchone()[0]
+        cursor.execute("""SELECT COUNT(*) FROM (
+            SELECT user_id FROM user_stats WHERE user_id != ?
+            GROUP BY user_id HAVING MIN(DATE(created_at)) >= DATE('now', '-30 days')
+        )""", (admin_filter,))
+        new_30d = cursor.fetchone()[0]
+
+        # ── WebApp DAU / WAU / MAU ───────────────────────────────────
+        wa_filter = "action IN ('open_webapp', 'webapp_ping') AND user_id != ?"
+        cursor.execute(f"SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE {wa_filter}", (admin_filter,))
+        webapp_total = cursor.fetchone()[0]
+        cursor.execute(f"SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE {wa_filter} AND created_at LIKE ?",
+                       (admin_filter, f"{today}%"))
+        webapp_dau = cursor.fetchone()[0]
+        cursor.execute(f"SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE {wa_filter} AND created_at >= DATE('now', '-7 days')",
+                       (admin_filter,))
+        webapp_wau = cursor.fetchone()[0]
+        cursor.execute(f"SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE {wa_filter} AND created_at >= DATE('now', '-30 days')",
+                       (admin_filter,))
+        webapp_mau = cursor.fetchone()[0]
+
+        # ── Активность по дням (30 дней) ────────────────────────────
         cursor.execute("""
             SELECT
                 DATE(u.created_at) as day,
                 COUNT(*) as cnt,
                 COUNT(DISTINCT u.user_id) as users,
-                COUNT(DISTINCT CASE WHEN DATE(u.created_at) = first_visit.first_day
-                                    THEN u.user_id END) as new_users
+                COUNT(DISTINCT CASE WHEN DATE(u.created_at) = fv.first_day THEN u.user_id END) as new_users
             FROM user_stats u
             LEFT JOIN (
                 SELECT user_id, MIN(DATE(created_at)) as first_day
-                FROM user_stats WHERE user_id != ?
-                GROUP BY user_id
-            ) first_visit ON u.user_id = first_visit.user_id
+                FROM user_stats WHERE user_id != ? GROUP BY user_id
+            ) fv ON u.user_id = fv.user_id
             WHERE u.created_at >= DATE('now', '-30 days') AND u.user_id != ?
             GROUP BY day ORDER BY day DESC
         """, (admin_filter, admin_filter))
         daily_activity = cursor.fetchall()
-        cursor.execute("""
-            SELECT COUNT(*) FROM (
-                SELECT user_id FROM user_stats
-                WHERE user_id != ?
-                GROUP BY user_id
-                HAVING MIN(DATE(created_at)) = ?
-            )
-        """, (admin_filter, today))
-        new_today = cursor.fetchone()[0]
+
+        cursor.execute("""SELECT DATE(created_at) as day, COUNT(DISTINCT user_id) as users
+            FROM user_stats WHERE action IN ('open_webapp','webapp_ping') AND user_id != ?
+            AND created_at >= DATE('now', '-30 days') GROUP BY day""", (admin_filter,))
+        webapp_by_day = {r["day"]: r["users"] for r in cursor.fetchall()}
+
+        # ── Активность по месяцам ─────────────────────────────────────
         cursor.execute("""
             SELECT
                 strftime('%Y-%m', u.created_at) as month,
                 COUNT(*) as cnt,
                 COUNT(DISTINCT u.user_id) as users,
                 COUNT(DISTINCT CASE
-                    WHEN strftime('%Y-%m', u.created_at) = strftime('%Y-%m', first_visit.first_day)
+                    WHEN strftime('%Y-%m', u.created_at) = strftime('%Y-%m', fv.first_day)
                     THEN u.user_id END) as new_users
             FROM user_stats u
             LEFT JOIN (
                 SELECT user_id, MIN(DATE(created_at)) as first_day
-                FROM user_stats WHERE user_id != ?
-                GROUP BY user_id
-            ) first_visit ON u.user_id = first_visit.user_id
+                FROM user_stats WHERE user_id != ? GROUP BY user_id
+            ) fv ON u.user_id = fv.user_id
             WHERE u.user_id != ?
             GROUP BY month ORDER BY month DESC LIMIT 12
         """, (admin_filter, admin_filter))
         monthly_activity = cursor.fetchall()
-        cursor.execute("SELECT action, COUNT(*) as cnt FROM user_stats WHERE user_id != ? GROUP BY action ORDER BY cnt DESC LIMIT 10", (admin_filter,))
+
+        cursor.execute("""SELECT strftime('%Y-%m', created_at) as month, COUNT(DISTINCT user_id) as users
+            FROM user_stats WHERE action IN ('open_webapp','webapp_ping') AND user_id != ?
+            GROUP BY month""", (admin_filter,))
+        webapp_by_month = {r["month"]: r["users"] for r in cursor.fetchall()}
+
+        # ── Топ действий ─────────────────────────────────────────────
+        cursor.execute("""SELECT action, COUNT(*) as cnt FROM user_stats
+            WHERE user_id != ? GROUP BY action ORDER BY cnt DESC LIMIT 10""", (admin_filter,))
         top_actions = cursor.fetchall()
+
+        # ── База событий ─────────────────────────────────────────────
         cursor.execute("SELECT COUNT(*) FROM events WHERE event_date >= ?", (today,))
         events_count = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM subscriptions WHERE user_id != ? AND (status IS NULL OR status = 'active')", (admin_filter,))
+        cursor.execute("SELECT source_name, COUNT(*) as cnt FROM events WHERE event_date >= ? GROUP BY source_name ORDER BY cnt DESC", (today,))
+        events_by_source = cursor.fetchall()
+
+        # ── Подписки (категории) ─────────────────────────────────────
+        cursor.execute("""SELECT COUNT(DISTINCT user_id) FROM subscriptions
+            WHERE user_id != ? AND (status IS NULL OR status = 'active')""", (admin_filter,))
         subscribers_count = cursor.fetchone()[0]
-        cursor.execute("SELECT COUNT(*) FROM subscriptions WHERE user_id != ? AND (status IS NULL OR status = 'active')", (admin_filter,))
+        cursor.execute("""SELECT COUNT(*) FROM subscriptions
+            WHERE user_id != ? AND (status IS NULL OR status = 'active')""", (admin_filter,))
         subscriptions_total = cursor.fetchone()[0]
-        # Webapp статистика (уникальные пользователи, без админа)
-        cursor.execute("""
-            SELECT COUNT(DISTINCT user_id) FROM user_stats
-            WHERE action IN ('open_webapp', 'webapp_ping') AND user_id != ?
-        """, (admin_filter,))
-        webapp_users = cursor.fetchone()[0]
-        cursor.execute("""
-            SELECT COUNT(DISTINCT user_id) FROM user_stats
-            WHERE action IN ('open_webapp', 'webapp_ping') AND user_id != ? AND created_at LIKE ?
-        """, (admin_filter, f"{today}%"))
-        webapp_users_today = cursor.fetchone()[0]
-        # Webapp по дням (за 30 дней)
-        cursor.execute("""
-            SELECT DATE(created_at) as day, COUNT(DISTINCT user_id) as users
-            FROM user_stats
-            WHERE action IN ('open_webapp', 'webapp_ping') AND user_id != ?
-              AND created_at >= DATE('now', '-30 days')
-            GROUP BY day
-        """, (admin_filter,))
-        webapp_by_day = {r["day"]: r["users"] for r in cursor.fetchall()}
-        # Webapp по месяцам
-        cursor.execute("""
-            SELECT strftime('%Y-%m', created_at) as month, COUNT(DISTINCT user_id) as users
-            FROM user_stats
-            WHERE action IN ('open_webapp', 'webapp_ping') AND user_id != ?
-            GROUP BY month
-        """, (admin_filter,))
-        webapp_by_month = {r["month"]: r["users"] for r in cursor.fetchall()}
+
+        # ── Флеш-подписки ────────────────────────────────────────────
+        cursor.execute("""SELECT COUNT(*) FROM flash_subscriptions
+            WHERE status = 'active' AND user_id != ?""", (admin_filter,))
+        flash_total = cursor.fetchone()[0]
+        cursor.execute("""SELECT COUNT(DISTINCT user_id) FROM flash_subscriptions
+            WHERE status = 'active' AND user_id != ?""", (admin_filter,))
+        flash_users = cursor.fetchone()[0]
+        cursor.execute("""SELECT COUNT(*) FROM flash_subscriptions
+            WHERE status = 'active' AND user_id != ? AND DATE(created_at) = ?""", (admin_filter, today))
+        flash_new_today = cursor.fetchone()[0]
+        cursor.execute("""SELECT COUNT(*) FROM flash_subscriptions
+            WHERE status = 'active' AND user_id != ? AND created_at >= DATE('now', '-30 days')""", (admin_filter,))
+        flash_new_30d = cursor.fetchone()[0]
+        cursor.execute("""SELECT COUNT(DISTINCT user_id) FROM flash_subscriptions
+            WHERE user_id != ? AND last_notified_at != '' AND last_notified_at >= DATE('now', '-30 days')""", (admin_filter,))
+        flash_notified_users_30d = cursor.fetchone()[0]
+
         return {
             "total_users": total_users,
             "total_actions": total_actions,
-            "users_today": users_today,
+            "dau": dau,
+            "wau": wau,
+            "mau": mau,
             "actions_today": actions_today,
-            "daily_activity": daily_activity,
-            "top_actions": top_actions,
-            "events_count": events_count,
-            "subscribers_count": subscribers_count,
-            "subscriptions_total": subscriptions_total,
             "new_today": new_today,
+            "new_30d": new_30d,
+            "webapp_total": webapp_total,
+            "webapp_dau": webapp_dau,
+            "webapp_wau": webapp_wau,
+            "webapp_mau": webapp_mau,
+            "daily_activity": daily_activity,
             "monthly_activity": monthly_activity,
-            "webapp_users": webapp_users,
-            "webapp_users_today": webapp_users_today,
             "webapp_by_day": webapp_by_day,
             "webapp_by_month": webapp_by_month,
+            "top_actions": top_actions,
+            "events_count": events_count,
+            "events_by_source": events_by_source,
+            "subscribers_count": subscribers_count,
+            "subscriptions_total": subscriptions_total,
+            "flash_total": flash_total,
+            "flash_users": flash_users,
+            "flash_new_today": flash_new_today,
+            "flash_new_30d": flash_new_30d,
+            "flash_notified_users_30d": flash_notified_users_30d,
         }
 
 
@@ -1583,54 +1635,91 @@ async def download_db(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def _format_stats(stats: dict, title: str) -> str:
     import html as _html
-    month_names = {"01":"янв","02":"фев","03":"мар","04":"апр","05":"май","06":"июн",
-                   "07":"июл","08":"авг","09":"сен","10":"окт","11":"ноя","12":"дек"}
-    total_u = stats["total_users"]
-    webapp_u = stats["webapp_users"]
-    # Вариант А: total_users уже включает всех уникальных (бот + app)
-    # webapp_users — справочно "из них через app"
-    all_unique = max(total_u, webapp_u) if total_u == 0 else total_u
-    today_u = stats["users_today"]
-    webapp_today_u = stats["webapp_users_today"]
-    all_today = max(today_u, webapp_today_u) if today_u == 0 else today_u
+    MN = {"01":"янв","02":"фев","03":"мар","04":"апр","05":"май","06":"июн",
+          "07":"июл","08":"авг","09":"сен","10":"окт","11":"ноя","12":"дек"}
 
-    act_total = round(stats["total_actions"] / all_unique, 1) if all_unique else 0
-    act_today = round(stats["actions_today"] / all_today, 1) if all_today else 0
-    lines = [
-        f"<b>{title}</b>",
+    total   = stats["total_users"]
+    dau     = stats["dau"]
+    wau     = stats["wau"]
+    mau     = stats["mau"]
+    wa_dau  = stats["webapp_dau"]
+    wa_wau  = stats["webapp_wau"]
+    wa_mau  = stats["webapp_mau"]
+    wa_all  = stats["webapp_total"]
+
+    acts_total  = stats["total_actions"]
+    acts_today  = stats["actions_today"]
+    apd = round(acts_today / dau, 1) if dau else 0   # actions per DAU
+
+    lines = [f"<b>{title}</b>", ""]
+
+    # ── Пользователи ──────────────────────────────────────────────
+    lines += [
+        "👤 <b>Пользователи</b>",
+        f"  All-time: <b>{total}</b>   (+{stats['new_30d']} за 30 дн)",
+        f"  DAU:  <b>{dau}</b>  (+{stats['new_today']} новых сегодня)",
+        f"  WAU:  <b>{wau}</b>",
+        f"  MAU:  <b>{mau}</b>",
         "",
-        f"👥 Всего уникальных: <b>{all_unique}</b> (🌐 {webapp_u}) акт. {act_total}",
-        f"📨 Всего запросов: <b>{stats['total_actions']}</b>",
-        f"🟢 Сегодня уникальных: <b>{all_today}</b> (🌐 {webapp_today_u}) акт. {act_today} +{stats['new_today']} нов",
-        f"📬 Запросов сегодня: <b>{stats['actions_today']}</b>",
-        f"🔔 Подписчиков: <b>{stats['subscribers_count']}</b> | Подписок: <b>{stats.get('subscriptions_total', '—')}</b>",
-        f"🗂 Событий в базе: <b>{stats['events_count']}</b>",
+        "🌐 <b>WebApp</b>",
+        f"  All-time: <b>{wa_all}</b>",
+        f"  DAU: <b>{wa_dau}</b>  WAU: <b>{wa_wau}</b>  MAU: <b>{wa_mau}</b>",
         "",
-        "<b>📅 Активность за 30 дней:</b>",
     ]
-    for row in stats["daily_activity"]:
-        day, cnt, users = row["day"], row["cnt"], row["users"]
+
+    # ── Контент ───────────────────────────────────────────────────
+    lines += [
+        "🗂 <b>База событий</b>",
+        f"  Предстоящих: <b>{stats['events_count']}</b>",
+    ]
+    for row in stats.get("events_by_source", []):
+        lines.append(f"  · {row['source_name']}: {row['cnt']}")
+    lines.append("")
+
+    # ── Подписки ──────────────────────────────────────────────────
+    lines += [
+        "🔔 <b>Подписки на категории</b>",
+        f"  Подписчиков: <b>{stats['subscribers_count']}</b>  |  Всего подписок: <b>{stats['subscriptions_total']}</b>",
+        "",
+        "⚡ <b>Флеш-подписки</b>",
+        f"  Активных: <b>{stats['flash_total']}</b>  (у {stats['flash_users']} польз.)",
+        f"  Новых сегодня: <b>{stats['flash_new_today']}</b>  |  За 30 дн: <b>{stats['flash_new_30d']}</b>",
+        f"  Польз. получили уведомление (30 дн): <b>{stats['flash_notified_users_30d']}</b>",
+        "",
+    ]
+
+    # ── Активность за 14 дней ─────────────────────────────────────
+    lines.append("📅 <b>Активность (14 дней):</b>")
+    for row in list(stats["daily_activity"])[:14]:
+        day   = row["day"]
+        cnt   = row["cnt"]
+        users = row["users"]
         new_u = row["new_users"] if "new_users" in row.keys() else 0
-        new_str = f" +{new_u} нов" if new_u else ""
-        wa_u = stats["webapp_by_day"].get(day, 0)
-        total_day = max(users, wa_u) if users == 0 else users
-        wa_str = f" (🌐 {wa_u})" if wa_u else ""
-        lines.append(f"  {day} — {cnt} запр. {total_day} польз.{wa_str}{new_str}")
+        wa_u  = stats["webapp_by_day"].get(day, 0)
+        new_str = f"  +{new_u}↑" if new_u else ""
+        wa_str  = f"  🌐{wa_u}" if wa_u else ""
+        lines.append(f"  {day}  DAU <b>{users}</b>{wa_str}  {cnt} запр{new_str}")
+
+    # ── По месяцам ────────────────────────────────────────────────
     if stats.get("monthly_activity"):
-        lines.extend(["", "<b>📅 Активность по месяцам:</b>"])
+        lines += ["", "📆 <b>По месяцам:</b>"]
         for row in stats["monthly_activity"]:
-            ym, cnt, users = row["month"], row["cnt"], row["users"]
+            ym    = row["month"]
+            cnt   = row["cnt"]
+            users = row["users"]
             new_u = row["new_users"] if "new_users" in row.keys() else 0
             year, mon = ym.split("-")
-            label = f"{month_names.get(mon, mon)} {year}"
-            new_str = f" +{new_u} нов" if new_u else ""
-            wa_u = stats["webapp_by_month"].get(ym, 0)
-            total_mo = max(users, wa_u) if users == 0 else users
-            wa_str = f" (🌐 {wa_u})" if wa_u else ""
-            lines.append(f"  {label} — {cnt} запр. {total_mo} польз.{wa_str}{new_str}")
-    lines.extend(["", "<b>🔝 Топ действий:</b>"])
+            label   = f"{MN.get(mon, mon)} {year}"
+            wa_u    = stats["webapp_by_month"].get(ym, 0)
+            new_str = f"  +{new_u}↑" if new_u else ""
+            wa_str  = f"  🌐{wa_u}" if wa_u else ""
+            lines.append(f"  {label}  MAU <b>{users}</b>{wa_str}  {cnt} запр{new_str}")
+
+    # ── Топ действий ─────────────────────────────────────────────
+    lines += ["", "🔝 <b>Топ действий:</b>"]
     for row in stats["top_actions"]:
         lines.append(f"  {_html.escape(str(row['action']))} — {row['cnt']}")
+
     return "\n".join(lines)
 
 
