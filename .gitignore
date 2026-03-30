@@ -48,6 +48,9 @@ Driver_Notes/
 *.db-wal
 *.db-shm
 
+# Local documentation (not for GitHub)
+claude.md
+
 # Session files
 *.session
 user_session.session

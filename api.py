@@ -323,18 +323,19 @@ def get_events(
             where.append("event_date = ?")
             params.append(search_date)
         else:
+            # SQLite LOWER() не работает с кириллицей — генерируем варианты через Python
             ql = q.lower()
-            # SQLite LOWER() не работает с кириллицей без ICU — дублируем LIKE без LOWER
-            sp = f"%{q}%"
-            spl = f"%{ql}%"
+            qc = (ql[0].upper() + ql[1:]) if ql else ql  # "концерт" → "Концерт"
+            spl = f"%{ql}%"   # нижний регистр (Python корректно обрабатывает кириллицу)
+            spc = f"%{qc}%"   # с заглавной первой буквой
             where.append(
-                "(LOWER(title) LIKE ? OR title LIKE ? "
-                "OR LOWER(place) LIKE ? OR place LIKE ? "
-                "OR LOWER(details) LIKE ? OR details LIKE ? "
-                "OR LOWER(description) LIKE ? OR description LIKE ? "
+                "(title LIKE ? OR title LIKE ? "
+                "OR place LIKE ? OR place LIKE ? "
+                "OR details LIKE ? OR details LIKE ? "
+                "OR description LIKE ? OR description LIKE ? "
                 "OR category LIKE ?)"
             )
-            params.extend([spl, sp, spl, sp, spl, sp, spl, sp, spl])
+            params.extend([spl, spc, spl, spc, spl, spc, spl, spc, spl])
 
     events = fetch_events(where, params)
     page_events, total = paginate(events, page, per_page)
