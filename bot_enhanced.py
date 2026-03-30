@@ -1557,6 +1557,7 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("🗄 Скачать базу", callback_data="adm_download")],
         [InlineKeyboardButton("📢 Пост: сегодня", callback_data="adm_post_today"),
          InlineKeyboardButton("🎉 Пост: выходные", callback_data="adm_post_weekend")],
+        [InlineKeyboardButton("🧹 Чистка дубликатов", callback_data="adm_dedup")],
     ])
     await update.message.reply_text(
         "🔧 <b>Панель администратора</b>\n\nВыберите действие:",
@@ -1663,7 +1664,9 @@ def _find_duplicates(conn) -> list[dict]:
                COALESCE(place, '') AS place,
                COUNT(*) AS cnt
         FROM events
-        GROUP BY LOWER(title), event_date, LOWER(COALESCE(place, ''))
+        GROUP BY LOWER(title), event_date,
+                 LOWER(COALESCE(show_time, '')),
+                 LOWER(COALESCE(place, ''))
         HAVING COUNT(*) > 1
         ORDER BY cnt DESC
     """)
@@ -3396,6 +3399,46 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.reply_text("📢 Публикую подборку на выходные...")
                 await post_to_channel(context.bot, "weekend")
                 await query.message.reply_text("✅ Готово!")
+            elif cmd == "dedup":
+                with get_db_connection() as conn:
+                    conn.row_factory = sqlite3.Row
+                    groups = _find_duplicates(conn)
+                total_groups = len(groups)
+                total_delete = sum(len(g['delete_ids']) for g in groups)
+                if total_groups == 0:
+                    await query.message.reply_text("✅ Дубликатов не найдено — база чистая.")
+                else:
+                    lines = [f"🔍 <b>Найдено дубликатов:</b> {total_groups} групп → {total_delete} лишних записей\n"]
+                    for g in groups[:10]:
+                        lines.append(
+                            f"• <b>{g['title'][:50]}</b>\n"
+                            f"  📅 {g['event_date']} · 📍 {g['place'][:30] or '—'}\n"
+                            f"  Копий: {g['cnt']} → оставим id={g['keep_id']}, удалим {len(g['delete_ids'])} шт."
+                        )
+                    if total_groups > 10:
+                        lines.append(f"\n<i>...и ещё {total_groups - 10} групп</i>")
+                    confirm_kb = InlineKeyboardMarkup([[
+                        InlineKeyboardButton("✅ Удалить дубликаты", callback_data="adm_dedup_confirm"),
+                        InlineKeyboardButton("❌ Отмена", callback_data="adm_dedup_cancel"),
+                    ]])
+                    await query.message.reply_text('\n'.join(lines), parse_mode="HTML", reply_markup=confirm_kb)
+            elif cmd == "dedup_confirm":
+                with get_db_connection() as conn:
+                    conn.row_factory = sqlite3.Row
+                    groups = _find_duplicates(conn)
+                total_delete = sum(len(g['delete_ids']) for g in groups)
+                all_delete_ids = [i for g in groups for i in g['delete_ids']]
+                if all_delete_ids:
+                    with get_db_connection() as conn:
+                        placeholders = ','.join('?' * len(all_delete_ids))
+                        conn.execute(f"DELETE FROM events WHERE id IN ({placeholders})", all_delete_ids)
+                        conn.commit()
+                await query.message.reply_text(
+                    f"🧹 <b>Удалено {total_delete} дубликатов</b> из {len(groups)} групп. База очищена.",
+                    parse_mode="HTML"
+                )
+            elif cmd == "dedup_cancel":
+                await query.message.reply_text("Отменено.")
             elif cmd == "pending":
                 await show_pending_list(query, context)
             elif cmd == "approve_all":
