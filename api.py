@@ -793,7 +793,7 @@ def get_ical(
     lines += ["END:VEVENT", "END:VCALENDAR"]
 
     ics_content = "\r\n".join(lines)
-    safe_title = "".join(c for c in title if c.isalnum() or c in " _-")[:40].strip().replace(" ", "_")
+    safe_title = "".join(c if ord(c) < 128 and (c.isalnum() or c in " _-") else "" for c in title)[:40].strip().replace(" ", "_")
     filename = f"{safe_title or 'event'}.ics"
 
     return Response(
