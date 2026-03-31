@@ -746,6 +746,63 @@ class SubscriptionResponse(BaseModel):
 
 # ── Эндпоинты для подписок ────────────────────────────────────────────────────
 
+@app.get("/api/ical")
+def get_ical(
+    title: str = Query(...),
+    date: str = Query(...),          # YYYYMMDD
+    time: Optional[str] = Query(None),    # HH:MM
+    end_time: Optional[str] = Query(None),
+    venue: Optional[str] = Query(None),
+    url: Optional[str] = Query(None),
+    description: Optional[str] = Query(None),
+):
+    """Генерирует .ics файл события для импорта в календарь."""
+    def _dt(d: str, t: Optional[str]) -> str:
+        if t:
+            h, m = t.split(":")
+            return f"{d}T{h.zfill(2)}{m.zfill(2)}00"
+        return d
+
+    dtstart = _dt(date, time)
+    dtend = _dt(date, end_time or time)
+    now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    uid = f"minskdvizh-{date}-{title[:30].replace(' ', '-')}@minskdvizh"
+
+    def esc(s: str) -> str:
+        return s.replace("\\", "\\\\").replace(",", "\\,").replace("\n", "\\n")
+
+    lines = [
+        "BEGIN:VCALENDAR",
+        "VERSION:2.0",
+        "PRODID:-//MinskDvizh//MinskDvizh//RU",
+        "CALSCALE:GREGORIAN",
+        "METHOD:PUBLISH",
+        "BEGIN:VEVENT",
+        f"UID:{uid}",
+        f"DTSTAMP:{now}",
+        f"DTSTART:{dtstart}",
+        f"DTEND:{dtend}",
+        f"SUMMARY:{esc(title)}",
+    ]
+    if description:
+        lines.append(f"DESCRIPTION:{esc(description)}")
+    if venue:
+        lines.append(f"LOCATION:{esc(venue)}")
+    if url:
+        lines.append(f"URL:{url}")
+    lines += ["END:VEVENT", "END:VCALENDAR"]
+
+    ics_content = "\r\n".join(lines)
+    safe_title = "".join(c for c in title if c.isalnum() or c in " _-")[:40].strip().replace(" ", "_")
+    filename = f"{safe_title or 'event'}.ics"
+
+    return Response(
+        content=ics_content,
+        media_type="text/calendar; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @app.get("/api/subscriptions", response_model=SubscriptionResponse)
 def get_subscriptions(user_id: int = Query(..., description="ID пользователя Telegram")):
     """
