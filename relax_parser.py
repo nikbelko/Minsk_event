@@ -584,9 +584,10 @@ class RelaxKinoParser(RelaxBaseParser):
                     if not title or len(title) < 3 or title in self.SKIP_TITLES:
                         continue
 
-                    source_url = self.build_url(title_a.get("href", ""))
                     details_a = item.find("a", class_="schedule__event-dscr")
                     details = details_a.get_text(strip=True) if details_a else ""
+                    film_href = (details_a.get("href", "") if details_a else "") or title_a.get("href", "")
+                    source_url = self.build_url(film_href)
 
                     for seance in item.find_all("div", class_="schedule__seance"):
                         # время — <a> для активных сеансов, <span> для закрытых (buy-timeout)
