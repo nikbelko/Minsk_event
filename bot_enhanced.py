@@ -824,10 +824,17 @@ async def check_flash_subscriptions(bot) -> int:
             lines.append("👉 @Minskdvizh_bot")
             text = "\n".join(lines)
 
+            sub_id = sub["id"]
+            confirm_keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Да, нашёл!", callback_data=f"flash_found_{sub_id}"),
+                InlineKeyboardButton("🔄 Нет, искать дальше", callback_data=f"flash_continue_{sub_id}"),
+            ]])
+
             try:
                 await bot.send_message(
                     chat_id=user_id, text=text,
-                    parse_mode="HTML", disable_web_page_preview=True
+                    parse_mode="HTML", disable_web_page_preview=True,
+                    reply_markup=confirm_keyboard,
                 )
                 sent_total += 1
                 # Обновляем время последнего уведомления
@@ -4002,6 +4009,25 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
             else:
                 await query.answer("Вы уже подписаны на этот запрос", show_alert=True)
+            return
+        if data.startswith("flash_found_"):
+            user = query.from_user
+            flash_id = int(data[len("flash_found_"):])
+            remove_flash_subscription(flash_id, user.id)
+            log_user_action(user.id, user.username, user.first_name, "flash_found", str(flash_id))
+            await query.answer("🎉 Отлично! Подписка удалена.", show_alert=False)
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            return
+        if data.startswith("flash_continue_"):
+            flash_id = int(data[len("flash_continue_"):])
+            await query.answer("🔄 Продолжаем поиск!", show_alert=False)
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
             return
         if data.startswith("flash_unsub_"):
             user = query.from_user
