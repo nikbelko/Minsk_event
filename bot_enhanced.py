@@ -1617,6 +1617,7 @@ async def admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📢 Пост: сегодня", callback_data="adm_post_today"),
          InlineKeyboardButton("🎉 Пост: выходные", callback_data="adm_post_weekend")],
         [InlineKeyboardButton("🧹 Чистка дубликатов", callback_data="adm_dedup")],
+        [InlineKeyboardButton("🗑 Удалить событие", callback_data="adm_del_prompt")],
     ])
     await update.message.reply_text(
         "🔧 <b>Панель администратора</b>\n\nВыберите действие:",
@@ -1780,6 +1781,74 @@ def _find_duplicates(conn) -> list[dict]:
             'cnt': int(row[5]),
         })
     return result
+
+
+async def delete_event_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/delete_event <id>            — удалить одно событие
+    /delete_event <id_from> <id_to>  — удалить диапазон id (включительно)
+    Только для администратора."""
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("⛔ Нет доступа.")
+        return
+
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "Использование:\n"
+            "<code>/delete_event 123</code> — удалить событие #123\n"
+            "<code>/delete_event 100 200</code> — удалить события с id 100 по 200",
+            parse_mode="HTML"
+        )
+        return
+
+    try:
+        if len(args) == 1:
+            id_from = id_to = int(args[0])
+        else:
+            id_from, id_to = int(args[0]), int(args[1])
+            if id_from > id_to:
+                id_from, id_to = id_to, id_from
+    except ValueError:
+        await update.message.reply_text("❌ ID должны быть целыми числами.")
+        return
+
+    if id_to - id_from > 1000:
+        await update.message.reply_text("❌ Диапазон не должен превышать 1000 событий за раз.")
+        return
+
+    with get_db_connection() as conn:
+        # Покажем что будет удалено
+        rows = conn.execute(
+            "SELECT id, title, event_date FROM events WHERE id BETWEEN ? AND ? ORDER BY id LIMIT 20",
+            (id_from, id_to)
+        ).fetchall()
+        total = conn.execute(
+            "SELECT COUNT(*) FROM events WHERE id BETWEEN ? AND ?",
+            (id_from, id_to)
+        ).fetchone()[0]
+
+    if not total:
+        await update.message.reply_text(f"ℹ️ События с id {id_from}–{id_to} не найдены.")
+        return
+
+    preview = "\n".join(
+        f"  #{r['id']} {r['title'][:40]} ({r['event_date']})" for r in rows
+    )
+    if total > 20:
+        preview += f"\n  ... и ещё {total - 20} событий"
+
+    # Сохраняем диапазон для подтверждения
+    context.user_data["del_range"] = (id_from, id_to)
+
+    keyboard = InlineKeyboardMarkup([[
+        InlineKeyboardButton(f"✅ Да, удалить {total} событий", callback_data=f"adm_del_confirm_{id_from}_{id_to}"),
+        InlineKeyboardButton("❌ Отмена", callback_data="adm_del_cancel"),
+    ]])
+    await update.message.reply_text(
+        f"🗑 <b>Будет удалено {total} событий (id {id_from}–{id_to}):</b>\n\n{preview}",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
 
 
 async def dedup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3535,6 +3604,41 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             elif cmd == "dedup_cancel":
                 await query.message.reply_text("Отменено.")
+            elif cmd == "del_prompt":
+                await query.message.reply_text(
+                    "🗑 <b>Удаление событий</b>\n\n"
+                    "Используйте команду:\n"
+                    "<code>/delete_event 123</code> — удалить событие #123\n"
+                    "<code>/delete_event 100 200</code> — удалить события с id 100 по 200\n\n"
+                    "Перед удалением будет показан список и запрошено подтверждение.",
+                    parse_mode="HTML"
+                )
+            elif cmd.startswith("del_confirm_"):
+                try:
+                    _, _, id_from_s, id_to_s = cmd.split("_", 3)
+                    id_from, id_to = int(id_from_s), int(id_to_s)
+                except ValueError:
+                    await query.message.reply_text("❌ Ошибка разбора диапазона.")
+                    return
+                with get_db_connection() as conn:
+                    deleted = conn.execute(
+                        "DELETE FROM events WHERE id BETWEEN ? AND ?", (id_from, id_to)
+                    ).rowcount
+                    conn.commit()
+                await query.message.reply_text(
+                    f"🗑 <b>Удалено {deleted} событий</b> (id {id_from}–{id_to}).",
+                    parse_mode="HTML"
+                )
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
+            elif cmd == "del_cancel":
+                await query.answer("Отменено.", show_alert=False)
+                try:
+                    await query.edit_message_reply_markup(reply_markup=None)
+                except Exception:
+                    pass
             elif cmd == "pending":
                 await show_pending_list(query, context)
             elif cmd == "approve_all":
@@ -4502,6 +4606,7 @@ def build_application() -> Application:
     application.add_handler(PreCheckoutQueryHandler(precheckout_callback))
     application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment_callback))
     application.add_handler(CommandHandler("dedup", dedup_command))
+    application.add_handler(CommandHandler("delete_event", delete_event_command))
     application.add_handler(CommandHandler("template", batch_template_command))
     application.add_handler(MessageHandler(filters.Document.FileExtension("xlsx"), handle_batch_file))
     application.add_handler(MessageHandler(filters.Document.FileExtension("xls"), handle_batch_file))
