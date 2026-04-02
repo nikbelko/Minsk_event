@@ -325,17 +325,19 @@ def get_events(
         else:
             # SQLite LOWER() не работает с кириллицей — генерируем варианты через Python
             ql = q.lower()
+            qu = q.upper()
             qc = (ql[0].upper() + ql[1:]) if ql else ql  # "концерт" → "Концерт"
-            spl = f"%{ql}%"   # нижний регистр (Python корректно обрабатывает кириллицу)
+            spl = f"%{ql}%"   # нижний регистр
             spc = f"%{qc}%"   # с заглавной первой буквой
+            spu = f"%{qu}%"   # полный верхний регистр (для МАМАКВИЗ! и подобных)
             where.append(
-                "(title LIKE ? OR title LIKE ? "
-                "OR place LIKE ? OR place LIKE ? "
-                "OR details LIKE ? OR details LIKE ? "
-                "OR description LIKE ? OR description LIKE ? "
+                "(title LIKE ? OR title LIKE ? OR title LIKE ? "
+                "OR place LIKE ? OR place LIKE ? OR place LIKE ? "
+                "OR details LIKE ? OR details LIKE ? OR details LIKE ? "
+                "OR description LIKE ? OR description LIKE ? OR description LIKE ? "
                 "OR category LIKE ?)"
             )
-            params.extend([spl, spc, spl, spc, spl, spc, spl, spc, spl])
+            params.extend([spl, spc, spu, spl, spc, spu, spl, spc, spu, spl, spc, spu, spl])
 
     events = fetch_events(where, params)
     page_events, total = paginate(events, page, per_page)
