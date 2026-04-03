@@ -1709,7 +1709,7 @@ def _format_stats(stats: dict, title: str) -> str:
     # ── Пользователи ──────────────────────────────────────────────
     lines += [
         "👤 <b>Пользователи</b>",
-        f"  All-time: <b>{total}</b>   (за {stats['days_alive']} дн, +{stats['new_30d']} за 30 дн)",
+        f"  All-time: <b>{total}</b>   (за {stats['days_alive']} дн)",
         f"  DAU:  <b>{dau}</b>  (+{stats['new_today']} новых сегодня)",
         f"  WAU:  <b>{wau}</b>",
         f"  MAU:  <b>{mau}</b>",
