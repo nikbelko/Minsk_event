@@ -13,7 +13,7 @@ import io
 import tempfile
 from contextlib import contextmanager
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
 from telegram import (
@@ -36,7 +36,11 @@ from telegram.ext import (
 
 load_dotenv()
 
-MINSK_TZ = timezone(timedelta(hours=3))  # UTC+3
+from config import (
+    MINSK_TZ, DB_PATH, ADMIN_ID,
+    VENUE_OPEN_TIME, VENUE_CLOSE_TIME,
+    BATCH_TEMPLATE_HEADERS, BATCH_TEMPLATE_EXAMPLE, BATCH_CATEGORY_MAP,
+)
 
 import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -52,11 +56,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-DB_NAME     = os.getenv("DB_PATH", "/data/events_final.db")  # Volume path
+TOKEN       = os.getenv("TELEGRAM_BOT_TOKEN")
+DB_NAME     = DB_PATH  # алиас для совместимости с кодом бота
 WEB_APP_URL = os.getenv("WEB_APP_URL", "https://minskdvizh-web.up.railway.app")
-ADMIN_ID   = 502917728
-CHANNEL_ID = os.getenv("CHANNEL_ID", "")   # @MinskDvizh или -100xxxxxxxxxx
+CHANNEL_ID  = os.getenv("CHANNEL_ID", "")   # @MinskDvizh или -100xxxxxxxxxx
 
 DONATION_ENABLED = True
 DONATION_SUGGESTIONS = [10, 50, 100, 500]
@@ -223,18 +226,28 @@ def _build_time_filter(date_filter: str, today: str, now_time: str) -> tuple[str
     """Возвращает чистое SQL условие БЕЗ 'AND' для фильтрации прошедших событий.
     - Для where.append(): добавлять напрямую, ' AND '.join() сам добавит AND.
     - Для query +=: использовать query += ' AND ' + time_filter.
-    Логика: нет show_time → всегда показываем.
+    Логика: нет show_time → показываем только в VENUE_OPEN_TIME–VENUE_CLOSE_TIME
+                            (выставки, музеи и т.п. ночью закрыты).
             есть end_time → фильтруем по end_time > now.
             нет end_time  → фильтруем по show_time > now.
     """
     if date_filter != today:
         return "", []
 
-    return (
-        "(show_time = '' OR show_time IS NULL "
-        "OR ((end_time != '' AND end_time IS NOT NULL AND end_time > ?) "
-        "OR ((end_time = '' OR end_time IS NULL) AND show_time > ?)))"
-    ), [now_time, now_time]
+    venue_open = VENUE_OPEN_TIME <= now_time < VENUE_CLOSE_TIME
+
+    if venue_open:
+        return (
+            "(show_time = '' OR show_time IS NULL "
+            "OR ((end_time != '' AND end_time IS NOT NULL AND end_time > ?) "
+            "OR ((end_time = '' OR end_time IS NULL) AND show_time > ?)))"
+        ), [now_time, now_time]
+    else:
+        # Вне рабочих часов — только события с явным временем
+        return (
+            "((end_time != '' AND end_time IS NOT NULL AND end_time > ?) "
+            "OR ((end_time = '' OR end_time IS NULL) AND show_time != '' AND show_time IS NOT NULL AND show_time > ?))"
+        ), [now_time, now_time]
 def get_stats_data(exclude_admin: bool = True) -> dict:
     today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
     admin_filter = ADMIN_ID if exclude_admin else -1  # -1 никогда не совпадёт
@@ -246,6 +259,14 @@ def get_stats_data(exclude_admin: bool = True) -> dict:
         total_users = cursor.fetchone()[0]
         cursor.execute("SELECT COUNT(*) FROM user_stats WHERE user_id != ?", (admin_filter,))
         total_actions = cursor.fetchone()[0]
+        # Сколько дней проект живёт (с первого пользователя)
+        cursor.execute("SELECT MIN(DATE(created_at)) FROM user_stats WHERE user_id != ?", (admin_filter,))
+        first_date_row = cursor.fetchone()[0]
+        if first_date_row:
+            from datetime import date as _date
+            days_alive = (datetime.now(MINSK_TZ).date() - datetime.strptime(first_date_row, "%Y-%m-%d").date()).days
+        else:
+            days_alive = 0
 
         # ── DAU / WAU / MAU ─────────────────────────────────────────
         cursor.execute("""SELECT COUNT(DISTINCT user_id) FROM user_stats
@@ -371,6 +392,7 @@ def get_stats_data(exclude_admin: bool = True) -> dict:
 
         return {
             "total_users": total_users,
+            "days_alive": days_alive,
             "total_actions": total_actions,
             "dau": dau,
             "wau": wau,
@@ -504,16 +526,26 @@ def get_events_by_date_and_category(target_date: datetime, category: str | None 
         # Вспомогательная функция для фильтра времени
         def add_time_filter(query, params, date_str, now_time):
             """Добавляет условие для фильтрации прошедших сеансов."""
-            time_filter = """
-                AND (
-                    show_time = '' OR show_time IS NULL
-                    OR (
+            venue_open = VENUE_OPEN_TIME <= now_time < VENUE_CLOSE_TIME
+            if venue_open:
+                time_filter = """
+                    AND (
+                        show_time = '' OR show_time IS NULL
+                        OR (
+                            (end_time != '' AND end_time IS NOT NULL AND end_time > ?)
+                            OR
+                            ((end_time = '' OR end_time IS NULL) AND show_time > ?)
+                        )
+                    )
+                """
+            else:
+                time_filter = """
+                    AND (
                         (end_time != '' AND end_time IS NOT NULL AND end_time > ?)
                         OR
-                        ((end_time = '' OR end_time IS NULL) AND show_time > ?)
+                        ((end_time = '' OR end_time IS NULL) AND show_time != '' AND show_time IS NOT NULL AND show_time > ?)
                     )
-                )
-            """
+                """
             query += time_filter
             params.append(now_time)  # для end_time
             params.append(now_time)  # для show_time
@@ -572,19 +604,32 @@ def get_upcoming_events(limit: int = 20, category: str | None = None):
         cursor = conn.cursor()
 
         # Условие для фильтрации прошедших событий
-        time_filter = """
-            AND (
-                event_date > ?
-                OR (
-                    show_time = '' OR show_time IS NULL
+        venue_open = VENUE_OPEN_TIME <= now_time < VENUE_CLOSE_TIME
+        if venue_open:
+            time_filter = """
+                AND (
+                    event_date > ?
+                    OR (
+                        show_time = '' OR show_time IS NULL
+                        OR (
+                            (end_time != '' AND end_time IS NOT NULL AND end_time > ?)
+                            OR
+                            ((end_time = '' OR end_time IS NULL) AND show_time > ?)
+                        )
+                    )
+                )
+            """
+        else:
+            time_filter = """
+                AND (
+                    event_date > ?
                     OR (
                         (end_time != '' AND end_time IS NOT NULL AND end_time > ?)
                         OR
-                        ((end_time = '' OR end_time IS NULL) AND show_time > ?)
+                        ((end_time = '' OR end_time IS NULL) AND show_time != '' AND show_time IS NOT NULL AND show_time > ?)
                     )
                 )
-            )
-        """
+            """
         
         # ОСОБЫЙ СЛУЧАЙ: категория "free" показывает ВСЕ бесплатные события
         if category == "free":
@@ -1664,7 +1709,7 @@ def _format_stats(stats: dict, title: str) -> str:
     # ── Пользователи ──────────────────────────────────────────────
     lines += [
         "👤 <b>Пользователи</b>",
-        f"  All-time: <b>{total}</b>   (+{stats['new_30d']} за 30 дн)",
+        f"  All-time: <b>{total}</b>   (за {stats['days_alive']} дн, +{stats['new_30d']} за 30 дн)",
         f"  DAU:  <b>{dau}</b>  (+{stats['new_today']} новых сегодня)",
         f"  WAU:  <b>{wau}</b>",
         f"  MAU:  <b>{mau}</b>",
@@ -4195,34 +4240,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------------- Пакетная загрузка событий из файла ----------------------
 
-BATCH_TEMPLATE_HEADERS = [
-    "title", "details", "category", "event_date", "show_time",
-    "place", "address", "price", "description", "source_url", "is_promo"
-]
-
-BATCH_TEMPLATE_EXAMPLE = [
-    "Концерт джаза", "Вечер живой музыки для всех", "concert",
-    "15.05.2026", "19:00", "Джаз-клуб Blue Note", "ул. Немига, 3",
-    "от 20 руб", "Программа из классики и современного джаза", "https://example.com", "0"
-]
-
-BATCH_CATEGORY_MAP = {
-    "кино": "cinema", "cinema": "cinema",
-    "концерт": "concert", "концерты": "concert", "concert": "concert",
-    "театр": "theater", "theater": "theater",
-    "выставка": "exhibition", "выставки": "exhibition", "exhibition": "exhibition",
-    "детям": "kids", "дети": "kids", "kids": "kids",
-    "спорт": "sport", "sport": "sport",
-    "движ": "party", "вечеринка": "party", "party": "party",
-    "бесплатно": "free", "free": "free",
-    "экскурсия": "excursion", "excursion": "excursion",
-    "маркет": "market", "market": "market",
-    "мастер-класс": "masterclass", "masterclass": "masterclass",
-    "настолки": "boardgames", "boardgames": "boardgames",
-    "трансляция": "broadcast", "broadcast": "broadcast",
-    "обучение": "education", "education": "education",
-    "квиз": "quiz", "quiz": "quiz",
-}
 
 
 async def send_batch_template(message):

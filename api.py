@@ -16,13 +16,16 @@ from fastapi import FastAPI, Query, HTTPException, UploadFile, File, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from config import (
+    MINSK_TZ, DB_PATH, ADMIN_ID,
+    VENUE_OPEN_TIME, VENUE_CLOSE_TIME,
+    BATCH_TEMPLATE_HEADERS, BATCH_TEMPLATE_EXAMPLE, BATCH_CATEGORY_MAP,
+)
+
 # ── Конфиг ──────────────────────────────────────────────────────────────────
 
-DB_PATH      = os.getenv("DB_PATH", "/data/events_final.db")
-MINSK_TZ     = timezone(timedelta(hours=3))
 FRONTEND_URL = os.getenv("FRONTEND_URL", "*")
 BOT_TOKEN    = os.getenv("TELEGRAM_BOT_TOKEN", "")
-ADMIN_ID     = int(os.getenv("ADMIN_ID", "502917728"))
 
 app = FastAPI(
     title="MinskDvizh API",
@@ -148,23 +151,36 @@ def paginate(items: list, page: int, per_page: int) -> tuple[list, int]:
 
 def _build_time_filter(date_filter: str, today: str, now_time: str) -> tuple[str, list]:
     """Возвращает SQL условие для фильтрации прошедших событий и параметры.
-    Логика: нет show_time → всегда показываем.
+    Логика: нет show_time → показываем только в VENUE_OPEN_TIME–VENUE_CLOSE_TIME
+                            (выставки, музеи и т.п. ночью закрыты).
             есть end_time → фильтруем по end_time > now.
             нет end_time  → фильтруем по show_time > now.
     """
     if date_filter != today:
         return "", []
 
-    return """
-        (
-            show_time = '' OR show_time IS NULL
-            OR (
+    venue_open = VENUE_OPEN_TIME <= now_time < VENUE_CLOSE_TIME
+
+    if venue_open:
+        return """
+            (
+                show_time = '' OR show_time IS NULL
+                OR (
+                    (end_time != '' AND end_time IS NOT NULL AND end_time > ?)
+                    OR
+                    ((end_time = '' OR end_time IS NULL) AND show_time > ?)
+                )
+            )
+        """, [now_time, now_time]
+    else:
+        # Вне рабочих часов — только события с явным временем, которые ещё не закончились
+        return """
+            (
                 (end_time != '' AND end_time IS NOT NULL AND end_time > ?)
                 OR
-                ((end_time = '' OR end_time IS NULL) AND show_time > ?)
+                ((end_time = '' OR end_time IS NULL) AND show_time != '' AND show_time IS NOT NULL AND show_time > ?)
             )
-        )
-    """, [now_time, now_time]
+        """, [now_time, now_time]
 
 
 # ── Health ───────────────────────────────────────────────────────────────────
@@ -294,7 +310,11 @@ def get_events(
         where.append("event_date >= ?")
         params.append(today)
         # Фильтруем сегодняшние события по времени
-        where.append("(event_date > ? OR (show_time = '' OR show_time IS NULL OR (end_time != '' AND end_time IS NOT NULL AND end_time > ?) OR ((end_time = '' OR end_time IS NULL) AND show_time > ?)))")
+        venue_open = VENUE_OPEN_TIME <= now_t < VENUE_CLOSE_TIME
+        if venue_open:
+            where.append("(event_date > ? OR (show_time = '' OR show_time IS NULL OR (end_time != '' AND end_time IS NOT NULL AND end_time > ?) OR ((end_time = '' OR end_time IS NULL) AND show_time > ?)))")
+        else:
+            where.append("(event_date > ? OR ((end_time != '' AND end_time IS NOT NULL AND end_time > ?) OR ((end_time = '' OR end_time IS NULL) AND show_time != '' AND show_time IS NOT NULL AND show_time > ?)))")
         params.extend([today, now_t, now_t])
 
     # КАТЕГОРИЯ FREE - ОСОБАЯ ОБРАБОТКА
@@ -437,9 +457,14 @@ def events_upcoming(
     today = today_str()
     now_t = now_time_str()
     until = (now_minsk() + timedelta(days=days)).strftime("%Y-%m-%d")
+    venue_open = VENUE_OPEN_TIME <= now_t < VENUE_CLOSE_TIME
+    if venue_open:
+        today_filter = "(event_date > ? OR (show_time = '' OR show_time IS NULL OR (end_time != '' AND end_time IS NOT NULL AND end_time > ?) OR ((end_time = '' OR end_time IS NULL) AND show_time > ?)))"
+    else:
+        today_filter = "(event_date > ? OR ((end_time != '' AND end_time IS NOT NULL AND end_time > ?) OR ((end_time = '' OR end_time IS NULL) AND show_time != '' AND show_time IS NOT NULL AND show_time > ?)))"
     where = [
         "event_date BETWEEN ? AND ?",
-        "(event_date > ? OR (show_time = '' OR show_time IS NULL OR (end_time != '' AND end_time IS NOT NULL AND end_time > ?) OR ((end_time = '' OR end_time IS NULL) AND show_time > ?)))",
+        today_filter,
     ]
     params: list = [today, until, today, now_t, now_t]
     
@@ -998,34 +1023,6 @@ def remove_flash_subscription(req: FlashSubscriptionRemoveRequest):
 
 # ==================== ПАКЕТНАЯ ЗАГРУЗКА СОБЫТИЙ ====================
 
-BATCH_CATEGORY_MAP = {
-    "кино": "cinema", "cinema": "cinema",
-    "концерт": "concert", "концерты": "concert", "concert": "concert",
-    "театр": "theater", "theater": "theater",
-    "выставка": "exhibition", "выставки": "exhibition", "exhibition": "exhibition",
-    "детям": "kids", "дети": "kids", "kids": "kids",
-    "спорт": "sport", "sport": "sport",
-    "движ": "party", "вечеринка": "party", "party": "party",
-    "бесплатно": "free", "free": "free",
-    "экскурсия": "excursion", "excursion": "excursion",
-    "маркет": "market", "market": "market",
-    "мастер-класс": "masterclass", "masterclass": "masterclass",
-    "настолки": "boardgames", "boardgames": "boardgames",
-    "трансляция": "broadcast", "broadcast": "broadcast",
-    "обучение": "education", "education": "education",
-    "квиз": "quiz", "quiz": "quiz",
-}
-
-BATCH_TEMPLATE_HEADERS = [
-    "title", "details", "category", "event_date", "show_time",
-    "place", "address", "price", "description", "source_url", "is_promo"
-]
-
-BATCH_TEMPLATE_EXAMPLE = [
-    "Концерт джаза", "Вечер живой музыки для всех", "concert",
-    "15.05.2026", "19:00", "Джаз-клуб Blue Note", "ул. Немига, 3",
-    "от 20 руб", "Программа из классики и современного джаза", "https://example.com", "0"
-]
 
 
 def _batch_parse_date(raw: str):
