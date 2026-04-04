@@ -126,7 +126,7 @@ def fetch_events(
     where_clauses: list[str],
     params: list,
     order: str = "event_date, show_time, title",
-    limit: int = 500,
+    limit: int = 5000,
 ) -> list[dict]:
     where = " AND ".join(where_clauses) if where_clauses else "1=1"
     sql = f"""
