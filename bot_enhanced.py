@@ -2111,6 +2111,139 @@ async def send_digest_job(bot=None):
             logger.info(f"📬 Дайджест [{date_type}]: отправлено {sent} польз., {errors} ошибок")
 
 
+async def run_daytime_update_job(bot=None):
+    """Дневная лёгкая проверка источников + полный парсинг при обнаружении изменений."""
+    logger.info("☀️ Запуск дневного обновления...")
+    start_time = datetime.now(MINSK_TZ)
+    try:
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "daytime_update.py",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=1200)
+        elapsed = (datetime.now(MINSK_TZ) - start_time).total_seconds()
+
+        if process.returncode == 0:
+            output = stdout.decode()
+            logger.info(f"✅ Дневное обновление завершено за {elapsed:.0f} сек")
+            if bot:
+                report = _parse_daytime_report(output)
+                if report:
+                    await _send_daytime_report(bot, report, elapsed)
+        else:
+            error_msg = stderr.decode()[:300] if stderr else "неизвестная ошибка"
+            logger.error(f"❌ Дневное обновление упало: {error_msg}")
+            if bot:
+                await bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=f"❌ *Дневное обновление: ошибка*\n\n```\n{error_msg}\n```",
+                    parse_mode="Markdown",
+                )
+    except asyncio.TimeoutError:
+        logger.error("⏰ Таймаут дневного обновления (>20 мин)")
+        if bot:
+            await bot.send_message(chat_id=ADMIN_ID, text="⏰ *Дневное обновление*: таймаут (>20 мин)", parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"💥 Дневное обновление: {e}")
+        if bot:
+            await bot.send_message(chat_id=ADMIN_ID, text=f"💥 *Дневное обновление*: {e}", parse_mode="Markdown")
+
+
+def _parse_daytime_report(output: str) -> dict | None:
+    """Извлекает DAYTIME_REPORT:json из stdout daytime_update.py."""
+    for line in output.split("\n"):
+        line = line.strip()
+        if line.startswith("DAYTIME_REPORT:"):
+            try:
+                return json.loads(line[len("DAYTIME_REPORT:"):])
+            except Exception:
+                pass
+    return None
+
+
+def _format_daytime_report(report: dict, elapsed: float) -> str:
+    """Форматирует дневной отчёт для отправки админу.
+
+    Статусы источников:
+      unchanged          - fingerprint не изменился, парсер не запускался
+      changed            - fingerprint изменился, запущен полный парсер
+      error              - check завершился ошибкой или вернул подозрительно пустой результат
+      fallback_full_parse - источник без cheap check, всегда полный прогон
+      skipped_due_to_error - check упал, парсер НЕ запускался
+    """
+    now = datetime.now(MINSK_TZ).strftime("%d.%m.%Y %H:%M")
+    lines = [
+        "☀️ *Дневное обновление*",
+        f"🕐 {now}  ⏱ {elapsed:.0f} сек",
+        "",
+    ]
+    for src in report.get("sources", []):
+        name        = src.get("name", "?")
+        action      = src.get("action", "?")
+        elapsed_src = src.get("elapsed", 0)
+
+        if action == "unchanged":
+            count = src.get("count", 0)
+            lines.append(f"⏭ *{name}*: без изменений (count={count})")
+
+        elif action == "changed":
+            parse_results = src.get("parse_results", [])
+            ok_count  = sum(1 for r in parse_results if r.get("ok"))
+            all_count = len(parse_results)
+            icon = "✅" if ok_count == all_count else "⚠️"
+            count = src.get("count", 0)
+            lines.append(f"{icon} *{name}*: изменился → обновлён за {elapsed_src}с (count={count}, {ok_count}/{all_count})")
+            for pr in parse_results:
+                for rline in pr.get("results", []):
+                    parts = rline.split(":")
+                    if len(parts) == 4:
+                        lines.append(f"   └ {parts[1]}: найдено {parts[2]}, добавлено {parts[3]}")
+
+        elif action == "parse_error":
+            count = src.get("count", 0)
+            lines.append(f"❌ *{name}*: изменился, но парсер упал (count={count}) — повтор при следующей проверке")
+
+        elif action == "parse_error_cooldown":
+            age_h = src.get("error_age_h", "?")
+            lines.append(f"🔇 *{name}*: изменился, но парсер падал {age_h}ч назад — пропуск до истечения cooldown")
+
+        elif action == "skipped_due_to_error":
+            details = src.get("details", "")
+            lines.append(f"🚫 *{name}*: сбой проверки (transport/crash) — {details[:80]}")
+
+        elif action == "error":
+            details = src.get("details", "")
+            count = src.get("count", 0)
+            lines.append(f"⚠️ *{name}*: невалидный результат (count={count}) — {details[:80]}")
+
+        elif action == "fallback_full_parse":
+            parse_results = src.get("parse_results", [])
+            ok_count  = sum(1 for r in parse_results if r.get("ok"))
+            all_count = len(parse_results)
+            icon = "✅" if ok_count == all_count else "⚠️"
+            lines.append(f"{icon} *{name}*: плановый прогон за {elapsed_src}с ({ok_count}/{all_count})")
+            for pr in parse_results:
+                for rline in pr.get("results", []):
+                    parts = rline.split(":")
+                    if len(parts) == 4:
+                        lines.append(f"   └ {parts[1]}: найдено {parts[2]}, добавлено {parts[3]}")
+
+        else:
+            lines.append(f"❓ *{name}*: {action}")
+
+    lines.append(f"\n⏱ Всего: {report.get('duration', 0):.0f} сек")
+    return "\n".join(lines)
+
+
+async def _send_daytime_report(bot, report: dict, elapsed: float):
+    """Отправляет дневной отчёт админу."""
+    text = _format_daytime_report(report, elapsed)
+    try:
+        await bot.send_message(chat_id=ADMIN_ID, text=text, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"Не удалось отправить дневной отчёт: {e}")
+
+
 # ---------------------- Добавление событий (модерация) ----------------------
 
 
@@ -2963,8 +3096,21 @@ def setup_scheduler(application):
         kwargs={"bot": application.bot},
         id="channel_weekend", replace_existing=True,
     )
+    # Дневные лёгкие проверки: 13:00 и 18:00 Минск (10:00 и 15:00 UTC)
+    scheduler.add_job(
+        run_daytime_update_job,
+        trigger=CronTrigger(hour=10, minute=0, timezone="UTC"),  # UTC = 13:00 Минск
+        kwargs={"bot": application.bot},
+        id="daytime_update_13", replace_existing=True,
+    )
+    scheduler.add_job(
+        run_daytime_update_job,
+        trigger=CronTrigger(hour=15, minute=0, timezone="UTC"),  # UTC = 18:00 Минск
+        kwargs={"bot": application.bot},
+        id="daytime_update_18", replace_existing=True,
+    )
     scheduler.start()
-    logger.info("⏰ Планировщик: парсеры 6:00, дайджест 8:00, канал 8:05, выходные пятница 11:00 (Минск)")
+    logger.info("⏰ Планировщик: парсеры 6:00, дайджест 8:00, канал 8:05, выходные пятница 11:00, дневные проверки 13:00 и 18:00 (Минск)")
 
 
 # ---------------------- Донат ----------------------
