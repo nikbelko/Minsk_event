@@ -151,15 +151,16 @@ def paginate(items: list, page: int, per_page: int) -> tuple[list, int]:
 
 def _build_time_filter(date_filter: str, today: str, now_time: str) -> tuple[str, list]:
     """Возвращает SQL условие для фильтрации прошедших событий и параметры.
-    Логика: нет show_time → показываем только в VENUE_OPEN_TIME–VENUE_CLOSE_TIME
-                            (выставки, музеи и т.п. ночью закрыты).
+    Логика: нет show_time → показываем до VENUE_CLOSE_TIME (21:00).
+                            После 21:00 скрываем — заведения закрыты.
+                            До 09:00 показываем — люди должны видеть план на день.
             есть end_time → фильтруем по end_time > now.
             нет end_time  → фильтруем по show_time > now.
     """
     if date_filter != today:
         return "", []
 
-    venue_open = VENUE_OPEN_TIME <= now_time < VENUE_CLOSE_TIME
+    venue_open = now_time < VENUE_CLOSE_TIME
 
     if venue_open:
         return """
@@ -310,7 +311,7 @@ def get_events(
         where.append("event_date >= ?")
         params.append(today)
         # Фильтруем сегодняшние события по времени
-        venue_open = VENUE_OPEN_TIME <= now_t < VENUE_CLOSE_TIME
+        venue_open = now_t < VENUE_CLOSE_TIME
         if venue_open:
             where.append("(event_date > ? OR (show_time = '' OR show_time IS NULL OR (end_time != '' AND end_time IS NOT NULL AND end_time > ?) OR ((end_time = '' OR end_time IS NULL) AND show_time > ?)))")
         else:
@@ -457,7 +458,7 @@ def events_upcoming(
     today = today_str()
     now_t = now_time_str()
     until = (now_minsk() + timedelta(days=days)).strftime("%Y-%m-%d")
-    venue_open = VENUE_OPEN_TIME <= now_t < VENUE_CLOSE_TIME
+    venue_open = now_t < VENUE_CLOSE_TIME
     if venue_open:
         today_filter = "(event_date > ? OR (show_time = '' OR show_time IS NULL OR (end_time != '' AND end_time IS NOT NULL AND end_time > ?) OR ((end_time = '' OR end_time IS NULL) AND show_time > ?)))"
     else:

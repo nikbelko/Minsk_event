@@ -226,15 +226,16 @@ def _build_time_filter(date_filter: str, today: str, now_time: str) -> tuple[str
     """Возвращает чистое SQL условие БЕЗ 'AND' для фильтрации прошедших событий.
     - Для where.append(): добавлять напрямую, ' AND '.join() сам добавит AND.
     - Для query +=: использовать query += ' AND ' + time_filter.
-    Логика: нет show_time → показываем только в VENUE_OPEN_TIME–VENUE_CLOSE_TIME
-                            (выставки, музеи и т.п. ночью закрыты).
+    Логика: нет show_time → показываем до VENUE_CLOSE_TIME (21:00).
+                            После 21:00 скрываем — заведения закрыты.
+                            До 09:00 показываем — люди должны видеть план на день.
             есть end_time → фильтруем по end_time > now.
             нет end_time  → фильтруем по show_time > now.
     """
     if date_filter != today:
         return "", []
 
-    venue_open = VENUE_OPEN_TIME <= now_time < VENUE_CLOSE_TIME
+    venue_open = now_time < VENUE_CLOSE_TIME
 
     if venue_open:
         return (
@@ -526,7 +527,7 @@ def get_events_by_date_and_category(target_date: datetime, category: str | None 
         # Вспомогательная функция для фильтра времени
         def add_time_filter(query, params, date_str, now_time):
             """Добавляет условие для фильтрации прошедших сеансов."""
-            venue_open = VENUE_OPEN_TIME <= now_time < VENUE_CLOSE_TIME
+            venue_open = now_time < VENUE_CLOSE_TIME
             if venue_open:
                 time_filter = """
                     AND (
@@ -604,7 +605,7 @@ def get_upcoming_events(limit: int = 20, category: str | None = None):
         cursor = conn.cursor()
 
         # Условие для фильтрации прошедших событий
-        venue_open = VENUE_OPEN_TIME <= now_time < VENUE_CLOSE_TIME
+        venue_open = now_time < VENUE_CLOSE_TIME
         if venue_open:
             time_filter = """
                 AND (
@@ -841,12 +842,11 @@ async def check_flash_subscriptions(bot) -> int:
                 SELECT DISTINCT id, title, details, event_date, show_time, place, price, category, source_url
                 FROM events
                 WHERE event_date >= ?
-                AND (LOWER(title) LIKE ? OR title LIKE ?
-                     OR LOWER(details) LIKE ? OR details LIKE ?)
+                AND (pylow(title) LIKE ? OR pylow(details) LIKE ?)
                 {"AND (created_at IS NULL OR created_at > ?)" if last_notified else ""}
                 ORDER BY event_date, show_time
                 LIMIT 5
-            """, (today, spl, sp, spl, sp, *((last_notified,) if last_notified else ()))).fetchall()
+            """, (today, spl, spl, *((last_notified,) if last_notified else ()))).fetchall()
 
             if not rows:
                 continue
@@ -3160,6 +3160,11 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         text_filter = " ".join(text_parts) if text_parts else None
 
         now_time = now.strftime("%H:%M")
+        # Переиспользуемый time-фильтр для сегодня (учитывает venue_close_time)
+        _itf, _itp = _build_time_filter(today, today, now_time)
+        inline_time_clause = f"(event_date > ? OR {_itf})"
+        inline_time_params = [today] + _itp
+
         with get_db_connection() as conn:
             where = []
             params = []
@@ -3179,19 +3184,19 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     where.append("event_date BETWEEN ? AND ?")
                     params += [date_from_filter, date_to_filter]
                     if date_from_filter == today:
-                        where.append("(event_date > ? OR show_time = '' OR show_time IS NULL OR show_time > ?)")
-                        params += [today, now_time]
+                        where.append(inline_time_clause)
+                        params += inline_time_params
                 elif date_from_filter:
                     where.append("event_date >= ?")
                     params.append(date_from_filter)
                     if date_from_filter == today:
-                        where.append("(event_date > ? OR show_time = '' OR show_time IS NULL OR show_time > ?)")
-                        params += [today, now_time]
+                        where.append(inline_time_clause)
+                        params += inline_time_params
                 else:
                     where.append("event_date >= ?")
                     params.append(today)
-                    where.append("(event_date > ? OR show_time = '' OR show_time IS NULL OR show_time > ?)")
-                    params += [today, now_time]
+                    where.append(inline_time_clause)
+                    params += inline_time_params
             else:
                 # Обычная категория
                 if date_filter:
@@ -3207,25 +3212,26 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     params += [date_from_filter, date_to_filter]
                     # Если начало диапазона — сегодня, фильтруем время
                     if date_from_filter == today:
-                        where.append("(event_date > ? OR show_time = '' OR show_time IS NULL OR show_time > ?)")
-                        params += [today, now_time]
+                        where.append(inline_time_clause)
+                        params += inline_time_params
                 elif date_from_filter:
                     where.append("event_date >= ?")
                     params.append(date_from_filter)
                     if date_from_filter == today:
-                        where.append("(event_date > ? OR show_time = '' OR show_time IS NULL OR show_time > ?)")
-                        params += [today, now_time]
+                        where.append(inline_time_clause)
+                        params += inline_time_params
                 else:
                     where.append("event_date >= ?")
                     params.append(today)
-                    where.append("(event_date > ? OR show_time = '' OR show_time IS NULL OR show_time > ?)")
-                    params += [today, now_time]
+                    where.append(inline_time_clause)
+                    params += inline_time_params
                 if cat_filter:
                     where.append("category = ?")
                     params.append(cat_filter)
             if text_filter:
-                where.append("(title LIKE ? OR place LIKE ?)")
-                params += [f"%{text_filter}%", f"%{text_filter}%"]
+                tl = text_filter.lower()
+                where.append("(pylow(title) LIKE ? OR pylow(place) LIKE ?)")
+                params += [f"%{tl}%", f"%{tl}%"]
             sql = f"""
                 SELECT DISTINCT title, event_date, show_time, place, price, category, source_url
                 FROM events WHERE {" AND ".join(where)}
