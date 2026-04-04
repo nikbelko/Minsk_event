@@ -122,32 +122,30 @@ def get_weekend_dates() -> tuple[str, str]:
     return saturday.strftime("%Y-%m-%d"), sunday.strftime("%Y-%m-%d")
 
 
-def fetch_events(
+def fetch_events_paged(
     where_clauses: list[str],
     params: list,
+    page: int,
+    per_page: int,
     order: str = "event_date, show_time, title",
-    limit: int = 5000,
-) -> list[dict]:
+) -> tuple[list[dict], int]:
+    """Возвращает (события на странице, total) через SQL COUNT + LIMIT/OFFSET."""
     where = " AND ".join(where_clauses) if where_clauses else "1=1"
-    sql = f"""
-        SELECT id, title, details, description, event_date, show_time, end_time,
-               place, location, price, category, source_url, source_name
-        FROM events
-        WHERE {where}
-        ORDER BY {order}
-        LIMIT {limit}
-    """
+    offset = (page - 1) * per_page
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute(sql, params)
-        return [row_to_dict(r) for r in cursor.fetchall()]
-
-
-def paginate(items: list, page: int, per_page: int) -> tuple[list, int]:
-    total = len(items)
-    start = (page - 1) * per_page
-    end = start + per_page
-    return items[start:end], total
+        cursor.execute(f"SELECT COUNT(*) FROM events WHERE {where}", params)
+        total = cursor.fetchone()[0]
+        cursor.execute(
+            f"""SELECT id, title, details, description, event_date, show_time, end_time,
+                       place, location, price, category, source_url, source_name
+                FROM events WHERE {where}
+                ORDER BY {order}
+                LIMIT ? OFFSET ?""",
+            params + [per_page, offset],
+        )
+        rows = [row_to_dict(r) for r in cursor.fetchall()]
+    return rows, total
 
 def _build_time_filter(date_filter: str, today: str, now_time: str) -> tuple[str, list]:
     """Возвращает SQL условие для фильтрации прошедших событий и параметры.
@@ -360,8 +358,7 @@ def get_events(
             )
             params.extend([spl, spc, spu, spl, spc, spu, spl, spc, spu, spl, spc, spu, spl])
 
-    events = fetch_events(where, params)
-    page_events, total = paginate(events, page, per_page)
+    page_events, total = fetch_events_paged(where, params, page, per_page)
 
     return EventsResponse(
         total=total,
@@ -396,8 +393,7 @@ def events_today(
         where.append("category = ?")
         params.append(category)
         
-    events = fetch_events(where, params)
-    page_events, total = paginate(events, page, per_page)
+    page_events, total = fetch_events_paged(where, params, page, per_page)
     return EventsResponse(total=total, page=page, per_page=per_page,
                           events=[Event(**e) for e in page_events])
 
@@ -419,8 +415,7 @@ def events_tomorrow(
         where.append("category = ?")
         params.append(category)
         
-    events = fetch_events(where, params)
-    page_events, total = paginate(events, page, per_page)
+    page_events, total = fetch_events_paged(where, params, page, per_page)
     return EventsResponse(total=total, page=page, per_page=per_page,
                           events=[Event(**e) for e in page_events])
 
@@ -442,8 +437,7 @@ def events_weekend(
         where.append("category = ?")
         params.append(category)
         
-    events = fetch_events(where, params)
-    page_events, total = paginate(events, page, per_page)
+    page_events, total = fetch_events_paged(where, params, page, per_page)
     return EventsResponse(total=total, page=page, per_page=per_page,
                           events=[Event(**e) for e in page_events])
 
@@ -476,8 +470,7 @@ def events_upcoming(
         where.append("category = ?")
         params.append(category)
         
-    events = fetch_events(where, params)
-    page_events, total = paginate(events, page, per_page)
+    page_events, total = fetch_events_paged(where, params, page, per_page)
     return EventsResponse(total=total, page=page, per_page=per_page,
                           events=[Event(**e) for e in page_events])
 
