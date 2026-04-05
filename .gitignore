@@ -95,3 +95,4 @@ build/
 telegram_parser.py
 telegram_parser_web.py
 afisha24_parser.py
+test_daytime_scenarios.py

@@ -3,17 +3,18 @@
 Daytime lightweight source check + conditional full parse.
 
 Strategy:
-  - relax.by  → cheap fingerprint check → full parse only if changed
+  - relax.by  → per-category cheap fingerprint check → parse only changed categories
+                → always run free-events pass after any relax category was parsed
   - bycard.by → cheap fingerprint check → full parse only if changed
   - ticketpro.by, bezkassira.by → always full parse (fallback_full_parse)
 
 Fingerprint quality:
-  - relax.by:  href|date|show_time per seance card (date from h5, time from seance-time elem)
+  - relax.by per category: href|date|show_time per seance (listing page only, no detail pages)
   - bycard.by: performanceId|date|time per NUXT session (resolved via decode_nuxt)
 
 Safety rules:
   - last_seen_hash/count updated only on non-error checks with count > MIN_SANE_COUNT
-  - last_successful_hash/count updated only when above + hash non-empty
+  - last_successful_hash/count updated only when above + parse_ok=True
   - If check returns error or suspiciously empty → do NOT overwrite baseline; mark status=error
 
 Output: DAYTIME_REPORT:<json> on stdout for bot_enhanced.py to capture.
@@ -29,17 +30,25 @@ import sys
 import time
 from datetime import datetime
 
+import sqlite3
+
 import requests
 from bs4 import BeautifulSoup
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import MINSK_TZ  # noqa: E402
+from config import DB_PATH, MINSK_TZ  # noqa: E402
 from parser_state import (  # noqa: E402
     init_parser_source_state,
     get_parser_source_state,
     update_parser_source_state,
 )
+
+try:
+    from normalizer import mark_free_duplicates as _mark_free_duplicates
+    _NORMALIZER_AVAILABLE = True
+except ImportError:
+    _NORMALIZER_AVAILABLE = False
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -56,44 +65,55 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+if not _NORMALIZER_AVAILABLE:
+    log.warning("normalizer import failed — free-events price update disabled")
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
-# Minimum number of items a check must return to be considered sane.
-# Below this threshold → treat as suspicious/empty and don't overwrite baseline.
-MIN_SANE_COUNT: dict[str, int] = {
-    "relax.by":  10,   # relax always has many events
-    "bycard.by":  3,   # bycard may genuinely have fewer sessions
-}
-
 # If full parse failed for a given fingerprint, don't retry it more often than this.
-# Protects against noise loops when a source breaks parser consistently.
 PARSE_ERROR_COOLDOWN_HOURS = 6
 
-# Sources with cheap fingerprint check
-CHECKABLE_SOURCES = ["relax.by", "bycard.by"]
+# relax.by per-category config: source_key → (listing_url, parser_cmd, human_label)
+# source_key is used as the parser_source_state primary key, so each category
+# has its own independent fingerprint/baseline.
+RELAX_CATEGORIES: dict[str, tuple[str, str, str]] = {
+    "relax.by:theatre":    ("https://afisha.relax.by/theatre/minsk/",  "relax_parser.py theatre",    "🎭 Театр (Relax)"),
+    "relax.by:concert":    ("https://afisha.relax.by/conserts/minsk/", "relax_parser.py concert",    "🎵 Концерты (Relax)"),
+    "relax.by:exhibition": ("https://afisha.relax.by/expo/minsk/",     "relax_parser.py exhibition", "🖼️ Выставки (Relax)"),
+    "relax.by:kids":       ("https://afisha.relax.by/kids/minsk/",     "relax_parser.py kids",       "🧸 Детям (Relax)"),
+    "relax.by:party":      ("https://afisha.relax.by/clubs/minsk/",    "relax_parser.py party",      "🎉 Вечеринки (Relax)"),
+    "relax.by:kino":       ("https://afisha.relax.by/kino/minsk/",     "relax_parser.py kino",       "🎬 Кино (Relax)"),
+}
+
+# Free-events pass must run after ANY relax category was parsed.
+# It marks free events across all relax categories — skipping it loses "Бесплатно" labels.
+RELAX_FREE_CMD   = "relax_parser.py free"
+RELAX_FREE_LABEL = "🆓 Бесплатно (Relax)"
+
+# Minimum number of items a check must return to be considered sane.
+MIN_SANE_COUNT: dict[str, int] = {
+    "relax.by:theatre":    3,
+    "relax.by:concert":    3,
+    "relax.by:exhibition": 3,
+    "relax.by:kids":       3,
+    "relax.by:party":      3,
+    "relax.by:kino":       5,   # kino always has many sessions
+    "bycard.by":           3,
+}
+
+# Sources with cheap fingerprint check (relax per-category + bycard)
+CHECKABLE_SOURCES = list(RELAX_CATEGORIES.keys()) + ["bycard.by"]
 
 # Sources that always run full parse (no cheap check implemented)
 ALWAYS_PARSE_SOURCES = ["ticketpro.by", "bezkassira.by"]
 
-# Maps source_name → list of (script_cmd, human_label)
-SOURCE_PARSERS: dict[str, list[tuple[str, str]]] = {
-    "relax.by": [
-        ("relax_parser.py theatre",    "🎭 Театр (Relax)"),
-        ("relax_parser.py concert",    "🎵 Концерты (Relax)"),
-        ("relax_parser.py exhibition", "🖼️ Выставки (Relax)"),
-        ("relax_parser.py kids",       "🧸 Детям (Relax)"),
-        ("relax_parser.py party",      "🎉 Вечеринки (Relax)"),
-        ("relax_parser.py kino",       "🎬 Кино (Relax)"),
-    ],
-    "bycard.by": [
-        ("bycard_parser.py", "🎭 Bycard"),
-    ],
-    "ticketpro.by": [
-        ("ticketpro_parser.py", "🎫 Ticketpro"),
-    ],
-    "bezkassira.by": [
-        ("bezkassira_parser.py", "🎟 BezKassira"),
-    ],
+# Maps source_key → single parser (cmd, label).
+# Relax free pass is NOT here — it's triggered separately after any category parse.
+SOURCE_PARSERS: dict[str, tuple[str, str]] = {
+    **{key: (cmd, label) for key, (_, cmd, label) in RELAX_CATEGORIES.items()},
+    "bycard.by":    ("bycard_parser.py",    "🎭 Bycard"),
+    "ticketpro.by": ("ticketpro_parser.py", "🎫 Ticketpro"),
+    "bezkassira.by":("bezkassira_parser.py","🎟 BezKassira"),
 }
 
 HEADERS = {
@@ -156,91 +176,79 @@ def _parse_text_date(text: str) -> str:
     return ""
 
 
-# ── relax.by cheap check ──────────────────────────────────────────────────────
-
-RELAX_CATEGORY_URLS = {
-    "theatre":    "https://afisha.relax.by/theatre/minsk/",
-    "concert":    "https://afisha.relax.by/conserts/minsk/",
-    "exhibition": "https://afisha.relax.by/expo/minsk/",
-    "kids":       "https://afisha.relax.by/kids/minsk/",
-    "party":      "https://afisha.relax.by/clubs/minsk/",
-    "kino":       "https://afisha.relax.by/kino/minsk/",
-}
+# ── relax.by cheap check (per category) ──────────────────────────────────────
 
 
-def check_relax_fingerprint() -> dict:
+def _check_relax_category(source_key: str, url: str) -> dict:
     """
-    Fetch each relax category listing page.
+    Fetch ONE relax listing page and return its fingerprint.
     Fingerprint key per seance: href|date|show_time
-    - href:      most stable unique key (event URL)
-    - date:      from div.schedule__list > h5 (available on listing page)
-    - show_time: from a/span.schedule__seance-time (available on listing page)
+      href      — most stable unique key (event URL, available on listing page)
+      date      — from schedule__list > h5 (available on listing page)
+      show_time — from a/span.schedule__seance-time (available on listing page)
     Together they catch: new events, removed events, rescheduled events.
+    No detail pages fetched.
     """
-    all_keys: list[str] = []
-    category_counts: dict[str, int] = {}
-    errors: list[str] = []
+    cat = source_key.split(":")[-1]
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
 
-    for cat, url in RELAX_CATEGORY_URLS.items():
-        try:
-            resp = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-            resp.raise_for_status()
-            soup = BeautifulSoup(resp.text, "html.parser")
+        keys: list[str] = []
+        for day_block in soup.find_all("div", class_="schedule__list"):
+            h5 = day_block.find("h5")
+            date_str = _parse_text_date(h5.get_text()) if h5 else ""
 
-            keys: list[str] = []
-            for day_block in soup.find_all("div", class_="schedule__list"):
-                h5 = day_block.find("h5")
-                date_str = _parse_text_date(h5.get_text()) if h5 else ""
+            for movie_item in day_block.find_all("div", class_="schedule__table--movie__item"):
+                item = movie_item.find("div", class_="schedule__item")
+                if not item:
+                    continue
+                title_a = item.find("a", class_="js-schedule__event-link")
+                if not title_a:
+                    continue
+                href = title_a.get("href", "").strip()
+                if not href:
+                    continue
 
-                for movie_item in day_block.find_all("div", class_="schedule__table--movie__item"):
-                    item = movie_item.find("div", class_="schedule__item")
-                    if not item:
-                        continue
-                    title_a = item.find("a", class_="js-schedule__event-link")
-                    if not title_a:
-                        continue
-                    href = title_a.get("href", "").strip()
-                    if not href:
-                        continue
+                seances = item.find_all("div", class_="schedule__seance") or [item]
+                for seance in seances:
+                    time_elem = (
+                        seance.find("a", class_="schedule__seance-time")
+                        or seance.find("span", class_="schedule__seance-time")
+                    )
+                    show_time = ""
+                    if time_elem:
+                        raw = time_elem.get_text(strip=True)
+                        if re.match(r"^\d{1,2}:\d{2}$", raw):
+                            show_time = raw
+                    keys.append(f"{href}|{date_str}|{show_time}")
 
-                    seances = item.find_all("div", class_="schedule__seance") or [item]
-                    for seance in seances:
-                        time_elem = (
-                            seance.find("a", class_="schedule__seance-time")
-                            or seance.find("span", class_="schedule__seance-time")
-                        )
-                        show_time = ""
-                        if time_elem:
-                            raw = time_elem.get_text(strip=True)
-                            if re.match(r"^\d{1,2}:\d{2}$", raw):
-                                show_time = raw
+        count = len(keys)
+        log.info(f"  relax/{cat}: {count} seances")
+        return {
+            "source_name": source_key,
+            "count":  count,
+            "hash":   _sha256(keys) if keys else "",
+            "details": f"{cat}={count}",
+            "status": "ok" if count > 0 else "error",
+        }
+    except Exception as e:
+        log.warning(f"  relax/{cat} error: {e}")
+        return {
+            "source_name": source_key,
+            "count": 0,
+            "hash":  "",
+            "details": str(e),
+            "status": "error",
+        }
 
-                        keys.append(f"{href}|{date_str}|{show_time}")
 
-            all_keys.extend(keys)
-            category_counts[cat] = len(keys)
-            log.info(f"  relax/{cat}: {len(keys)} seances")
-
-        except Exception as e:
-            log.warning(f"  relax/{cat} error: {e}")
-            errors.append(f"{cat}:{e}")
-
-    total = sum(category_counts.values())
-    detail_parts = [f"{k}={v}" for k, v in category_counts.items()]
-    if errors:
-        detail_parts.append(f"errors={len(errors)}")
-
-    # Error if ALL categories failed (partial errors tolerated)
-    all_failed = len(errors) == len(RELAX_CATEGORY_URLS)
-    status = "error" if all_failed else "ok"
-
-    return {
-        "source_name": "relax.by",
-        "count": total,
-        "hash": _sha256(all_keys) if all_keys else "",
-        "details": ", ".join(detail_parts),
-        "status": status,
-    }
+def _make_relax_check(source_key: str, url: str):
+    """Factory to avoid late-binding closure bug in list comprehensions."""
+    def _check():
+        return _check_relax_category(source_key, url)
+    return _check
 
 
 # ── bycard.by cheap check ─────────────────────────────────────────────────────
@@ -385,7 +393,7 @@ def check_bycard_fingerprint() -> dict:
 
 
 CHECK_FNS = {
-    "relax.by":  check_relax_fingerprint,
+    **{key: _make_relax_check(key, url) for key, (url, _, _label) in RELAX_CATEGORIES.items()},
     "bycard.by": check_bycard_fingerprint,
 }
 
@@ -423,16 +431,14 @@ def run_parser(cmd: str, label: str) -> tuple[bool, list[str]]:
         return False, []
 
 
-def run_source_parsers(source_name: str) -> list[dict]:
-    """Run all parser commands for a source. Returns list of result dicts."""
-    results = []
-    for cmd, label in SOURCE_PARSERS.get(source_name, []):
-        t0 = time.time()
-        ok, lines = run_parser(cmd, label)
-        elapsed = round(time.time() - t0, 1)
-        log.info(f"  {label}: {'✅' if ok else '❌'} in {elapsed}s")
-        results.append({"label": label, "ok": ok, "results": lines, "elapsed": elapsed})
-    return results
+def run_single_parser(source_key: str) -> dict:
+    """Run the one parser command for source_key. Returns result dict."""
+    cmd, label = SOURCE_PARSERS[source_key]
+    t0 = time.time()
+    ok, lines = run_parser(cmd, label)
+    elapsed = round(time.time() - t0, 1)
+    log.info(f"  {label}: {'✅' if ok else '❌'} in {elapsed}s")
+    return {"label": label, "ok": ok, "results": lines, "elapsed": elapsed}
 
 
 # ── State update helpers ──────────────────────────────────────────────────────
@@ -504,6 +510,107 @@ def _record_parse(source_name: str, now_iso: str, fp: dict, parse_ok: bool):
     update_parser_source_state(source_name, **fields)
 
 
+# ── Free-pass post-processing helpers ────────────────────────────────────────
+
+def _load_relax_events_from_db() -> list[dict]:
+    """Load all relax.by events from DB for free-duplicate matching."""
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT title, details, description, event_date, show_time, "
+                "place, location, price, category, source_url, source_name "
+                "FROM events WHERE source_name = 'relax.by'"
+            ).fetchall()
+        events = [dict(r) for r in rows]
+        log.info(f"  free-pass: loaded {len(events)} relax.by events from DB")
+        return events
+    except Exception as e:
+        log.error(f"  free-pass: DB load failed: {e}")
+        return []
+
+
+def _update_free_prices_in_db(events: list[dict]) -> int:
+    """Write 'Бесплатно' price for events marked as free by mark_free_duplicates."""
+    if not events:
+        return 0
+    updated = 0
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            for ev in events:
+                if ev.get("price") == "Бесплатно" and ev.get("_from_free_section"):
+                    cur = conn.execute(
+                        "UPDATE events SET price = ? WHERE title = ? AND event_date = ? AND place = ?",
+                        ("Бесплатно", ev["title"], ev["event_date"], ev["place"]),
+                    )
+                    updated += cur.rowcount
+            conn.commit()
+        log.info(f"  free-pass: updated {updated} event prices to 'Бесплатно'")
+    except Exception as e:
+        log.error(f"  free-pass: DB update failed: {e}")
+    return updated
+
+
+def run_free_pass() -> dict:
+    """
+    Run relax_parser.py free subprocess, capture EVENTS_JSON output,
+    then call mark_free_duplicates + update DB prices.
+
+    Returns result dict (compatible with regular parse_result format) with
+    an extra 'free_updated' key for the report.
+    """
+    t0 = time.time()
+    full_cmd = [sys.executable] + RELAX_FREE_CMD.split()
+    try:
+        proc = subprocess.run(
+            full_cmd,
+            capture_output=True,
+            text=True,
+            timeout=900,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+        )
+        result_lines: list[str] = []
+        free_events:  list[dict] = []
+
+        for line in proc.stdout.splitlines():
+            s = line.strip()
+            if s.startswith("RESULT:"):
+                result_lines.append(s)
+            elif s.startswith("EVENTS_JSON:"):
+                try:
+                    free_events.extend(json.loads(s[len("EVENTS_JSON:"):]))
+                except Exception as je:
+                    log.error(f"  free-pass: EVENTS_JSON parse error: {je}")
+
+        ok = proc.returncode == 0
+        elapsed = round(time.time() - t0, 1)
+        log.info(f"  {RELAX_FREE_LABEL}: {'✅' if ok else '❌'} in {elapsed}s, "
+                 f"{len(free_events)} free events received")
+
+        free_updated = 0
+        if ok and free_events and _NORMALIZER_AVAILABLE:
+            relax_db = _load_relax_events_from_db()
+            if relax_db:
+                merged = _mark_free_duplicates(relax_db, free_events)
+                free_updated = _update_free_prices_in_db(merged)
+        elif free_events and not _NORMALIZER_AVAILABLE:
+            log.warning("  free-pass: normalizer unavailable — price update skipped")
+
+        return {
+            "label":        RELAX_FREE_LABEL,
+            "ok":           ok,
+            "results":      result_lines,
+            "elapsed":      elapsed,
+            "free_updated": free_updated,
+        }
+    except subprocess.TimeoutExpired:
+        log.error(f"  free-pass: timed out")
+        return {"label": RELAX_FREE_LABEL, "ok": False, "results": [], "elapsed": round(time.time() - t0, 1), "free_updated": 0}
+    except Exception as e:
+        log.error(f"  free-pass: exception: {e}")
+        return {"label": RELAX_FREE_LABEL, "ok": False, "results": [], "elapsed": round(time.time() - t0, 1), "free_updated": 0}
+
+
 # ── Main orchestrator ─────────────────────────────────────────────────────────
 
 def main():
@@ -518,6 +625,7 @@ def main():
         "sources": [],
     }
     now_iso = now.isoformat()
+    relax_any_parsed = False  # tracks whether any relax category ran its parser
 
     # ── 1. Sources with cheap fingerprint check ──────────────────────────────
     for source_name in CHECKABLE_SOURCES:
@@ -648,10 +756,13 @@ def main():
                 except (ValueError, TypeError):
                     pass  # malformed timestamp — proceed with parse
 
-        log.info(f"[{source_name}] CHANGED (count {baseline_count}→{count}) → running full parse")
-        parse_results = run_source_parsers(source_name)
-        elapsed_src   = round(time.time() - t0, 1)
-        parse_ok      = all(r["ok"] for r in parse_results)
+        log.info(f"[{source_name}] CHANGED (count {baseline_count}→{count}) → running parser")
+        parse_result = run_single_parser(source_name)
+        elapsed_src  = round(time.time() - t0, 1)
+        parse_ok     = parse_result["ok"]
+
+        if source_name in RELAX_CATEGORIES:
+            relax_any_parsed = True
 
         _record_parse(source_name, now_iso, fp, parse_ok)
         summary["sources"].append({
@@ -659,17 +770,31 @@ def main():
             "action":        "changed" if parse_ok else "parse_error",
             "count":         count,
             "hash":          fp_hash,
-            "parse_results": parse_results,
+            "parse_results": [parse_result],
             "elapsed":       elapsed_src,
         })
 
-    # ── 2. Always-parse sources ──────────────────────────────────────────────
+    # ── 2. Free-events pass — runs after ANY relax category was parsed ────────
+    # relax_parser.py free cross-checks all relax categories and marks free events.
+    # Must run whenever at least one category was updated; skipping it drops
+    # "Бесплатно" labels from events that are free but priced in other categories.
+    if relax_any_parsed:
+        log.info("[relax.by:free] running free-events pass")
+        free_result = run_free_pass()
+        summary["sources"].append({
+            "name":          "relax.by:free",
+            "action":        "free_pass",
+            "parse_results": [free_result],
+            "elapsed":       free_result["elapsed"],
+            "free_updated":  free_result.get("free_updated", 0),
+        })
+
+    # ── 3. Always-parse sources ──────────────────────────────────────────────
     for source_name in ALWAYS_PARSE_SOURCES:
         t0 = time.time()
         log.info(f"[{source_name}] fallback_full_parse (no check implemented)")
-        parse_results = run_source_parsers(source_name)
-        elapsed_src   = round(time.time() - t0, 1)
-        all_ok        = all(r["ok"] for r in parse_results)
+        parse_result = run_single_parser(source_name)
+        elapsed_src  = round(time.time() - t0, 1)
 
         update_parser_source_state(
             source_name,
@@ -681,7 +806,7 @@ def main():
         summary["sources"].append({
             "name":          source_name,
             "action":        "fallback_full_parse",
-            "parse_results": parse_results,
+            "parse_results": [parse_result],
             "elapsed":       elapsed_src,
         })
 

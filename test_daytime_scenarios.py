@@ -22,8 +22,11 @@ MINSK_TZ = timezone(timedelta(hours=3))
 # We'll reload with patches in setUp via direct patching of the functions after import.
 
 
+SOURCE_KEY = "relax.by:theatre"  # representative relax category
+
+
 def _make_fp(hash_val: str, count: int = 50, status: str = "ok") -> dict:
-    return {"source_name": "relax.by", "count": count, "hash": hash_val,
+    return {"source_name": SOURCE_KEY, "count": count, "hash": hash_val,
             "details": "test", "status": status}
 
 
@@ -36,7 +39,7 @@ def _make_prev(
     error_at: str = "",
 ) -> dict:
     return {
-        "source_name":           "relax.by",
+        "source_name":           SOURCE_KEY,
         "last_successful_hash":  successful_hash,
         "last_successful_count": successful_count,
         "last_seen_hash":        seen_hash,
@@ -79,11 +82,15 @@ class TestDaytimeScenarios(unittest.TestCase):
         def fake_update(source_name, **kwargs):
             recorded.append({"source_name": source_name, **kwargs})
 
+        # run_single_parser returns a single dict; wrap parse_results[0] for the mock
+        single_result = parse_results[0] if parse_results else {"ok": True, "results": [], "elapsed": 0}
         with patch.object(du, "get_parser_source_state", return_value=prev_state), \
              patch.object(du, "update_parser_source_state", side_effect=fake_update), \
-             patch.object(du, "run_source_parsers", return_value=parse_results), \
+             patch.object(du, "run_single_parser", return_value=single_result), \
+             patch.object(du, "run_parser", return_value=(True, [])), \
              patch.object(du, "init_parser_source_state"), \
-             patch.object(du, "CHECK_FNS", {"relax.by": lambda: fp}), \
+             patch.object(du, "CHECK_FNS", {SOURCE_KEY: lambda: fp}), \
+             patch.object(du, "CHECKABLE_SOURCES", [SOURCE_KEY]), \
              patch.object(du, "ALWAYS_PARSE_SOURCES", []), \
              patch("daytime_update.datetime") as mock_dt:
 
@@ -161,13 +168,15 @@ class TestDaytimeScenarios(unittest.TestCase):
 
         def fake_parse(source_name):
             parse_called.append(source_name)
-            return [{"ok": True, "results": [], "elapsed": 1.0, "label": "test"}]
+            return {"ok": True, "results": [], "elapsed": 1.0, "label": "test"}
 
         with patch.object(du, "get_parser_source_state", return_value=prev), \
              patch.object(du, "update_parser_source_state", side_effect=fake_update), \
-             patch.object(du, "run_source_parsers", side_effect=fake_parse), \
+             patch.object(du, "run_single_parser", side_effect=fake_parse), \
+             patch.object(du, "run_parser", return_value=(True, [])), \
              patch.object(du, "init_parser_source_state"), \
-             patch.object(du, "CHECK_FNS", {"relax.by": lambda: fp}), \
+             patch.object(du, "CHECK_FNS", {SOURCE_KEY: lambda: fp}), \
+             patch.object(du, "CHECKABLE_SOURCES", [SOURCE_KEY]), \
              patch.object(du, "ALWAYS_PARSE_SOURCES", []), \
              patch("daytime_update.datetime") as mock_dt:
 
@@ -211,13 +220,15 @@ class TestDaytimeScenarios(unittest.TestCase):
 
         def fake_parse(source_name):
             parse_called.append(source_name)
-            return [{"ok": True, "results": [], "elapsed": 1.0, "label": "test"}]
+            return {"ok": True, "results": [], "elapsed": 1.0, "label": "test"}
 
         with patch.object(du, "get_parser_source_state", return_value=prev), \
              patch.object(du, "update_parser_source_state"), \
-             patch.object(du, "run_source_parsers", side_effect=fake_parse), \
+             patch.object(du, "run_single_parser", side_effect=fake_parse), \
+             patch.object(du, "run_parser", return_value=(True, [])), \
              patch.object(du, "init_parser_source_state"), \
-             patch.object(du, "CHECK_FNS", {"relax.by": lambda: fp}), \
+             patch.object(du, "CHECK_FNS", {SOURCE_KEY: lambda: fp}), \
+             patch.object(du, "CHECKABLE_SOURCES", [SOURCE_KEY]), \
              patch.object(du, "ALWAYS_PARSE_SOURCES", []), \
              patch("daytime_update.datetime") as mock_dt:
 
@@ -226,8 +237,8 @@ class TestDaytimeScenarios(unittest.TestCase):
 
             du.main()
 
-        self.assertIn("relax.by", parse_called,
-                      "run_source_parsers must be called for a new fingerprint hash")
+        self.assertIn(SOURCE_KEY, parse_called,
+                      "run_single_parser must be called for a new fingerprint hash")
 
 
 if __name__ == "__main__":

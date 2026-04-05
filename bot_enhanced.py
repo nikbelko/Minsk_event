@@ -2216,6 +2216,12 @@ def _format_daytime_report(report: dict, elapsed: float) -> str:
             count = src.get("count", 0)
             lines.append(f"⚠️ *{name}*: невалидный результат (count={count}) — {details[:80]}")
 
+        elif action == "free_pass":
+            parse_results = src.get("parse_results", [])
+            ok = parse_results[0].get("ok") if parse_results else False
+            icon = "✅" if ok else "❌"
+            lines.append(f"{icon} *{name}*: бесплатные события за {elapsed_src}с")
+
         elif action == "fallback_full_parse":
             parse_results = src.get("parse_results", [])
             ok_count  = sum(1 for r in parse_results if r.get("ok"))
