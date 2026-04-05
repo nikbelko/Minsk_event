@@ -58,6 +58,55 @@ def get_parser_source_state(source_name: str) -> Optional[dict]:
         return dict(row) if row else None
 
 
+def record_successful_parse(
+    source_key: str,
+    fp: dict,
+    now_iso: str,
+    min_sane_count: int = 1,
+    status: str = "nightly_full_parse",
+) -> bool:
+    """
+    Update last_seen_* and last_successful_* after a confirmed successful full parse.
+    Returns True if fp was sane and state was written; False otherwise (caller should warn).
+
+    Safe to call from both run_all_parsers.py (nightly/manual) and daytime_update.py,
+    ensuring that baseline always reflects the last successful parse regardless of origin.
+    """
+    count   = fp.get("count", 0)
+    fp_hash = fp.get("hash", "")
+    if not (fp.get("status") == "ok" and count > min_sane_count and fp_hash):
+        return False
+    update_parser_source_state(
+        source_key,
+        last_checked_at=now_iso,
+        last_changed_at=now_iso,
+        last_seen_count=count,
+        last_seen_hash=fp_hash,
+        last_successful_count=count,
+        last_successful_hash=fp_hash,
+        last_parse_status=status,
+        last_parse_mode="full",
+        last_parse_details=fp.get("details", ""),
+    )
+    return True
+
+
+def record_always_parse_success(source_key: str, now_iso: str, details: str = "nightly full parse ok"):
+    """
+    Update parser_source_state for always-parse sources (ticketpro, bezkassira) after
+    a successful parse. No fingerprint available — only metadata fields are written.
+    last_successful_* intentionally NOT written (nothing to compare against daytime checks).
+    """
+    update_parser_source_state(
+        source_key,
+        last_checked_at=now_iso,
+        last_changed_at=now_iso,
+        last_parse_status="fallback_full_parse",
+        last_parse_mode="full",
+        last_parse_details=details,
+    )
+
+
 def update_parser_source_state(source_name: str, **kwargs):
     """Upsert state for a source. Pass only the fields you want to update."""
     if not kwargs:

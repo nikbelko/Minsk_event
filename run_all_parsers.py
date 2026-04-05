@@ -19,7 +19,18 @@ except ImportError:
         logger.warning("⚠️ mark_free_duplicates не найдена в normalizer, использую заглушку")
         return relax_events + free_events
 
-DB_PATH = os.getenv("DB_PATH", "/data/events_final.db")
+from config import DB_PATH, MINSK_TZ
+from parser_state import (
+    init_parser_source_state,
+    record_successful_parse,
+    record_always_parse_success,
+)
+
+try:
+    from daytime_update import CHECK_FNS, MIN_SANE_COUNT
+    _DAYTIME_AVAILABLE = True
+except ImportError:
+    _DAYTIME_AVAILABLE = False
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,6 +41,69 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger(__name__)
+
+if not _DAYTIME_AVAILABLE:
+    logger.warning("daytime_update unavailable — parser_source_state will NOT be synced after nightly parse")
+
+# Mapping: parser command → source_key for parser_source_state sync.
+# relax_parser.py free is intentionally omitted — free pass is not a baseline source.
+CMD_TO_SOURCE_KEY: dict[str, str] = {
+    "relax_parser.py theatre":    "relax.by:theatre",
+    "relax_parser.py concert":    "relax.by:concert",
+    "relax_parser.py exhibition": "relax.by:exhibition",
+    "relax_parser.py kids":       "relax.by:kids",
+    "relax_parser.py party":      "relax.by:party",
+    "relax_parser.py kino":       "relax.by:kino",
+    "bycard_parser.py":           "bycard.by",
+    "ticketpro_parser.py":        "ticketpro.by",
+    "bezkassira_parser.py":       "bezkassira.by",
+}
+
+# These sources have no fingerprint check — only metadata is written to state.
+ALWAYS_PARSE_KEYS = {"ticketpro.by", "bezkassira.by"}
+
+
+def _sync_parser_state(source_key: str, now_iso: str):
+    """
+    After a successful full parse, update parser_source_state so daytime checks
+    have an accurate baseline to compare against (last_successful_hash/count).
+
+    For checkable sources (relax categories, bycard): runs the fingerprint check
+    post-parse and writes last_seen_* + last_successful_* if sane.
+    For always-parse sources (ticketpro, bezkassira): writes metadata only.
+    """
+    if not _DAYTIME_AVAILABLE:
+        return
+
+    if source_key in ALWAYS_PARSE_KEYS:
+        record_always_parse_success(source_key, now_iso)
+        logger.info(f"   📍 {source_key}: state updated (fallback_full_parse)")
+        return
+
+    check_fn = CHECK_FNS.get(source_key)
+    if not check_fn:
+        logger.warning(f"   ⚠️ {source_key}: no check function — state not synced")
+        return
+
+    try:
+        fp = check_fn()
+    except Exception as e:
+        logger.warning(f"   ⚠️ {source_key}: post-parse check failed ({e}) — baseline NOT updated")
+        return
+
+    min_count = MIN_SANE_COUNT.get(source_key, 1)
+    written = record_successful_parse(source_key, fp, now_iso, min_sane_count=min_count)
+    if written:
+        logger.info(
+            f"   📍 {source_key}: baseline updated "
+            f"(count={fp['count']}, hash={fp.get('hash', '')[:8]}…)"
+        )
+    else:
+        logger.warning(
+            f"   ⚠️ {source_key}: post-parse check returned insane result "
+            f"(count={fp.get('count')}, status={fp.get('status')}) — baseline NOT updated"
+        )
+
 
 # Категории парсеров с указанием, относятся ли они к бесплатным событиям
 PARSERS = [
@@ -197,15 +271,18 @@ def update_events_in_db(events: list) -> int:
 
 def main():
     start_time = datetime.now()
+    now_iso = datetime.now(MINSK_TZ).isoformat()
     logger.info("=" * 60)
     logger.info("🚀 ЗАПУСК ВСЕХ ПАРСЕРОВ")
     logger.info(f"Старт: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info("=" * 60)
 
+    init_parser_source_state()
+
     success = failed = 0
     all_results: list[str] = []
     parser_status: list[tuple] = []  # (name, ok, result_lines)
-    
+
     # Собираем только бесплатные события через JSON
     free_events = []
 
@@ -213,16 +290,21 @@ def main():
     for cmd, name, is_free in PARSERS:
         logger.info("-" * 40)
         ok, result_lines, events = run_parser(cmd, name)
-        
+
         if ok:
             success += 1
             # Бесплатные события собираем отдельно
             if is_free:
                 free_events.extend(events)
                 logger.info(f"   📦 Бесплатных событий получено: {len(events)}")
+            else:
+                # Sync parser_source_state so daytime checks have accurate baseline
+                source_key = CMD_TO_SOURCE_KEY.get(cmd)
+                if source_key:
+                    _sync_parser_state(source_key, now_iso)
         else:
             failed += 1
-        
+
         all_results.extend(result_lines)
         parser_status.append((name, ok, result_lines))
         logger.info("-" * 40)
