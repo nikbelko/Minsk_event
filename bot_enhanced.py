@@ -514,6 +514,42 @@ def search_events_by_date_raw(date_str: str):
     return (events, formatted_date, "найдены") if events else ([], formatted_date, "нет_событий")
 
 
+def _overnight_clause(category: str | None, now_time: str | None) -> tuple[str, list]:
+    """
+    Returns (SQL fragment, params) for midnight-crossing events from the previous day.
+
+    Midnight-crossing event: show_time >= '20:00', end_time <= '08:00', end_time < show_time.
+    These events are stored under event_date = D-1 but are visible on date D until end_time.
+
+    Call with:
+      now_time = current HH:MM if querying today (filters out already-ended ones)
+      now_time = None if querying a future date (show all of them)
+
+    The caller must substitute '?' for prev_date_str and append returned params.
+    """
+    clause = """
+        SELECT id, title, details, description, event_date, show_time, end_time,
+               place, location, price, category, source_url
+        FROM events
+        WHERE event_date = ?
+          AND show_time >= '20:00'
+          AND end_time IS NOT NULL AND end_time != ''
+          AND end_time <= '08:00'
+          AND end_time < show_time
+    """
+    params: list = []
+    if category and category not in ("all", "free"):
+        clause += " AND category = ?"
+        params.append(category)
+    if now_time is not None:
+        if now_time >= "08:00":
+            # All overnight events have already ended — return nothing
+            return "", []
+        clause += " AND end_time > ?"
+        params.append(now_time)
+    return clause, params
+
+
 def get_events_by_date_and_category(target_date: datetime, category: str | None = None):
     """События на дату. Для сегодня фильтрует прошедшие сеансы (по времени Минска)."""
     now_minsk = datetime.now(MINSK_TZ)
@@ -557,18 +593,26 @@ def get_events_by_date_and_category(target_date: datetime, category: str | None 
             query = """
                 SELECT id, title, details, description, event_date, show_time, end_time,
                        place, location, price, category, source_url
-                FROM events 
+                FROM events
                 WHERE event_date = ? AND price = 'Бесплатно'
             """
             params = [date_str]
-            
+
             # Для сегодня — исключаем прошедшие сеансы
             if date_str == today_str:
                 time_filter, time_params = _build_time_filter(date_str, today_str, now_time)
                 if time_filter:
                     query += " AND " + time_filter
                 params.extend(time_params)
-            
+
+            # Midnight-crossing free events from previous day
+            prev_date_str = (target_date - timedelta(days=1)).strftime("%Y-%m-%d")
+            overnight_now = now_time if date_str == today_str else None
+            overnight_sql, overnight_params = _overnight_clause("free", overnight_now)
+            if overnight_sql:
+                query = f"({query}) UNION ({overnight_sql})"
+                params = params + [prev_date_str] + overnight_params
+
             query += " ORDER BY show_time, title"
             cursor.execute(query, params)
             return cursor.fetchall()
@@ -580,17 +624,25 @@ def get_events_by_date_and_category(target_date: datetime, category: str | None 
             FROM events WHERE event_date = ?
         """
         params = [date_str]
-        
+
         if category and category != "all":
             query += " AND category = ?"
             params.append(category)
-        
+
         if date_str == today_str:
             time_filter, time_params = _build_time_filter(date_str, today_str, now_time)
             if time_filter:
                 query += " AND " + time_filter
             params.extend(time_params)
-        
+
+        # Midnight-crossing events: stored under D-1 but visible on D until end_time
+        prev_date_str = (target_date - timedelta(days=1)).strftime("%Y-%m-%d")
+        overnight_now = now_time if date_str == today_str else None
+        overnight_sql, overnight_params = _overnight_clause(category, overnight_now)
+        if overnight_sql:
+            query = f"({query}) UNION ({overnight_sql})"
+            params = params + [prev_date_str] + overnight_params
+
         query += " ORDER BY show_time, title"
         cursor.execute(query, params)
         return cursor.fetchall()
