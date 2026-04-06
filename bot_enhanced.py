@@ -2905,6 +2905,51 @@ async def handle_submit_step(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ---------------------- Публикация в канал ----------------------
 
+def _get_card_font_path(bold: bool = False) -> str | None:
+    """
+    Return path to a Cyrillic-capable TTF font.
+    Downloads Roboto from GitHub if not already present locally.
+    """
+    fonts_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+    os.makedirs(fonts_dir, exist_ok=True)
+
+    fname = "Roboto-Bold.ttf" if bold else "Roboto-Regular.ttf"
+    fpath = os.path.join(fonts_dir, fname)
+
+    if os.path.exists(fpath):
+        return fpath
+
+    # Download from Google Fonts GitHub mirror
+    urls = {
+        "Roboto-Regular.ttf": "https://github.com/google/fonts/raw/main/apache/roboto/static/Roboto-Regular.ttf",
+        "Roboto-Bold.ttf":    "https://github.com/google/fonts/raw/main/apache/roboto/static/Roboto-Bold.ttf",
+    }
+    try:
+        import requests as _req
+        logger.info(f"Downloading font {fname}...")
+        r = _req.get(urls[fname], timeout=30)
+        with open(fpath, "wb") as f:
+            f.write(r.content)
+        logger.info(f"Font saved: {fpath}")
+        return fpath
+    except Exception as e:
+        logger.warning(f"Font download failed ({e}), falling back to system fonts")
+
+    # System fallbacks with Cyrillic support (macOS + Linux)
+    suffix = " Bold.ttf" if bold else ".ttf"
+    candidates = [
+        f"/System/Library/Fonts/Supplemental/Arial{suffix}",       # macOS
+        f"/System/Library/Fonts/Supplemental/Verdana{suffix}",     # macOS
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",  # Debian
+        "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf"                 if bold else "/usr/share/fonts/TTF/DejaVuSans.ttf",          # Arch
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",  # Ubuntu
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return None
+
+
 def _generate_post_card(events: list[dict], title_line1: str, title_line2: str,
                          date_text: str, max_events: int = 4) -> bytes:
     """Generate a post card image. Returns PNG bytes."""
@@ -2930,18 +2975,13 @@ def _generate_post_card(events: list[dict], title_line1: str, title_line2: str,
     draw = ImageDraw.Draw(img)
 
     def _font(size, bold=False):
-        candidates = [
-            "/System/Library/Fonts/Helvetica.ttc",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/TTF/DejaVuSans.ttf",
-        ]
-        for p in candidates:
-            if os.path.exists(p):
-                try:
-                    return ImageFont.truetype(p, size)
-                except Exception:
-                    continue
-        return ImageFont.load_default()
+        path = _get_card_font_path(bold)
+        if path:
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                pass
+        return ImageFont.load_default(size=size)
 
     C_WHITE  = (255, 255, 255)
     C_PURPLE = (192, 80, 255)
@@ -2949,28 +2989,28 @@ def _generate_post_card(events: list[dict], title_line1: str, title_line2: str,
     C_MUTED  = (155, 145, 175)
     C_DIV    = (70, 50, 100)
 
-    f_brand  = _font(28, bold=True)
-    f_sub    = _font(24)
-    f_title  = _font(72, bold=True)
+    f_brand  = _font(36, bold=True)
+    f_sub    = _font(28)
+    f_title  = _font(96, bold=True)
     f_label  = _font(24)
-    f_event  = _font(34, bold=True)
+    f_event  = _font(36, bold=True)
     f_meta   = _font(26)
-    f_foot   = _font(23)
+    f_foot   = _font(28)
 
     # Brand
     draw.text((60, 55), "MinskDvizh", font=f_brand, fill=C_PURPLE)
-    draw.text((60, 92), "• афиша Минска", font=f_sub, fill=C_MUTED)
+    draw.text((60, 100), "• афиша Минска", font=f_sub, fill=C_MUTED)
 
     # Date pill
-    pill_w = len(date_text) * 13 + 48
-    draw.rounded_rectangle([60, 142, 60 + pill_w, 190], radius=22, fill=(55, 25, 85))
-    draw.text((80, 153), f"📅  {date_text}", font=f_label, fill=C_ACCENT)
+    pill_w = len(date_text) * 15 + 60
+    draw.rounded_rectangle([60, 150, 60 + pill_w, 204], radius=26, fill=(55, 25, 85))
+    draw.text((88, 162), f"📅  {date_text}", font=_font(30), fill=C_ACCENT)
 
     # Title
-    draw.text((60, 220), title_line1, font=f_title, fill=C_WHITE)
-    draw.text((60, 300), title_line2, font=f_title, fill=C_PURPLE)
+    draw.text((60, 235), title_line1, font=f_title, fill=C_WHITE)
+    draw.text((60, 340), title_line2, font=f_title, fill=C_PURPLE)
 
-    draw.line([(60, 400), (W - 60, 400)], fill=C_DIV, width=1)
+    draw.line([(60, 462), (W - 60, 462)], fill=C_DIV, width=1)
 
     # Event cards
     CAT_EMOJI = {
@@ -2987,9 +3027,9 @@ def _generate_post_card(events: list[dict], title_line1: str, title_line2: str,
         "boardgames": "НАСТОЛКИ", "education": "ОБУЧЕНИЕ", "quiz": "КВИЗЫ",
     }
 
-    card_y = 420
-    card_h = 140
-    gap    = 14
+    card_y = 480
+    card_h = 128
+    gap    = 12
 
     for ev in events[:max_events]:
         cat  = ev.get("category") or "other"
@@ -3014,8 +3054,8 @@ def _generate_post_card(events: list[dict], title_line1: str, title_line2: str,
         img = Image.alpha_composite(img.convert("RGBA"), cb).convert("RGB")
         draw = ImageDraw.Draw(img)
 
-        draw.text((88, card_y + 14), f"{emoji} {cname}", font=f_label, fill=C_ACCENT)
-        draw.text((88, card_y + 44), title, font=f_event, fill=C_WHITE)
+        draw.text((88, card_y + 12), f"{emoji} {cname}", font=f_label, fill=C_ACCENT)
+        draw.text((88, card_y + 42), title, font=f_event, fill=C_WHITE)
         meta_parts = []
         if place:
             meta_parts.append(f"📍 {place}")
@@ -3023,16 +3063,16 @@ def _generate_post_card(events: list[dict], title_line1: str, title_line2: str,
             meta_parts.append(f"🕐 {show_time}")
         if price:
             meta_parts.append(price)
-        draw.text((88, card_y + 98), "   ".join(meta_parts), font=f_meta, fill=C_MUTED)
-        draw.text((W - 95, card_y + 48), "›", font=f_title, fill=C_PURPLE)
+        draw.text((88, card_y + 90), "   ".join(meta_parts), font=f_meta, fill=C_MUTED)
+        draw.text((W - 88, card_y + 44), "›", font=_font(56, bold=True), fill=C_PURPLE)
 
         card_y += card_h + gap
 
     # Footer
-    fy = card_y + 24
+    fy = card_y + 20
     draw.line([(60, fy), (W - 60, fy)], fill=C_DIV, width=1)
     draw.text((60, fy + 18), "Все события  →  @Minskdvizh_bot", font=f_foot, fill=C_MUTED)
-    draw.text((60, fy + 52), "#афишаминск  #движ  #минск", font=_font(20), fill=(90, 70, 120))
+    draw.text((60, fy + 56), "#афишаминск  #движ  #минск", font=_font(22), fill=(90, 70, 120))
 
     buf = io.BytesIO()
     img.save(buf, format="PNG", optimize=True)
