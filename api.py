@@ -122,28 +122,89 @@ def get_weekend_dates() -> tuple[str, str]:
     return saturday.strftime("%Y-%m-%d"), sunday.strftime("%Y-%m-%d")
 
 
+def _overnight_extra(
+    target_date_str: str,
+    now_t: str | None,
+    category: str | None,
+) -> tuple[str, list] | None:
+    """
+    Build (sql, params) for midnight-crossing events stored under (target_date - 1 day),
+    suitable for passing as extra_union to fetch_events_paged.
+
+    Midnight-crossing: show_time >= '20:00', end_time <= '08:00', end_time < show_time.
+    now_t: current HH:MM for today (to filter out already-ended events), None for future.
+    Returns None when overnight events are guaranteed empty (now_t >= '08:00').
+    """
+    if now_t is not None and now_t >= "08:00":
+        return None
+
+    from datetime import date as _date
+    prev_date = (_date.fromisoformat(target_date_str) - timedelta(days=1)).isoformat()
+
+    sql = """
+        SELECT id, title, details, description, event_date, show_time, end_time,
+               place, location, price, category, source_url, source_name
+        FROM events
+        WHERE event_date = ?
+          AND show_time >= '20:00'
+          AND end_time IS NOT NULL AND end_time != ''
+          AND end_time <= '08:00'
+          AND end_time < show_time
+    """
+    params: list = [prev_date]
+
+    if category == "free":
+        sql += " AND price = 'Бесплатно'"
+    elif category and category != "all":
+        sql += " AND category = ?"
+        params.append(category)
+
+    if now_t is not None:
+        sql += " AND end_time > ?"
+        params.append(now_t)
+
+    return sql, params
+
+
 def fetch_events_paged(
     where_clauses: list[str],
     params: list,
     page: int,
     per_page: int,
     order: str = "event_date, show_time, title",
+    extra_union: tuple[str, list] | None = None,
 ) -> tuple[list[dict], int]:
-    """Возвращает (события на странице, total) через SQL COUNT + LIMIT/OFFSET."""
+    """Возвращает (события на странице, total) через SQL COUNT + LIMIT/OFFSET.
+
+    extra_union: (sql_str, params_list) — optional UNION subquery for midnight-crossing
+    events. When provided, COUNT and pagination run over the combined set, so paging
+    is consistent across all pages.
+    """
+    SELECT_COLS = """id, title, details, description, event_date, show_time, end_time,
+                     place, location, price, category, source_url, source_name"""
     where = " AND ".join(where_clauses) if where_clauses else "1=1"
     offset = (page - 1) * per_page
+
+    if extra_union:
+        union_sql, union_params = extra_union
+        main_sql   = f"SELECT {SELECT_COLS} FROM events WHERE {where}"
+        combined   = f"({main_sql}) UNION ({union_sql})"
+        all_params = params + union_params
+        count_sql  = f"SELECT COUNT(*) FROM ({combined})"
+        page_sql   = f"SELECT * FROM ({combined}) ORDER BY {order} LIMIT ? OFFSET ?"
+    else:
+        all_params = params
+        count_sql  = f"SELECT COUNT(*) FROM events WHERE {where}"
+        page_sql   = (
+            f"SELECT {SELECT_COLS} FROM events WHERE {where}"
+            f" ORDER BY {order} LIMIT ? OFFSET ?"
+        )
+
     with get_db() as conn:
         cursor = conn.cursor()
-        cursor.execute(f"SELECT COUNT(*) FROM events WHERE {where}", params)
+        cursor.execute(count_sql, all_params)
         total = cursor.fetchone()[0]
-        cursor.execute(
-            f"""SELECT id, title, details, description, event_date, show_time, end_time,
-                       place, location, price, category, source_url, source_name
-                FROM events WHERE {where}
-                ORDER BY {order}
-                LIMIT ? OFFSET ?""",
-            params + [per_page, offset],
-        )
+        cursor.execute(page_sql, all_params + [per_page, offset])
         rows = [row_to_dict(r) for r in cursor.fetchall()]
     return rows, total
 
@@ -358,7 +419,14 @@ def get_events(
             )
             params.extend([spl, spc, spu, spl, spc, spu, spl, spc, spu, spl, spc, spu, spl])
 
-    page_events, total = fetch_events_paged(where, params, page, per_page)
+    # Midnight-crossing events: only when filtering by a specific date, no text search
+    extra_union = None
+    if date and not search:
+        overnight_now = now_t if date == today else None
+        extra_union = _overnight_extra(date, overnight_now, category)
+
+    page_events, total = fetch_events_paged(where, params, page, per_page,
+                                            extra_union=extra_union)
 
     return EventsResponse(
         total=total,
@@ -381,19 +449,19 @@ def events_today(
     where = ["event_date = ?"]
     params: list = [today]
 
-    # Фильтр времени с учётом end_time
     time_filter, time_params = _build_time_filter(today, today, now_t)
     where.append(time_filter)
     params.extend(time_params)
-    
-    # КАТЕГОРИЯ FREE - ОСОБАЯ ОБРАБОТКА
+
     if category == "free":
         where.append("price = 'Бесплатно'")
     elif category and category != "all":
         where.append("category = ?")
         params.append(category)
-        
-    page_events, total = fetch_events_paged(where, params, page, per_page)
+
+    extra_union = _overnight_extra(today, now_t, category)
+    page_events, total = fetch_events_paged(where, params, page, per_page,
+                                            extra_union=extra_union)
     return EventsResponse(total=total, page=page, per_page=per_page,
                           events=[Event(**e) for e in page_events])
 
@@ -407,15 +475,16 @@ def events_tomorrow(
     tomorrow = (now_minsk() + timedelta(days=1)).strftime("%Y-%m-%d")
     where = ["event_date = ?"]
     params: list = [tomorrow]
-    
-    # КАТЕГОРИЯ FREE - ОСОБАЯ ОБРАБОТКА
+
     if category == "free":
         where.append("price = 'Бесплатно'")
     elif category and category != "all":
         where.append("category = ?")
         params.append(category)
-        
-    page_events, total = fetch_events_paged(where, params, page, per_page)
+
+    extra_union = _overnight_extra(tomorrow, None, category)
+    page_events, total = fetch_events_paged(where, params, page, per_page,
+                                            extra_union=extra_union)
     return EventsResponse(total=total, page=page, per_page=per_page,
                           events=[Event(**e) for e in page_events])
 

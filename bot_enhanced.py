@@ -3141,6 +3141,21 @@ async def post_to_channel(bot, post_type: str = "today"):
     DAY_NAMES = ["Понедельник","Вторник","Среда","Четверг","Пятница","Суббота","Воскресенье"]
     MONTH_NAMES = ["января","февраля","марта","апреля","мая","июня",
                    "июля","августа","сентября","октября","ноября","декабря"]
+    CAT_EMOJI = {
+        "cinema": "🎬", "concert": "🎵", "theater": "🎭", "exhibition": "🖼",
+        "kids": "🧸", "sport": "⚽", "party": "🌟", "free": "🆓",
+        "excursion": "🗺", "market": "🛍", "masterclass": "🎨",
+        "boardgames": "🎲", "broadcast": "📺", "education": "📚", "quiz": "❓",
+    }
+    CAT_NAME = {
+        "cinema": "КИНО", "concert": "КОНЦЕРТЫ", "theater": "ТЕАТР",
+        "exhibition": "ВЫСТАВКИ", "kids": "ДЕТЯМ", "sport": "СПОРТ",
+        "party": "ДВИЖ", "free": "БЕСПЛАТНО", "excursion": "ЭКСКУРСИИ",
+        "market": "МАРКЕТЫ", "masterclass": "МАСТЕР-КЛАССЫ",
+        "boardgames": "НАСТОЛКИ", "broadcast": "ТРАНСЛЯЦИИ",
+        "education": "ОБУЧЕНИЕ", "quiz": "КВИЗЫ",
+    }
+
     def _fmt_price(price: str) -> str:
         if not price:
             return ""
@@ -3149,105 +3164,120 @@ async def post_to_channel(bot, post_type: str = "today"):
             return "🆓"
         return p
 
-    def _dedup_events(events_in: list, limit: int = 60) -> list:
-        seen: set = set()
-        out = []
+    def _fmt_event_line(e) -> str:
+        title = e.get("title") or ""
+        price = _fmt_price(e.get("price", "") or "")
+        url   = e.get("source_url") or ""
+        title_part = f'<a href="{url}">{title}</a>' if url else title
+        return f"→ {title_part}" + (f" | {price}" if price else "")
+
+    def _dedup_by_cat(events_in: list, limit: int = 60) -> dict:
+        from collections import defaultdict as _dd
+        seen_global: set = set()
+        by_cat = _dd(list)
         for e in events_in[:limit]:
             key = (e.get("title", ""), e.get("place", ""))
-            if key not in seen:
-                seen.add(key)
-                out.append(e)
-        return out
-
-    def _build_caption(card_events: list, header: str, tags: str) -> str:
-        """Build text caption to accompany the card image."""
-        CAT_EMOJI_CAP = {
-            "cinema": "🎬", "concert": "🎵", "theater": "🎭", "exhibition": "🖼",
-            "kids": "🧸", "sport": "⚽", "party": "🌟", "free": "🆓",
-            "excursion": "🗺", "market": "🛍", "masterclass": "🎨",
-            "boardgames": "🎲", "education": "📚", "quiz": "❓", "other": "📌",
-        }
-        lines = [header, ""]
-        for e in card_events:
-            emoji = CAT_EMOJI_CAP.get(e.get("category") or "other", "📌")
-            title = e.get("title") or ""
-            url   = e.get("source_url") or ""
-            price = _fmt_price(e.get("price") or "")
-            time_ = e.get("show_time") or ""
-            place = e.get("place") or ""
-            title_part = f'<a href="{url}">{title}</a>' if url else title
-            meta = "  ".join(filter(None, [place, time_, price]))
-            lines.append(f"{emoji} {title_part}")
-            if meta:
-                lines.append(f"   <i>{meta}</i>")
-        lines += ["", f"👉 Все события: @Minskdvizh_bot", tags]
-        text = "\n".join(lines)
-        return text[:1024]  # caption limit
+            if key in seen_global:
+                continue
+            seen_global.add(key)
+            by_cat[e.get("category")].append(e)
+        # deduplicate within each category by title
+        result = _dd(list)
+        for cat, evs in by_cat.items():
+            seen_cat: set = set()
+            for e in evs:
+                t = e.get("title", "")
+                if t not in seen_cat:
+                    seen_cat.add(t)
+                    result[cat].append(e)
+        return result
 
     if post_type == "today":
         events_raw = get_events_by_date_and_category(now)
-        events = _dedup_events([dict(e) for e in events_raw] if events_raw else [])
+        events = [dict(e) for e in events_raw] if events_raw else []
         if not events:
             return
+        day_name   = DAY_NAMES[now.weekday()].lower()
         day_num    = now.day
         month_name = MONTH_NAMES[now.month - 1]
-        day_name   = DAY_NAMES[now.weekday()].lower()
-        date_text  = f"{day_num} {month_name} ({day_name})"
-        card_events = events[:4]
-        img_bytes = _generate_post_card(
-            card_events,
-            title_line1="Куда пойти",
-            title_line2="сегодня?",
-            date_text=date_text,
-        )
-        caption = _build_caption(
-            card_events,
-            header=f"✨ <b>Куда пойти сегодня, {day_num} {month_name}?</b>",
-            tags="#афишаминск #дайджест #минск",
-        )
+        lines = [
+            f"👹 Сегодня {day_num} {month_name} ({day_name}). #афишаминск #дайджест",
+            f"😎 Всем доброго утра и продуктивного дня!",
+            f"✨ Куда пойти сегодня в Минске?\n",
+            f"Планируй когда удобно — всё открыто для тебя.\n",
+        ]
+        by_cat = _dedup_by_cat(events)
+        for cat, evs in by_cat.items():
+            emoji    = CAT_EMOJI.get(cat, "📌")
+            cat_name = CAT_NAME.get(cat, cat.upper())
+            lines.append(f"\n{emoji} {cat_name}")
+            for e in evs[:5]:
+                lines.append(_fmt_event_line(e))
+        lines.append(f"\nА вечером тебя ждет ДВИЖ 🌟")
+        lines.append(f"\n👉 Ищи все события: @Minskdvizh_bot")
+        lines.append("#афишаминск #мероприятияминск #концертыминск #выставкиминск #движ")
 
     elif post_type == "weekend":
         saturday = now + timedelta(days=(5 - now.weekday()) % 7 or 7)
         sunday   = saturday + timedelta(days=1)
-        events_sat = _dedup_events([dict(e) for e in get_events_by_date_and_category(saturday)] if get_events_by_date_and_category(saturday) else [])
-        events_sun = _dedup_events([dict(e) for e in get_events_by_date_and_category(sunday)]   if get_events_by_date_and_category(sunday)   else [])
-        card_events = (events_sat + events_sun)[:4]
-        if not card_events:
+        events_sat = [dict(e) for e in (get_events_by_date_and_category(saturday) or [])]
+        events_sun = [dict(e) for e in (get_events_by_date_and_category(sunday)   or [])]
+        all_events = events_sat[:15] + events_sun[:15]
+        if not all_events:
             return
         sat_d = saturday.day
         sun_d = sunday.day
         mon   = MONTH_NAMES[saturday.month - 1]
-        date_text = f"{sat_d}–{sun_d} {mon}"
-        img_bytes = _generate_post_card(
-            card_events,
-            title_line1="Планируем",
-            title_line2="выходные!",
-            date_text=date_text,
-        )
-        caption = _build_caption(
-            card_events,
-            header=f"🎉 <b>Выходные {sat_d}–{sun_d} {mon} в Минске</b>",
-            tags="#афишаминск #выходныеминск #движ",
-        )
+        lines = [
+            f"🎉 Выходные {sat_d}–{sun_d} {mon} (сб–вск). #минск #выходные",
+            f"😎 Планируем яркие выходные в Минске!\n",
+        ]
+        _SHORT_DAYS = ["пн","вт","ср","чт","пт","сб","вск"]
+        by_cat = _dedup_by_cat(all_events)
+        for cat, evs in by_cat.items():
+            emoji    = CAT_EMOJI.get(cat, "📌")
+            cat_name = CAT_NAME.get(cat, cat.upper())
+            lines.append(f"\n{emoji} {cat_name}")
+            for e in evs[:4]:
+                try:
+                    date_str = datetime.strptime(e["event_date"], "%Y-%m-%d").strftime("%d.%m")
+                    day_n    = _SHORT_DAYS[datetime.strptime(e["event_date"], "%Y-%m-%d").weekday()]
+                except Exception:
+                    date_str = e.get("event_date", "")[:5]
+                    day_n    = ""
+                time_str   = f" {e['show_time']}" if e.get("show_time") else ""
+                price      = _fmt_price(e.get("price", "") or "")
+                url        = e.get("source_url") or ""
+                title      = e.get("title") or ""
+                title_part = f'<a href="{url}">{title}</a>' if url else title
+                lines.append(
+                    f"→ {title_part} ({date_str} {day_n}{time_str})"
+                    + (f" | {price}" if price else "")
+                )
+        lines.append(f"\n👉 Ищи все события: @Minskdvizh_bot")
+        lines.append("#афишаминск #выходныеминск #движ")
     else:
         return
 
-    import io as _io
+    text = "\n".join(lines)
+    if len(text) > 4096:
+        text = text[:4040] + "...\n\n👉 @Minskdvizh_bot"
+
     from telegram.error import RetryAfter
     try:
-        await bot.send_photo(
+        await bot.send_message(
             chat_id=CHANNEL_ID,
-            photo=_io.BytesIO(img_bytes),
-            caption=caption,
+            text=text,
             parse_mode="HTML",
+            disable_web_page_preview=True,
         )
         logger.info(f"📢 Пост в канал ({post_type}) опубликован")
     except RetryAfter as e:
         logger.warning(f"post_to_channel RetryAfter {e.retry_after}с, повтор...")
         await asyncio.sleep(e.retry_after + 1)
         try:
-            await bot.send_photo(chat_id=CHANNEL_ID, photo=_io.BytesIO(img_bytes),
-                                 caption=caption, parse_mode="HTML")
+            await bot.send_message(chat_id=CHANNEL_ID, text=text,
+                                   parse_mode="HTML", disable_web_page_preview=True)
             logger.info(f"📢 Пост в канал ({post_type}) опубликован (повтор)")
         except Exception as e2:
             logger.error(f"Ошибка публикации в канал (повтор): {e2}")
