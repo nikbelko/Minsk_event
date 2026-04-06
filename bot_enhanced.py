@@ -2130,6 +2130,10 @@ async def run_daytime_update_job(bot=None):
                 report = _parse_daytime_report(output)
                 if report:
                     await _send_daytime_report(bot, report, elapsed)
+                # Рассылаем флеш-подписки после дневного обновления базы
+                flash_sent = await check_flash_subscriptions(bot)
+                if flash_sent:
+                    logger.info(f"⚡ Флеш-подписки (дневное): отправлено {flash_sent} уведомлений")
         else:
             error_msg = stderr.decode()[:300] if stderr else "неизвестная ошибка"
             logger.error(f"❌ Дневное обновление упало: {error_msg}")
@@ -2901,6 +2905,140 @@ async def handle_submit_step(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ---------------------- Публикация в канал ----------------------
 
+def _generate_post_card(events: list[dict], title_line1: str, title_line2: str,
+                         date_text: str, max_events: int = 4) -> bytes:
+    """Generate a post card image. Returns PNG bytes."""
+    from PIL import Image, ImageDraw, ImageFont
+    import io
+
+    W, H = 1080, 1080
+
+    # Background gradient
+    img = Image.new("RGB", (W, H), (10, 10, 20))
+    draw = ImageDraw.Draw(img)
+    for y in range(H):
+        t = y / H
+        draw.line([(0, y), (W, y)], fill=(int(10 + t * 20), int(10 + t * 5), int(20 + t * 40)))
+
+    # Purple glow (top-right)
+    glow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(glow)
+    for r in range(280, 0, -4):
+        a = int(14 * (1 - r / 280))
+        gd.ellipse([W - r, -r, W + r, r], fill=(160, 30, 220, a))
+    img = Image.alpha_composite(img.convert("RGBA"), glow).convert("RGB")
+    draw = ImageDraw.Draw(img)
+
+    def _font(size, bold=False):
+        candidates = [
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        ]
+        for p in candidates:
+            if os.path.exists(p):
+                try:
+                    return ImageFont.truetype(p, size)
+                except Exception:
+                    continue
+        return ImageFont.load_default()
+
+    C_WHITE  = (255, 255, 255)
+    C_PURPLE = (192, 80, 255)
+    C_ACCENT = (210, 130, 255)
+    C_MUTED  = (155, 145, 175)
+    C_DIV    = (70, 50, 100)
+
+    f_brand  = _font(28, bold=True)
+    f_sub    = _font(24)
+    f_title  = _font(72, bold=True)
+    f_label  = _font(24)
+    f_event  = _font(34, bold=True)
+    f_meta   = _font(26)
+    f_foot   = _font(23)
+
+    # Brand
+    draw.text((60, 55), "MinskDvizh", font=f_brand, fill=C_PURPLE)
+    draw.text((60, 92), "• афиша Минска", font=f_sub, fill=C_MUTED)
+
+    # Date pill
+    pill_w = len(date_text) * 13 + 48
+    draw.rounded_rectangle([60, 142, 60 + pill_w, 190], radius=22, fill=(55, 25, 85))
+    draw.text((80, 153), f"📅  {date_text}", font=f_label, fill=C_ACCENT)
+
+    # Title
+    draw.text((60, 220), title_line1, font=f_title, fill=C_WHITE)
+    draw.text((60, 300), title_line2, font=f_title, fill=C_PURPLE)
+
+    draw.line([(60, 400), (W - 60, 400)], fill=C_DIV, width=1)
+
+    # Event cards
+    CAT_EMOJI = {
+        "cinema": "🎬", "concert": "🎵", "theater": "🎭", "exhibition": "🖼",
+        "kids": "🧸", "sport": "⚽", "party": "🌟", "free": "🆓",
+        "excursion": "🗺", "market": "🛍", "masterclass": "🎨",
+        "boardgames": "🎲", "education": "📚", "quiz": "❓", "other": "📌",
+    }
+    CAT_NAME = {
+        "cinema": "КИНО", "concert": "КОНЦЕРТЫ", "theater": "ТЕАТР",
+        "exhibition": "ВЫСТАВКИ", "kids": "ДЕТЯМ", "sport": "СПОРТ",
+        "party": "ДВИЖ", "free": "БЕСПЛАТНО", "excursion": "ЭКСКУРСИИ",
+        "market": "МАРКЕТЫ", "masterclass": "МАСТЕР-КЛАССЫ",
+        "boardgames": "НАСТОЛКИ", "education": "ОБУЧЕНИЕ", "quiz": "КВИЗЫ",
+    }
+
+    card_y = 420
+    card_h = 140
+    gap    = 14
+
+    for ev in events[:max_events]:
+        cat  = ev.get("category") or "other"
+        emoji = CAT_EMOJI.get(cat, "📌")
+        cname = CAT_NAME.get(cat, cat.upper())
+        title = ev.get("title") or ""
+        if len(title) > 34:
+            title = title[:32] + "…"
+        place = ev.get("place") or ""
+        if len(place) > 24:
+            place = place[:22] + "…"
+        show_time = ev.get("show_time") or ""
+        price = ev.get("price") or ""
+        if price.lower() in ("бесплатно", "free", "0", "0 byn"):
+            price = "🆓"
+
+        # Card bg
+        cb = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        cd = ImageDraw.Draw(cb)
+        cd.rounded_rectangle([60, card_y, W - 60, card_y + card_h],
+                              radius=18, fill=(38, 22, 62, 210))
+        img = Image.alpha_composite(img.convert("RGBA"), cb).convert("RGB")
+        draw = ImageDraw.Draw(img)
+
+        draw.text((88, card_y + 14), f"{emoji} {cname}", font=f_label, fill=C_ACCENT)
+        draw.text((88, card_y + 44), title, font=f_event, fill=C_WHITE)
+        meta_parts = []
+        if place:
+            meta_parts.append(f"📍 {place}")
+        if show_time:
+            meta_parts.append(f"🕐 {show_time}")
+        if price:
+            meta_parts.append(price)
+        draw.text((88, card_y + 98), "   ".join(meta_parts), font=f_meta, fill=C_MUTED)
+        draw.text((W - 95, card_y + 48), "›", font=f_title, fill=C_PURPLE)
+
+        card_y += card_h + gap
+
+    # Footer
+    fy = card_y + 24
+    draw.line([(60, fy), (W - 60, fy)], fill=C_DIV, width=1)
+    draw.text((60, fy + 18), "Все события  →  @Minskdvizh_bot", font=f_foot, fill=C_MUTED)
+    draw.text((60, fy + 52), "#афишаминск  #движ  #минск", font=_font(20), fill=(90, 70, 120))
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    return buf.getvalue()
+
+
 async def post_to_channel(bot, post_type: str = "today"):
     """Публикует подборку событий в Telegram канал."""
     if not CHANNEL_ID:
@@ -2911,23 +3049,6 @@ async def post_to_channel(bot, post_type: str = "today"):
     DAY_NAMES = ["Понедельник","Вторник","Среда","Четверг","Пятница","Суббота","Воскресенье"]
     MONTH_NAMES = ["января","февраля","марта","апреля","мая","июня",
                    "июля","августа","сентября","октября","ноября","декабря"]
-    # Эмодзи для категорий в постах (заглавные)
-    CAT_POST_EMOJI = {
-        "cinema": "🎬", "concert": "🎵", "theater": "🎭", "exhibition": "🖼",
-        "kids": "🧸", "sport": "⚽", "party": "🌟", "free": "🆓",
-        "excursion": "🗺", "market": "🛍", "masterclass": "🎨",
-        "boardgames": "🎲", "broadcast": "📺", "education": "📚",
-        "quiz": "❓",
-    }
-    CAT_POST_NAMES = {
-        "cinema": "КИНО", "concert": "КОНЦЕРТЫ", "theater": "ТЕАТР",
-        "exhibition": "ВЫСТАВКИ", "kids": "ДЕТЯМ", "sport": "СПОРТ",
-        "party": "ДВИЖ", "free": "БЕСПЛАТНО", "excursion": "ЭКСКУРСИИ",
-        "market": "МАРКЕТЫ", "masterclass": "МАСТЕР-КЛАССЫ",
-        "boardgames": "НАСТОЛКИ", "broadcast": "ТРАНСЛЯЦИИ", "education": "ОБУЧЕНИЕ",
-        "quiz": "КВИЗЫ",
-    }
-
     def _fmt_price(price: str) -> str:
         if not price:
             return ""
@@ -2936,131 +3057,105 @@ async def post_to_channel(bot, post_type: str = "today"):
             return "🆓"
         return p
 
-    def _fmt_event_line(e) -> str:
-        title = e.get("title") or ""
-        price = _fmt_price(e.get("price", "") or "")
-        url = e.get("source_url") or ""
-        title_part = f"<a href=\"{url}\">{title}</a>" if url else title
-        return f"→ {title_part}" + (f" | {price}" if price else "")
+    def _dedup_events(events_in: list, limit: int = 60) -> list:
+        seen: set = set()
+        out = []
+        for e in events_in[:limit]:
+            key = (e.get("title", ""), e.get("place", ""))
+            if key not in seen:
+                seen.add(key)
+                out.append(e)
+        return out
+
+    def _build_caption(card_events: list, header: str, tags: str) -> str:
+        """Build text caption to accompany the card image."""
+        CAT_EMOJI_CAP = {
+            "cinema": "🎬", "concert": "🎵", "theater": "🎭", "exhibition": "🖼",
+            "kids": "🧸", "sport": "⚽", "party": "🌟", "free": "🆓",
+            "excursion": "🗺", "market": "🛍", "masterclass": "🎨",
+            "boardgames": "🎲", "education": "📚", "quiz": "❓", "other": "📌",
+        }
+        lines = [header, ""]
+        for e in card_events:
+            emoji = CAT_EMOJI_CAP.get(e.get("category") or "other", "📌")
+            title = e.get("title") or ""
+            url   = e.get("source_url") or ""
+            price = _fmt_price(e.get("price") or "")
+            time_ = e.get("show_time") or ""
+            place = e.get("place") or ""
+            title_part = f'<a href="{url}">{title}</a>' if url else title
+            meta = "  ".join(filter(None, [place, time_, price]))
+            lines.append(f"{emoji} {title_part}")
+            if meta:
+                lines.append(f"   <i>{meta}</i>")
+        lines += ["", f"👉 Все события: @Minskdvizh_bot", tags]
+        text = "\n".join(lines)
+        return text[:1024]  # caption limit
 
     if post_type == "today":
         events_raw = get_events_by_date_and_category(now)
-        events = [dict(e) for e in events_raw] if events_raw else []
+        events = _dedup_events([dict(e) for e in events_raw] if events_raw else [])
         if not events:
             return
-        day_name = DAY_NAMES[now.weekday()].lower()
-        day_num = now.day
+        day_num    = now.day
         month_name = MONTH_NAMES[now.month - 1]
-        lines = [
-            f"👹 Сегодня {day_num} {month_name} ({day_name}). #афишаминск #дайджест",
-            f"😎 Всем доброго утра и продуктивного дня!",
-            f"✨ Куда пойти сегодня в Минске?\n",
-            f"Планируй когда удобно — всё открыто для тебя.\n",
-        ]
-        from collections import defaultdict as _dd
-        by_cat = _dd(list)
-        # Дедупликация между категориями — глобальный set по (title, place)
-        seen_global: set = set()
-        for e in events[:60]:
-            key = (e.get("title", ""), e.get("place", ""))
-            if key in seen_global:
-                continue
-            seen_global.add(key)
-            by_cat[e.get("category")].append(e)
-        for cat, evs in by_cat.items():
-            emoji = CAT_POST_EMOJI.get(cat, "📌")
-            cat_name = CAT_POST_NAMES.get(cat, cat.upper())
-            # Дедупликация внутри категории по title
-            seen_cat: set = set()
-            unique_evs = []
-            for e in evs:
-                t = e.get("title", "")
-                if t not in seen_cat:
-                    seen_cat.add(t)
-                    unique_evs.append(e)
-            lines.append(f"\n{emoji} {cat_name}")
-            for e in unique_evs[:5]:
-                lines.append(_fmt_event_line(e))
-        lines.append(f"\nА вечером тебя ждет ДВИЖ 🌟")
-        lines.append(f"\n👉 Ищи все события: @Minskdvizh_bot")
-        lines.append("#афишаминск #мероприятияминск #концертыминск #выставкиминск #движ")
+        day_name   = DAY_NAMES[now.weekday()].lower()
+        date_text  = f"{day_num} {month_name} ({day_name})"
+        card_events = events[:4]
+        img_bytes = _generate_post_card(
+            card_events,
+            title_line1="Куда пойти",
+            title_line2="сегодня?",
+            date_text=date_text,
+        )
+        caption = _build_caption(
+            card_events,
+            header=f"✨ <b>Куда пойти сегодня, {day_num} {month_name}?</b>",
+            tags="#афишаминск #дайджест #минск",
+        )
 
     elif post_type == "weekend":
         saturday = now + timedelta(days=(5 - now.weekday()) % 7 or 7)
-        sunday = saturday + timedelta(days=1)
-        events_sat_raw = get_events_by_date_and_category(saturday)
-        events_sun_raw = get_events_by_date_and_category(sunday)
-        events_sat = [dict(e) for e in events_sat_raw] if events_sat_raw else []
-        events_sun = [dict(e) for e in events_sun_raw] if events_sun_raw else []        
-        all_events = list(events_sat)[:15] + list(events_sun)[:15]
-        if not all_events:
+        sunday   = saturday + timedelta(days=1)
+        events_sat = _dedup_events([dict(e) for e in get_events_by_date_and_category(saturday)] if get_events_by_date_and_category(saturday) else [])
+        events_sun = _dedup_events([dict(e) for e in get_events_by_date_and_category(sunday)]   if get_events_by_date_and_category(sunday)   else [])
+        card_events = (events_sat + events_sun)[:4]
+        if not card_events:
             return
         sat_d = saturday.day
         sun_d = sunday.day
-        mon = MONTH_NAMES[saturday.month - 1]
-        lines = [
-            f"🎉 Выходные {sat_d}-{sun_d} {mon} (сб-вск). #минск #выходные",
-            f"😎 Планируем яркие выходные в Минске!\n",
-        ]
-        from collections import defaultdict as _dd
-        by_cat = _dd(list)
-        # Дедупликация между категориями
-        seen_global: set = set()
-        for e in all_events:
-            key = (e.get("title", ""), e.get("place", ""))
-            if key in seen_global:
-                continue
-            seen_global.add(key)
-            by_cat[e.get("category")].append(e)
-        for cat, evs in by_cat.items():
-            emoji = CAT_POST_EMOJI.get(cat, "📌")
-            cat_name = CAT_POST_NAMES.get(cat, cat.upper())
-            # Дедупликация внутри категории по title
-            seen_cat: set = set()
-            unique_evs = []
-            for e in evs:
-                t = e.get("title", "")
-                if t not in seen_cat:
-                    seen_cat.add(t)
-                    unique_evs.append(e)
-            lines.append(f"\n{emoji} {cat_name}")
-            for e in unique_evs[:4]:
-                try:
-                    date_str = datetime.strptime(e["event_date"], "%Y-%m-%d").strftime("%d.%m")
-                except Exception:
-                    date_str = e.get("event_date", "")[:5]  
-                _SHORT_DAYS = ["пн","вт","ср","чт","пт","сб","вск"]
-                day_n = _SHORT_DAYS[datetime.strptime(e["event_date"], "%Y-%m-%d").weekday()] if e.get("event_date") else ""
-                time_str = f" {e.get('show_time')}" if e.get("show_time") else ""
-                price = _fmt_price(e.get("price", "") or "")
-                url = e.get("source_url") or ""
-                title = e["title"] or ""
-                title_part = f"<a href=\"{url}\">{title}</a>" if url else title
-                lines.append(f"→ {title_part} ({date_str} {day_n}{time_str})" + (f" | {price}" if price else ""))
-        lines.append(f"\n👉 Ищи все события: @Minskdvizh_bot")
-        lines.append("#афишаминск #выходныеминск #движ")
+        mon   = MONTH_NAMES[saturday.month - 1]
+        date_text = f"{sat_d}–{sun_d} {mon}"
+        img_bytes = _generate_post_card(
+            card_events,
+            title_line1="Планируем",
+            title_line2="выходные!",
+            date_text=date_text,
+        )
+        caption = _build_caption(
+            card_events,
+            header=f"🎉 <b>Выходные {sat_d}–{sun_d} {mon} в Минске</b>",
+            tags="#афишаминск #выходныеминск #движ",
+        )
     else:
         return
 
-    text = "\n".join(lines)
-    if len(text) > 4096:
-        text = text[:4040] + "...\n\n👉 @Minskdvizh_bot"
-
+    import io as _io
     from telegram.error import RetryAfter
     try:
-        await bot.send_message(
+        await bot.send_photo(
             chat_id=CHANNEL_ID,
-            text=text,
+            photo=_io.BytesIO(img_bytes),
+            caption=caption,
             parse_mode="HTML",
-            disable_web_page_preview=True,
         )
         logger.info(f"📢 Пост в канал ({post_type}) опубликован")
     except RetryAfter as e:
         logger.warning(f"post_to_channel RetryAfter {e.retry_after}с, повтор...")
         await asyncio.sleep(e.retry_after + 1)
         try:
-            await bot.send_message(chat_id=CHANNEL_ID, text=text,
-                                   parse_mode="HTML", disable_web_page_preview=True)
+            await bot.send_photo(chat_id=CHANNEL_ID, photo=_io.BytesIO(img_bytes),
+                                 caption=caption, parse_mode="HTML")
             logger.info(f"📢 Пост в канал ({post_type}) опубликован (повтор)")
         except Exception as e2:
             logger.error(f"Ошибка публикации в канал (повтор): {e2}")
