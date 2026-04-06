@@ -188,7 +188,7 @@ def fetch_events_paged(
     if extra_union:
         union_sql, union_params = extra_union
         main_sql   = f"SELECT {SELECT_COLS} FROM events WHERE {where}"
-        combined   = f"({main_sql}) UNION ({union_sql})"
+        combined   = f"{main_sql} UNION {union_sql}"
         all_params = params + union_params
         count_sql  = f"SELECT COUNT(*) FROM ({combined})"
         page_sql   = f"SELECT * FROM ({combined}) ORDER BY {order} LIMIT ? OFFSET ?"

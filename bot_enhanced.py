@@ -610,7 +610,7 @@ def get_events_by_date_and_category(target_date: datetime, category: str | None 
             overnight_now = now_time if date_str == today_str else None
             overnight_sql, overnight_params = _overnight_clause("free", overnight_now)
             if overnight_sql:
-                query = f"({query}) UNION ({overnight_sql})"
+                query = f"{query} UNION {overnight_sql}"
                 params = params + [prev_date_str] + overnight_params
 
             query += " ORDER BY show_time, title"
@@ -640,7 +640,7 @@ def get_events_by_date_and_category(target_date: datetime, category: str | None 
         overnight_now = now_time if date_str == today_str else None
         overnight_sql, overnight_params = _overnight_clause(category, overnight_now)
         if overnight_sql:
-            query = f"({query}) UNION ({overnight_sql})"
+            query = f"{query} UNION {overnight_sql}"
             params = params + [prev_date_str] + overnight_params
 
         query += " ORDER BY show_time, title"
