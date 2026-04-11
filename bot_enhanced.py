@@ -195,7 +195,6 @@ def init_db():
             cursor.execute("""
                 DELETE FROM events
                 WHERE event_date < DATE('now', '-7 days')
-                AND (source_name IS NULL OR source_name != 'user_submitted')
             """)
             conn.commit()
         except Exception:
@@ -240,13 +239,13 @@ def _build_time_filter(date_filter: str, today: str, now_time: str) -> tuple[str
     if venue_open:
         return (
             "(show_time = '' OR show_time IS NULL "
-            "OR ((end_time != '' AND end_time IS NOT NULL AND end_time > ?) "
+            "OR ((end_time != '' AND end_time IS NOT NULL AND (end_time > ? OR end_time < show_time)) "
             "OR ((end_time = '' OR end_time IS NULL) AND show_time > ?)))"
         ), [now_time, now_time]
     else:
         # Вне рабочих часов — только события с явным временем
         return (
-            "((end_time != '' AND end_time IS NOT NULL AND end_time > ?) "
+            "((end_time != '' AND end_time IS NOT NULL AND (end_time > ? OR end_time < show_time)) "
             "OR ((end_time = '' OR end_time IS NULL) AND show_time != '' AND show_time IS NOT NULL AND show_time > ?))"
         ), [now_time, now_time]
 def get_stats_data(exclude_admin: bool = True) -> dict:
@@ -569,7 +568,7 @@ def get_events_by_date_and_category(target_date: datetime, category: str | None 
                     AND (
                         show_time = '' OR show_time IS NULL
                         OR (
-                            (end_time != '' AND end_time IS NOT NULL AND end_time > ?)
+                            (end_time != '' AND end_time IS NOT NULL AND (end_time > ? OR end_time < show_time))
                             OR
                             ((end_time = '' OR end_time IS NULL) AND show_time > ?)
                         )
@@ -578,7 +577,7 @@ def get_events_by_date_and_category(target_date: datetime, category: str | None 
             else:
                 time_filter = """
                     AND (
-                        (end_time != '' AND end_time IS NOT NULL AND end_time > ?)
+                        (end_time != '' AND end_time IS NOT NULL AND (end_time > ? OR end_time < show_time))
                         OR
                         ((end_time = '' OR end_time IS NULL) AND show_time != '' AND show_time IS NOT NULL AND show_time > ?)
                     )
@@ -665,7 +664,7 @@ def get_upcoming_events(limit: int = 20, category: str | None = None):
                     OR (
                         show_time = '' OR show_time IS NULL
                         OR (
-                            (end_time != '' AND end_time IS NOT NULL AND end_time > ?)
+                            (end_time != '' AND end_time IS NOT NULL AND (end_time > ? OR end_time < show_time))
                             OR
                             ((end_time = '' OR end_time IS NULL) AND show_time > ?)
                         )
@@ -677,7 +676,7 @@ def get_upcoming_events(limit: int = 20, category: str | None = None):
                 AND (
                     event_date > ?
                     OR (
-                        (end_time != '' AND end_time IS NOT NULL AND end_time > ?)
+                        (end_time != '' AND end_time IS NOT NULL AND (end_time > ? OR end_time < show_time))
                         OR
                         ((end_time = '' OR end_time IS NULL) AND show_time != '' AND show_time IS NOT NULL AND show_time > ?)
                     )
@@ -1106,16 +1105,30 @@ def group_other_events(events: list) -> list:
                     result.append(f"{s.strftime('%d.%m')}–{e.strftime('%d.%m.%Y')}")
             return result
 
-        for time_key, date_strs in by_time.items():
-            if "|" in time_key:
-                show_time, end_time = time_key.split("|")
-                time_display = f"{show_time}–{end_time}"
-            else:
-                time_display = time_key
-            
-            ranges = make_ranges(date_strs)
-            for r in ranges:
-                text += f"\n📅 {r}" + (f" ⏰ {time_display}" if time_display else "")
+        if g["category"] == "kids":
+            # kids: группируем по дате → все времена в одну строку
+            by_date: dict[str, list[str]] = defaultdict(list)
+            for date_str, show_time, _end in dates_sorted:
+                if show_time:
+                    by_date[date_str].append(show_time)
+            for date_str in sorted(by_date):
+                try:
+                    d_fmt = datetime.strptime(date_str, "%Y-%m-%d").strftime("%d.%m.%Y")
+                except Exception:
+                    d_fmt = date_str
+                times_str = ", ".join(sorted(set(by_date[date_str])))
+                text += f"\n📅 {d_fmt} — {times_str}"
+        else:
+            for time_key, date_strs in by_time.items():
+                if "|" in time_key:
+                    show_time, end_time = time_key.split("|")
+                    time_display = f"{show_time}–{end_time}"
+                else:
+                    time_display = time_key
+
+                ranges = make_ranges(date_strs)
+                for r in ranges:
+                    text += f"\n📅 {r}" + (f" ⏰ {time_display}" if time_display else "")
 
         # _sort_key: (date, show_time) — минимальный первый сеанс
         # min() по кортежу (date_str, show_time, end_time) → берём date и show_time

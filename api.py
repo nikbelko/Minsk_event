@@ -226,7 +226,7 @@ def _build_time_filter(date_filter: str, today: str, now_time: str) -> tuple[str
             (
                 show_time = '' OR show_time IS NULL
                 OR (
-                    (end_time != '' AND end_time IS NOT NULL AND end_time > ?)
+                    (end_time != '' AND end_time IS NOT NULL AND (end_time > ? OR end_time < show_time))
                     OR
                     ((end_time = '' OR end_time IS NULL) AND show_time > ?)
                 )
@@ -236,7 +236,7 @@ def _build_time_filter(date_filter: str, today: str, now_time: str) -> tuple[str
         # Вне рабочих часов — только события с явным временем, которые ещё не закончились
         return """
             (
-                (end_time != '' AND end_time IS NOT NULL AND end_time > ?)
+                (end_time != '' AND end_time IS NOT NULL AND (end_time > ? OR end_time < show_time))
                 OR
                 ((end_time = '' OR end_time IS NULL) AND show_time != '' AND show_time IS NOT NULL AND show_time > ?)
             )
@@ -372,9 +372,9 @@ def get_events(
         # Фильтруем сегодняшние события по времени
         venue_open = now_t < VENUE_CLOSE_TIME
         if venue_open:
-            where.append("(event_date > ? OR (show_time = '' OR show_time IS NULL OR (end_time != '' AND end_time IS NOT NULL AND end_time > ?) OR ((end_time = '' OR end_time IS NULL) AND show_time > ?)))")
+            where.append("(event_date > ? OR (show_time = '' OR show_time IS NULL OR (end_time != '' AND end_time IS NOT NULL AND (end_time > ? OR end_time < show_time)) OR ((end_time = '' OR end_time IS NULL) AND show_time > ?)))")
         else:
-            where.append("(event_date > ? OR ((end_time != '' AND end_time IS NOT NULL AND end_time > ?) OR ((end_time = '' OR end_time IS NULL) AND show_time != '' AND show_time IS NOT NULL AND show_time > ?)))")
+            where.append("(event_date > ? OR ((end_time != '' AND end_time IS NOT NULL AND (end_time > ? OR end_time < show_time)) OR ((end_time = '' OR end_time IS NULL) AND show_time != '' AND show_time IS NOT NULL AND show_time > ?)))")
         params.extend([today, now_t, now_t])
 
     # КАТЕГОРИЯ FREE - ОСОБАЯ ОБРАБОТКА
@@ -523,9 +523,9 @@ def events_upcoming(
     until = (now_minsk() + timedelta(days=days)).strftime("%Y-%m-%d")
     venue_open = now_t < VENUE_CLOSE_TIME
     if venue_open:
-        today_filter = "(event_date > ? OR (show_time = '' OR show_time IS NULL OR (end_time != '' AND end_time IS NOT NULL AND end_time > ?) OR ((end_time = '' OR end_time IS NULL) AND show_time > ?)))"
+        today_filter = "(event_date > ? OR (show_time = '' OR show_time IS NULL OR (end_time != '' AND end_time IS NOT NULL AND (end_time > ? OR end_time < show_time)) OR ((end_time = '' OR end_time IS NULL) AND show_time > ?)))"
     else:
-        today_filter = "(event_date > ? OR ((end_time != '' AND end_time IS NOT NULL AND end_time > ?) OR ((end_time = '' OR end_time IS NULL) AND show_time != '' AND show_time IS NOT NULL AND show_time > ?)))"
+        today_filter = "(event_date > ? OR ((end_time != '' AND end_time IS NOT NULL AND (end_time > ? OR end_time < show_time)) OR ((end_time = '' OR end_time IS NULL) AND show_time != '' AND show_time IS NOT NULL AND show_time > ?)))"
     where = [
         "event_date BETWEEN ? AND ?",
         today_filter,
