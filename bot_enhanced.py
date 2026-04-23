@@ -2152,7 +2152,7 @@ def _parse_daytime_report(output: str) -> dict | None:
 
 
 def _format_daytime_report(report: dict, elapsed: float) -> str:
-    """Форматирует дневной отчёт для отправки админу.
+    """Форматирует дневной отчёт для отправки админу (HTML).
 
     Статусы источников:
       unchanged          - fingerprint не изменился, парсер не запускался
@@ -2161,10 +2161,18 @@ def _format_daytime_report(report: dict, elapsed: float) -> str:
       fallback_full_parse - источник без cheap check, всегда полный прогон
       skipped_due_to_error - check упал, парсер НЕ запускался
     """
+    import html as _html
+
+    def b(s: str) -> str:
+        return f"<b>{_html.escape(str(s))}</b>"
+
+    def esc(s: str) -> str:
+        return _html.escape(str(s))
+
     now = datetime.now(MINSK_TZ).strftime("%d.%m.%Y %H:%M")
     lines = [
-        "☀️ *Дневное обновление*",
-        f"🕐 {now}  ⏱ {elapsed:.0f} сек",
+        f"☀️ {b('Дневное обновление')}",
+        f"🕐 {esc(now)}  ⏱ {elapsed:.0f} сек",
         "",
     ]
     for src in report.get("sources", []):
@@ -2174,7 +2182,7 @@ def _format_daytime_report(report: dict, elapsed: float) -> str:
 
         if action == "unchanged":
             count = src.get("count", 0)
-            lines.append(f"⏭ *{name}*: без изменений (count={count})")
+            lines.append(f"⏭ {b(name)}: без изменений (count={esc(count)})")
 
         elif action == "changed":
             parse_results = src.get("parse_results", [])
@@ -2182,36 +2190,36 @@ def _format_daytime_report(report: dict, elapsed: float) -> str:
             all_count = len(parse_results)
             icon = "✅" if ok_count == all_count else "⚠️"
             count = src.get("count", 0)
-            lines.append(f"{icon} *{name}*: изменился → обновлён за {elapsed_src}с (count={count}, {ok_count}/{all_count})")
+            lines.append(f"{icon} {b(name)}: изменился → обновлён за {esc(elapsed_src)}с (count={esc(count)}, {ok_count}/{all_count})")
             for pr in parse_results:
                 for rline in pr.get("results", []):
                     parts = rline.split(":")
                     if len(parts) == 4:
-                        lines.append(f"   └ {parts[1]}: найдено {parts[2]}, добавлено {parts[3]}")
+                        lines.append(f"   └ {esc(parts[1])}: найдено {esc(parts[2])}, добавлено {esc(parts[3])}")
 
         elif action == "parse_error":
             count = src.get("count", 0)
-            lines.append(f"❌ *{name}*: изменился, но парсер упал (count={count}) — повтор при следующей проверке")
+            lines.append(f"❌ {b(name)}: изменился, но парсер упал (count={esc(count)}) — повтор при следующей проверке")
 
         elif action == "parse_error_cooldown":
             age_h = src.get("error_age_h", "?")
-            lines.append(f"🔇 *{name}*: изменился, но парсер падал {age_h}ч назад — пропуск до истечения cooldown")
+            lines.append(f"🔇 {b(name)}: изменился, но парсер падал {esc(age_h)}ч назад — пропуск до истечения cooldown")
 
         elif action == "skipped_due_to_error":
             details = src.get("details", "")
-            lines.append(f"🚫 *{name}*: сбой проверки (transport/crash) — {details[:80]}")
+            lines.append(f"🚫 {b(name)}: сбой проверки (transport/crash) — {esc(details[:80])}")
 
         elif action == "error":
             details = src.get("details", "")
             count = src.get("count", 0)
-            lines.append(f"⚠️ *{name}*: невалидный результат (count={count}) — {details[:80]}")
+            lines.append(f"⚠️ {b(name)}: невалидный результат (count={esc(count)}) — {esc(details[:80])}")
 
         elif action == "free_pass":
             parse_results = src.get("parse_results", [])
             ok = parse_results[0].get("ok") if parse_results else False
             icon = "✅" if ok else "❌"
             free_updated = src.get("free_updated", 0)
-            lines.append(f"{icon} *{name}*: бесплатные события за {elapsed_src}с (обновлено цен: {free_updated})")
+            lines.append(f"{icon} {b(name)}: бесплатные события за {esc(elapsed_src)}с (обновлено цен: {free_updated})")
 
         elif action == "kids_pass":
             parse_results = src.get("parse_results", [])
@@ -2219,22 +2227,22 @@ def _format_daytime_report(report: dict, elapsed: float) -> str:
             icon = "✅" if ok else "❌"
             kids_marked = src.get("kids_marked", 0)
             kids_added  = src.get("kids_added", 0)
-            lines.append(f"{icon} *{name}*: детские события за {elapsed_src}с (is_kids={kids_marked}, уникальных: {kids_added})")
+            lines.append(f"{icon} {b(name)}: детские события за {esc(elapsed_src)}с (is_kids={kids_marked}, уникальных: {kids_added})")
 
         elif action == "fallback_full_parse":
             parse_results = src.get("parse_results", [])
             ok_count  = sum(1 for r in parse_results if r.get("ok"))
             all_count = len(parse_results)
             icon = "✅" if ok_count == all_count else "⚠️"
-            lines.append(f"{icon} *{name}*: плановый прогон за {elapsed_src}с ({ok_count}/{all_count})")
+            lines.append(f"{icon} {b(name)}: плановый прогон за {esc(elapsed_src)}с ({ok_count}/{all_count})")
             for pr in parse_results:
                 for rline in pr.get("results", []):
                     parts = rline.split(":")
                     if len(parts) == 4:
-                        lines.append(f"   └ {parts[1]}: найдено {parts[2]}, добавлено {parts[3]}")
+                        lines.append(f"   └ {esc(parts[1])}: найдено {esc(parts[2])}, добавлено {esc(parts[3])}")
 
         else:
-            lines.append(f"❓ *{name}*: {action}")
+            lines.append(f"❓ {b(name)}: {esc(action)}")
 
     lines.append(f"\n⏱ Всего: {report.get('duration', 0):.0f} сек")
     return "\n".join(lines)
@@ -2244,7 +2252,7 @@ async def _send_daytime_report(bot, report: dict, elapsed: float):
     """Отправляет дневной отчёт админу."""
     text = _format_daytime_report(report, elapsed)
     try:
-        await bot.send_message(chat_id=ADMIN_ID, text=text, parse_mode="Markdown")
+        await bot.send_message(chat_id=ADMIN_ID, text=text, parse_mode="HTML")
     except Exception as e:
         logger.error(f"Не удалось отправить дневной отчёт: {e}")
 
