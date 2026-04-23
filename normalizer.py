@@ -548,6 +548,12 @@ def apply_kids_pass(kids_events: list, conn) -> dict:
         conn.commit()
         return {"marked": 0, "added": 0}
 
+    # Снимаем snapshot ID существующих событий ДО нашего цикла INSERT,
+    # чтобы не матчить строки, вставленные в этом же проходе (баг: квест с
+    # несколькими временами находил свою же только что вставленную запись и
+    # не добавлял остальные тайм-слоты).
+    existing_ids: set = {r[0] for r in conn.execute("SELECT id FROM events").fetchall()}
+
     marked = 0
     added = 0
 
@@ -563,14 +569,14 @@ def apply_kids_pass(kids_events: list, conn) -> dict:
             rows = conn.execute(
                 "SELECT id FROM events WHERE source_url = ?", (source_url,)
             ).fetchall()
-            found_ids = [r[0] for r in rows]
+            found_ids = [r[0] for r in rows if r[0] in existing_ids]
 
         if not found_ids and title and event_date:
             rows = conn.execute(
-                "SELECT id FROM events WHERE LOWER(title) = ? AND event_date = ?",
-                (title.lower(), event_date)
+                "SELECT id FROM events WHERE title = ? AND event_date = ?",
+                (title, event_date)
             ).fetchall()
-            found_ids = [r[0] for r in rows]
+            found_ids = [r[0] for r in rows if r[0] in existing_ids]
 
         if found_ids:
             placeholders = ",".join("?" * len(found_ids))

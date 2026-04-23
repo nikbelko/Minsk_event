@@ -83,6 +83,7 @@ RELAX_CATEGORIES: dict[str, tuple[str, str, str]] = {
     "relax.by:exhibition": ("https://afisha.relax.by/expo/minsk/",     "relax_parser.py exhibition", "🖼️ Выставки (Relax)"),
     "relax.by:party":      ("https://afisha.relax.by/clubs/minsk/",    "relax_parser.py party",      "🎉 Вечеринки (Relax)"),
     "relax.by:kino":       ("https://afisha.relax.by/kino/minsk/",     "relax_parser.py kino",       "🎬 Кино (Relax)"),
+    "relax.by:kids":       ("https://afisha.relax.by/kids/minsk/",     "relax_parser.py kids",       "🧸 Детям (Relax)"),
 }
 
 # Free-events pass must run after ANY relax category was parsed.
@@ -97,6 +98,7 @@ MIN_SANE_COUNT: dict[str, int] = {
     "relax.by:exhibition": 3,
     "relax.by:party":      3,
     "relax.by:kino":       5,   # kino always has many sessions
+    "relax.by:kids":       3,
     "bycard.by":           3,
 }
 
@@ -690,7 +692,8 @@ def main():
         "sources": [],
     }
     now_iso = now.isoformat()
-    relax_any_parsed = False  # tracks whether any relax category ran its parser
+    relax_any_parsed = False   # tracks whether any relax category ran its parser
+    kids_pass_ran    = False   # prevents double kids-pass call in tail section
 
     # ── 1. Sources with cheap fingerprint check ──────────────────────────────
     for source_name in CHECKABLE_SOURCES:
@@ -822,22 +825,32 @@ def main():
                     pass  # malformed timestamp — proceed with parse
 
         log.info(f"[{source_name}] CHANGED (count {baseline_count}→{count}) → running parser")
-        parse_result = run_single_parser(source_name)
+        # kids-pass использует свой pipeline (apply_kids_pass), а не стандартный
+        if source_name == "relax.by:kids":
+            parse_result = run_kids_pass()
+            kids_pass_ran = True
+        else:
+            parse_result = run_single_parser(source_name)
         elapsed_src  = round(time.time() - t0, 1)
         parse_ok     = parse_result["ok"]
 
-        if source_name in RELAX_CATEGORIES:
+        if source_name in RELAX_CATEGORIES and parse_ok:
             relax_any_parsed = True
 
         _record_parse(source_name, now_iso, fp, parse_ok)
-        summary["sources"].append({
+        entry: dict = {
             "name":          source_name,
             "action":        "changed" if parse_ok else "parse_error",
             "count":         count,
             "hash":          fp_hash,
             "parse_results": [parse_result],
             "elapsed":       elapsed_src,
-        })
+        }
+        if source_name == "relax.by:kids":
+            entry["action"]      = "kids_pass"
+            entry["kids_marked"] = parse_result.get("kids_marked", 0)
+            entry["kids_added"]  = parse_result.get("kids_added", 0)
+        summary["sources"].append(entry)
 
     # ── 2. Free-events pass — runs after ANY relax category was parsed ────────
     # relax_parser.py free cross-checks all relax categories and marks free events.
@@ -854,16 +867,19 @@ def main():
             "free_updated":  free_result.get("free_updated", 0),
         })
 
-        log.info("[relax.by:kids] running kids-pass (is_kids marker)")
-        kids_result = run_kids_pass()
-        summary["sources"].append({
-            "name":          "relax.by:kids",
-            "action":        "kids_pass",
-            "parse_results": [kids_result],
-            "elapsed":       kids_result["elapsed"],
-            "kids_marked":   kids_result.get("kids_marked", 0),
-            "kids_added":    kids_result.get("kids_added", 0),
-        })
+        if kids_pass_ran:
+            log.info("[relax.by:kids] kids-pass уже выполнился в этом цикле — пропускаем хвостовой вызов")
+        else:
+            log.info("[relax.by:kids] running kids-pass (is_kids marker)")
+            kids_result = run_kids_pass()
+            summary["sources"].append({
+                "name":          "relax.by:kids",
+                "action":        "kids_pass",
+                "parse_results": [kids_result],
+                "elapsed":       kids_result["elapsed"],
+                "kids_marked":   kids_result.get("kids_marked", 0),
+                "kids_added":    kids_result.get("kids_added", 0),
+            })
 
     # ── 3. Always-parse sources ──────────────────────────────────────────────
     for source_name in ALWAYS_PARSE_SOURCES:

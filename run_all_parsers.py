@@ -284,6 +284,7 @@ def main():
     # Собираем JSON-события отдельно
     free_events = []
     kids_events = []
+    kids_parser_ok = False  # True только если kids-парсер отработал без ошибок
 
     # Запускаем все парсеры
     for cmd, name, is_free, is_kids in PARSERS:
@@ -297,6 +298,7 @@ def main():
                 logger.info(f"   📦 Бесплатных событий получено: {len(events)}")
             elif is_kids:
                 kids_events.extend(events)
+                kids_parser_ok = True
                 logger.info(f"   📦 Kids событий получено: {len(events)}")
             else:
                 source_key = CMD_TO_SOURCE_KEY.get(cmd)
@@ -334,7 +336,9 @@ def main():
     # Kids pass — проставляем is_kids=1 и сохраняем уникальные kids-события
     logger.info("=" * 40)
     logger.info("🧸 ОБРАБОТКА KIDS (is_kids маркер)")
-    if kids_events:
+    if kids_parser_ok:
+        # Вызываем apply_kids_pass даже при пустом списке: функция очищает stale is_kids
+        # и synthetic relax.by/kids строки, что нужно для корректного full rescan.
         try:
             with sqlite3.connect(DB_PATH) as conn:
                 stats = apply_kids_pass(kids_events, conn)
@@ -342,7 +346,7 @@ def main():
         except Exception as e:
             logger.error(f"❌ Ошибка kids pass: {e}")
     else:
-        logger.info("ℹ️ Kids события не получены")
+        logger.info("ℹ️ Kids парсер не выполнился успешно — stale state сохранён")
 
     duration = (datetime.now() - start_time).total_seconds()
     logger.info("=" * 60)

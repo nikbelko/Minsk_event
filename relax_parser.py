@@ -48,6 +48,8 @@ class RelaxBaseParser:
     known_venues: list = []
     # Флаг: если True, парсер не сохраняет в БД, а возвращает события через JSON
     return_events_json: bool = False
+    # Флаг: если False, /kino/ ссылки на странице не пропускаются (для kids-pass)
+    skip_kino_urls: bool = True
 
     def __init__(self):
         self.base_url = "https://afisha.relax.by"
@@ -160,8 +162,8 @@ class RelaxBaseParser:
                 href = title_a.get("href", "")
 
                 # Фикс 3: пропускаем если URL содержит /kino/ а мы не кино-парсер
-                # (страница kids может содержать кино-блоки через last_place)
-                if "/kino/" in href and self.category != "cinema":
+                # (страница kids намеренно включает фильмы — skip_kino_urls=False)
+                if "/kino/" in href and self.category != "cinema" and self.skip_kino_urls:
                     skip_no_title += 1
                     continue
 
@@ -451,6 +453,7 @@ class RelaxKidsParser(RelaxBaseParser):
     emoji = "🧸"
     clear_label = "детских событий"
     return_events_json = True   # не сохраняем напрямую — обработка через apply_kids_pass
+    skip_kino_urls = False      # фильмы на странице kids нужны для маркировки is_kids=1
     known_venues = [
         "Цирк",
         "Белгосцирк",
