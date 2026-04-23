@@ -439,11 +439,18 @@ class RelaxExhibitionParser(RelaxBaseParser):
 
 
 class RelaxKidsParser(RelaxBaseParser):
+    """
+    Kids-pass: скачивает relax.by/kids/, возвращает события через JSON.
+    Вызывающий код (run_all_parsers / daytime_update) передаёт их в
+    normalizer.apply_kids_pass() — совпадения помечаются is_kids=1,
+    уникальные события (цирк, зоопарк и т.п.) добавляются в БД с category='kids'.
+    """
     path = "/kids/minsk/"
     category = "kids"
     source_name = "relax.by"
     emoji = "🧸"
     clear_label = "детских событий"
+    return_events_json = True   # не сохраняем напрямую — обработка через apply_kids_pass
     known_venues = [
         "Цирк",
         "Белгосцирк",
@@ -688,12 +695,14 @@ if __name__ == "__main__":
         "free":       RelaxFreeParser,
     }
 
+    # Парсеры, которые возвращают JSON вместо прямого сохранения в БД
+    JSON_PARSERS = {"free", "kids"}
+
     if len(sys.argv) > 1:
         name = sys.argv[1]
         if name in PARSERS:
             parser_class = PARSERS[name]
-            # Специальная обработка для free-парсера
-            if name == "free":
+            if name in JSON_PARSERS:
                 parser = parser_class()
                 parser.run()
             else:
@@ -705,8 +714,7 @@ if __name__ == "__main__":
     else:
         # Запуск всех
         for name, cls in PARSERS.items():
-            if name == "free":
-                # Для free используем специальную логику
+            if name in JSON_PARSERS:
                 parser = cls()
                 parser.run()
             else:

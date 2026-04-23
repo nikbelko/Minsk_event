@@ -12,12 +12,14 @@ from datetime import datetime
 
 # Импортируем функцию из обновлённого нормализатора
 try:
-    from normalizer import mark_free_duplicates
+    from normalizer import mark_free_duplicates, apply_kids_pass
+    _NORMALIZER_OK = True
 except ImportError:
-    # Заглушка, если функция ещё не добавлена
+    _NORMALIZER_OK = False
     def mark_free_duplicates(relax_events, free_events):
-        logger.warning("⚠️ mark_free_duplicates не найдена в normalizer, использую заглушку")
         return relax_events + free_events
+    def apply_kids_pass(kids_events, conn):
+        return {"marked": 0, "added": 0}
 
 from config import DB_PATH, MINSK_TZ
 from parser_state import (
@@ -51,7 +53,6 @@ CMD_TO_SOURCE_KEY: dict[str, str] = {
     "relax_parser.py theatre":    "relax.by:theatre",
     "relax_parser.py concert":    "relax.by:concert",
     "relax_parser.py exhibition": "relax.by:exhibition",
-    "relax_parser.py kids":       "relax.by:kids",
     "relax_parser.py party":      "relax.by:party",
     "relax_parser.py kino":       "relax.by:kino",
     "bycard_parser.py":           "bycard.by",
@@ -108,21 +109,18 @@ def _sync_parser_state(source_key: str, now_iso: str):
 # Категории парсеров с указанием, относятся ли они к бесплатным событиям
 PARSERS = [
     # Обычные парсеры
-    ("relax_parser.py theatre",     "🎭 Театр (Relax)",      False),
-    ("relax_parser.py concert",     "🎵 Концерты (Relax)",   False),
-    ("relax_parser.py exhibition",  "🖼️ Выставки (Relax)",   False),
-    ("relax_parser.py kids",        "🧸 Детям (Relax)",      False),
-    ("relax_parser.py party",       "🎉 Вечеринки (Relax)",  False),
-    ("relax_parser.py kino",        "🎬 Кино (Relax)",       False),
-    ("ticketpro_parser.py",         "🎫 Ticketpro",          False),
-    ("bezkassira_parser.py",        "🎟 BezKassira",         False),
-    ("bycard_parser.py",            "🎭 Bycard",             False),
-    
-    # Бесплатные парсеры
-    ("relax_parser.py free",        "🆓 Бесплатно (Relax)",  True),
-    
-    # В разработке
-    # ("afisha24_parser.py",        "🎭 24Afisha",           False),
+    ("relax_parser.py theatre",     "🎭 Театр (Relax)",      False,  False),
+    ("relax_parser.py concert",     "🎵 Концерты (Relax)",   False,  False),
+    ("relax_parser.py exhibition",  "🖼️ Выставки (Relax)",   False,  False),
+    ("relax_parser.py party",       "🎉 Вечеринки (Relax)",  False,  False),
+    ("relax_parser.py kino",        "🎬 Кино (Relax)",       False,  False),
+    ("ticketpro_parser.py",         "🎫 Ticketpro",          False,  False),
+    ("bezkassira_parser.py",        "🎟 BezKassira",         False,  False),
+    ("bycard_parser.py",            "🎭 Bycard",             False,  False),
+
+    # JSON-парсеры (возвращают EVENTS_JSON, не сохраняют напрямую)
+    ("relax_parser.py free",        "🆓 Бесплатно (Relax)",  True,   False),
+    ("relax_parser.py kids",        "🧸 Детям (Relax)",      False,  True),   # is_kids pass
 ]
 
 
@@ -283,22 +281,24 @@ def main():
     all_results: list[str] = []
     parser_status: list[tuple] = []  # (name, ok, result_lines)
 
-    # Собираем только бесплатные события через JSON
+    # Собираем JSON-события отдельно
     free_events = []
+    kids_events = []
 
     # Запускаем все парсеры
-    for cmd, name, is_free in PARSERS:
+    for cmd, name, is_free, is_kids in PARSERS:
         logger.info("-" * 40)
         ok, result_lines, events = run_parser(cmd, name)
 
         if ok:
             success += 1
-            # Бесплатные события собираем отдельно
             if is_free:
                 free_events.extend(events)
                 logger.info(f"   📦 Бесплатных событий получено: {len(events)}")
+            elif is_kids:
+                kids_events.extend(events)
+                logger.info(f"   📦 Kids событий получено: {len(events)}")
             else:
-                # Sync parser_source_state so daytime checks have accurate baseline
                 source_key = CMD_TO_SOURCE_KEY.get(cmd)
                 if source_key:
                     _sync_parser_state(source_key, now_iso)
@@ -322,19 +322,27 @@ def main():
     logger.info("🔄 ОБРАБОТКА БЕСПЛАТНЫХ СОБЫТИЙ")
     
     if free_events:
-        # Применяем нормализацию для проставления бесплатных цен
         final_events = mark_free_duplicates(relax_events, free_events)
         logger.info(f"📦 Событий после обработки: {len(final_events)}")
-        
-        # Подсчитываем статистику по бесплатным событиям
         free_count = sum(1 for e in final_events if e.get("price") == "Бесплатно")
         logger.info(f"🆓 Из них бесплатных: {free_count}")
-        
-        # Обновляем цены в БД
         updated = update_events_in_db(final_events)
         logger.info(f"💾 Обновлено в БД: {updated}")
     else:
         logger.info("ℹ️ Нет бесплатных событий для обработки")
+
+    # Kids pass — проставляем is_kids=1 и сохраняем уникальные kids-события
+    logger.info("=" * 40)
+    logger.info("🧸 ОБРАБОТКА KIDS (is_kids маркер)")
+    if kids_events:
+        try:
+            with sqlite3.connect(DB_PATH) as conn:
+                stats = apply_kids_pass(kids_events, conn)
+            logger.info(f"🧸 is_kids=1: {stats['marked']} событий; добавлено уникальных: {stats['added']}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка kids pass: {e}")
+    else:
+        logger.info("ℹ️ Kids события не получены")
 
     duration = (datetime.now() - start_time).total_seconds()
     logger.info("=" * 60)

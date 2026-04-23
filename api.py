@@ -20,6 +20,7 @@ from config import (
     MINSK_TZ, DB_PATH, ADMIN_ID,
     VENUE_OPEN_TIME, VENUE_CLOSE_TIME,
     BATCH_TEMPLATE_HEADERS, BATCH_TEMPLATE_EXAMPLE, BATCH_CATEGORY_MAP,
+    _build_time_filter, _build_overnight_union,
 )
 
 # ── Конфиг ──────────────────────────────────────────────────────────────────
@@ -32,6 +33,20 @@ app = FastAPI(
     description="API афиши Минска",
     version="1.0.0",
 )
+
+
+@app.on_event("startup")
+def _run_migrations():
+    with sqlite3.connect(DB_PATH) as conn:
+        for sql in [
+            "ALTER TABLE events ADD COLUMN is_kids INTEGER DEFAULT 0",
+            "ALTER TABLE pending_events ADD COLUMN is_kids INTEGER DEFAULT 0",
+        ]:
+            try:
+                conn.execute(sql)
+            except Exception:
+                pass
+        conn.commit()
 
 app.add_middleware(
     CORSMiddleware,
@@ -88,6 +103,7 @@ class CategoryCounts(BaseModel):
     theater: int = 0
     exhibition: int = 0
     kids: int = 0
+    fest: int = 0
     sport: int = 0
     party: int = 0
     free: int = 0
@@ -122,49 +138,6 @@ def get_weekend_dates() -> tuple[str, str]:
     return saturday.strftime("%Y-%m-%d"), sunday.strftime("%Y-%m-%d")
 
 
-def _overnight_extra(
-    target_date_str: str,
-    now_t: str | None,
-    category: str | None,
-) -> tuple[str, list] | None:
-    """
-    Build (sql, params) for midnight-crossing events stored under (target_date - 1 day),
-    suitable for passing as extra_union to fetch_events_paged.
-
-    Midnight-crossing: show_time >= '20:00', end_time <= '08:00', end_time < show_time.
-    now_t: current HH:MM for today (to filter out already-ended events), None for future.
-    Returns None when overnight events are guaranteed empty (now_t >= '08:00').
-    """
-    if now_t is not None and now_t >= "08:00":
-        return None
-
-    from datetime import date as _date
-    prev_date = (_date.fromisoformat(target_date_str) - timedelta(days=1)).isoformat()
-
-    sql = """
-        SELECT id, title, details, description, event_date, show_time, end_time,
-               place, location, price, category, source_url, source_name
-        FROM events
-        WHERE event_date = ?
-          AND show_time >= '20:00'
-          AND end_time IS NOT NULL AND end_time != ''
-          AND end_time <= '08:00'
-          AND end_time < show_time
-    """
-    params: list = [prev_date]
-
-    if category == "free":
-        sql += " AND price = 'Бесплатно'"
-    elif category and category != "all":
-        sql += " AND category = ?"
-        params.append(category)
-
-    if now_t is not None:
-        sql += " AND end_time > ?"
-        params.append(now_t)
-
-    return sql, params
-
 
 def fetch_events_paged(
     where_clauses: list[str],
@@ -181,7 +154,7 @@ def fetch_events_paged(
     is consistent across all pages.
     """
     SELECT_COLS = """id, title, details, description, event_date, show_time, end_time,
-                     place, location, price, category, source_url, source_name"""
+                     place, location, price, category, source_url, source_name, is_kids"""
     where = " AND ".join(where_clauses) if where_clauses else "1=1"
     offset = (page - 1) * per_page
 
@@ -207,40 +180,6 @@ def fetch_events_paged(
         cursor.execute(page_sql, all_params + [per_page, offset])
         rows = [row_to_dict(r) for r in cursor.fetchall()]
     return rows, total
-
-def _build_time_filter(date_filter: str, today: str, now_time: str) -> tuple[str, list]:
-    """Возвращает SQL условие для фильтрации прошедших событий и параметры.
-    Логика: нет show_time → показываем до VENUE_CLOSE_TIME (21:00).
-                            После 21:00 скрываем — заведения закрыты.
-                            До 09:00 показываем — люди должны видеть план на день.
-            есть end_time → фильтруем по end_time > now.
-            нет end_time  → фильтруем по show_time > now.
-    """
-    if date_filter != today:
-        return "", []
-
-    venue_open = now_time < VENUE_CLOSE_TIME
-
-    if venue_open:
-        return """
-            (
-                show_time = '' OR show_time IS NULL
-                OR (
-                    (end_time != '' AND end_time IS NOT NULL AND (end_time > ? OR end_time < show_time))
-                    OR
-                    ((end_time = '' OR end_time IS NULL) AND show_time > ?)
-                )
-            )
-        """, [now_time, now_time]
-    else:
-        # Вне рабочих часов — только события с явным временем, которые ещё не закончились
-        return """
-            (
-                (end_time != '' AND end_time IS NOT NULL AND (end_time > ? OR end_time < show_time))
-                OR
-                ((end_time = '' OR end_time IS NULL) AND show_time != '' AND show_time IS NOT NULL AND show_time > ?)
-            )
-        """, [now_time, now_time]
 
 
 # ── Health ───────────────────────────────────────────────────────────────────
@@ -271,9 +210,15 @@ def categories_counts():
             "SELECT COUNT(*) FROM events WHERE event_date >= ? AND price = 'Бесплатно'",
             (today,)
         )
-        free_count = cursor.fetchone()[0]
-        data["free"] = free_count
-        
+        data["free"] = cursor.fetchone()[0]
+
+        # Категория kids - все события с флагом is_kids=1 (независимо от category)
+        cursor.execute(
+            "SELECT COUNT(*) FROM events WHERE event_date >= ? AND is_kids = 1",
+            (today,)
+        )
+        data["kids"] = cursor.fetchone()[0]
+
     return CategoryCounts(**data)
 
 # ── Даты с событиями (для календаря) ────────────────────────────────────────
@@ -289,9 +234,11 @@ def calendar_dates(
     params: list = [today, until]
     where = ["event_date >= ?", "event_date <= ?"]
     
-    # КАТЕГОРИЯ FREE - ОСОБАЯ ОБРАБОТКА
+    # КАТЕГОРИЯ free/kids — особая обработка (не по полю category)
     if category == "free":
         where.append("price = 'Бесплатно'")
+    elif category == "kids":
+        where.append("is_kids = 1")
     elif category and category != "all":
         where.append("category = ?")
         params.append(category)
@@ -423,7 +370,7 @@ def get_events(
     extra_union = None
     if date and not search:
         overnight_now = now_t if date == today else None
-        extra_union = _overnight_extra(date, overnight_now, category)
+        extra_union = _build_overnight_union(date, overnight_now, category)
 
     page_events, total = fetch_events_paged(where, params, page, per_page,
                                             extra_union=extra_union)
@@ -455,11 +402,13 @@ def events_today(
 
     if category == "free":
         where.append("price = 'Бесплатно'")
+    elif category == "kids":
+        where.append("is_kids = 1")
     elif category and category != "all":
         where.append("category = ?")
         params.append(category)
 
-    extra_union = _overnight_extra(today, now_t, category)
+    extra_union = _build_overnight_union(today, now_t, category)
     page_events, total = fetch_events_paged(where, params, page, per_page,
                                             extra_union=extra_union)
     return EventsResponse(total=total, page=page, per_page=per_page,
@@ -478,11 +427,13 @@ def events_tomorrow(
 
     if category == "free":
         where.append("price = 'Бесплатно'")
+    elif category == "kids":
+        where.append("is_kids = 1")
     elif category and category != "all":
         where.append("category = ?")
         params.append(category)
 
-    extra_union = _overnight_extra(tomorrow, None, category)
+    extra_union = _build_overnight_union(tomorrow, None, category)
     page_events, total = fetch_events_paged(where, params, page, per_page,
                                             extra_union=extra_union)
     return EventsResponse(total=total, page=page, per_page=per_page,
@@ -499,9 +450,11 @@ def events_weekend(
     where = ["event_date IN (?, ?)"]
     params: list = [saturday, sunday]
     
-    # КАТЕГОРИЯ FREE - ОСОБАЯ ОБРАБОТКА
+    # КАТЕГОРИЯ free/kids — особая обработка (не по полю category)
     if category == "free":
         where.append("price = 'Бесплатно'")
+    elif category == "kids":
+        where.append("is_kids = 1")
     elif category and category != "all":
         where.append("category = ?")
         params.append(category)
@@ -532,9 +485,11 @@ def events_upcoming(
     ]
     params: list = [today, until, today, now_t, now_t]
     
-    # КАТЕГОРИЯ FREE - ОСОБАЯ ОБРАБОТКА
+    # КАТЕГОРИЯ free/kids — особая обработка (не по полю category)
     if category == "free":
         where.append("price = 'Бесплатно'")
+    elif category == "kids":
+        where.append("is_kids = 1")
     elif category and category != "all":
         where.append("category = ?")
         params.append(category)
@@ -563,6 +518,7 @@ class EventSubmit(BaseModel):
     tg_username: Optional[str] = None
     tg_first_name: Optional[str] = None
     is_promo: Optional[bool] = False       # Промо-публикация в канал после одобрения
+    is_kids: Optional[bool] = False        # Событие для детей
 
 
 def _dates_in_range(date_from: str, date_to: str) -> list[str]:
@@ -682,8 +638,8 @@ def submit_event(event: EventSubmit):
                 INSERT INTO pending_events
                     (user_id, username, first_name, title, event_date, show_time, end_time,
                      place, address, category, details, description, price, source_url,
-                     is_promo, status, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     is_promo, is_kids, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 user_id, username, first_name,
                 event.title,
@@ -698,6 +654,7 @@ def submit_event(event: EventSubmit):
                 event.price or "",
                 event.source_url or "",
                 1 if event.is_promo else 0,
+                1 if event.is_kids else 0,
                 "pending",
                 datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"),
             ))

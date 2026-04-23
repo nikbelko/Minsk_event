@@ -46,6 +46,7 @@ from parser_state import (  # noqa: E402
 
 try:
     from normalizer import mark_free_duplicates as _mark_free_duplicates
+    from normalizer import apply_kids_pass as _apply_kids_pass
     _NORMALIZER_AVAILABLE = True
 except ImportError:
     _NORMALIZER_AVAILABLE = False
@@ -80,7 +81,6 @@ RELAX_CATEGORIES: dict[str, tuple[str, str, str]] = {
     "relax.by:theatre":    ("https://afisha.relax.by/theatre/minsk/",  "relax_parser.py theatre",    "🎭 Театр (Relax)"),
     "relax.by:concert":    ("https://afisha.relax.by/conserts/minsk/", "relax_parser.py concert",    "🎵 Концерты (Relax)"),
     "relax.by:exhibition": ("https://afisha.relax.by/expo/minsk/",     "relax_parser.py exhibition", "🖼️ Выставки (Relax)"),
-    "relax.by:kids":       ("https://afisha.relax.by/kids/minsk/",     "relax_parser.py kids",       "🧸 Детям (Relax)"),
     "relax.by:party":      ("https://afisha.relax.by/clubs/minsk/",    "relax_parser.py party",      "🎉 Вечеринки (Relax)"),
     "relax.by:kino":       ("https://afisha.relax.by/kino/minsk/",     "relax_parser.py kino",       "🎬 Кино (Relax)"),
 }
@@ -95,7 +95,6 @@ MIN_SANE_COUNT: dict[str, int] = {
     "relax.by:theatre":    3,
     "relax.by:concert":    3,
     "relax.by:exhibition": 3,
-    "relax.by:kids":       3,
     "relax.by:party":      3,
     "relax.by:kino":       5,   # kino always has many sessions
     "bycard.by":           3,
@@ -611,6 +610,72 @@ def run_free_pass() -> dict:
         return {"label": RELAX_FREE_LABEL, "ok": False, "results": [], "elapsed": round(time.time() - t0, 1), "free_updated": 0}
 
 
+RELAX_KIDS_CMD   = "relax_parser.py kids"
+RELAX_KIDS_LABEL = "🧸 Детям (Relax)"
+
+
+def run_kids_pass() -> dict:
+    """
+    Run relax_parser.py kids subprocess, capture EVENTS_JSON output,
+    then call apply_kids_pass() to mark is_kids=1 and save unique kids events.
+    """
+    t0 = time.time()
+    full_cmd = [sys.executable] + RELAX_KIDS_CMD.split()
+    try:
+        proc = subprocess.run(
+            full_cmd,
+            capture_output=True,
+            text=True,
+            timeout=900,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+        )
+        kids_events: list[dict] = []
+        result_lines: list[str] = []
+
+        for line in proc.stdout.splitlines():
+            s = line.strip()
+            if s.startswith("RESULT:"):
+                result_lines.append(s)
+            elif s.startswith("EVENTS_JSON:"):
+                try:
+                    kids_events.extend(json.loads(s[len("EVENTS_JSON:"):]))
+                except Exception as je:
+                    log.error(f"  kids-pass: EVENTS_JSON parse error: {je}")
+
+        ok = proc.returncode == 0
+        elapsed = round(time.time() - t0, 1)
+        log.info(f"  {RELAX_KIDS_LABEL}: {'✅' if ok else '❌'} in {elapsed}s, "
+                 f"{len(kids_events)} kids events received")
+
+        kids_marked = 0
+        kids_added = 0
+        if ok and _NORMALIZER_AVAILABLE:
+            try:
+                with sqlite3.connect(DB_PATH) as conn:
+                    stats = _apply_kids_pass(kids_events, conn)
+                    kids_marked = stats.get("marked", 0)
+                    kids_added  = stats.get("added", 0)
+            except Exception as e:
+                log.error(f"  kids-pass: apply_kids_pass failed: {e}")
+        elif not _NORMALIZER_AVAILABLE:
+            log.warning("  kids-pass: normalizer unavailable — is_kids update skipped")
+
+        return {
+            "label":        RELAX_KIDS_LABEL,
+            "ok":           ok,
+            "results":      result_lines,
+            "elapsed":      elapsed,
+            "kids_marked":  kids_marked,
+            "kids_added":   kids_added,
+        }
+    except subprocess.TimeoutExpired:
+        log.error(f"  kids-pass: timed out")
+        return {"label": RELAX_KIDS_LABEL, "ok": False, "results": [], "elapsed": round(time.time() - t0, 1)}
+    except Exception as e:
+        log.error(f"  kids-pass: exception: {e}")
+        return {"label": RELAX_KIDS_LABEL, "ok": False, "results": [], "elapsed": round(time.time() - t0, 1)}
+
+
 # ── Main orchestrator ─────────────────────────────────────────────────────────
 
 def main():
@@ -787,6 +852,17 @@ def main():
             "parse_results": [free_result],
             "elapsed":       free_result["elapsed"],
             "free_updated":  free_result.get("free_updated", 0),
+        })
+
+        log.info("[relax.by:kids] running kids-pass (is_kids marker)")
+        kids_result = run_kids_pass()
+        summary["sources"].append({
+            "name":          "relax.by:kids",
+            "action":        "kids_pass",
+            "parse_results": [kids_result],
+            "elapsed":       kids_result["elapsed"],
+            "kids_marked":   kids_result.get("kids_marked", 0),
+            "kids_added":    kids_result.get("kids_added", 0),
         })
 
     # ── 3. Always-parse sources ──────────────────────────────────────────────

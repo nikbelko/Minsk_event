@@ -40,6 +40,7 @@ from config import (
     MINSK_TZ, DB_PATH, ADMIN_ID,
     VENUE_OPEN_TIME, VENUE_CLOSE_TIME,
     BATCH_TEMPLATE_HEADERS, BATCH_TEMPLATE_EXAMPLE, BATCH_CATEGORY_MAP,
+    _build_time_filter, _build_overnight_union,
 )
 
 import asyncio
@@ -74,6 +75,7 @@ CATEGORY_EMOJI = {
     "theater": "🎭",
     "exhibition": "🖼️",
     "kids": "🧸",
+    "fest": "🎪",
     "sport": "⚽",
     "free": "🆓",
     "party": "🌟",
@@ -92,6 +94,7 @@ CATEGORY_NAMES = {
     "theater": "🎭 Театр",
     "exhibition": "🖼️ Выставки",
     "kids": "🧸 Детям",
+    "fest": "🎪 Фесты",
     "sport": "⚽ Спорт",
     "free": "🆓 Бесплатно",
     "party": "🌟 Движ",
@@ -182,7 +185,9 @@ def init_db():
             "ALTER TABLE pending_events ADD COLUMN details TEXT DEFAULT ''",
             "ALTER TABLE pending_events ADD COLUMN end_time TEXT DEFAULT ''",
             "ALTER TABLE pending_events ADD COLUMN is_promo INTEGER DEFAULT 0",
+            "ALTER TABLE pending_events ADD COLUMN is_kids INTEGER DEFAULT 0",
             "ALTER TABLE events ADD COLUMN end_time TEXT DEFAULT ''",
+            "ALTER TABLE events ADD COLUMN is_kids INTEGER DEFAULT 0",
             "ALTER TABLE subscriptions ADD COLUMN status TEXT DEFAULT 'active'",
             "ALTER TABLE flash_subscriptions ADD COLUMN last_notified_at TEXT DEFAULT ''",
         ]:
@@ -221,33 +226,6 @@ def log_user_action(user_id: int, username: str | None, first_name: str | None, 
     except Exception as e:
         logger.error(f"Ошибка логирования: {e}")
 
-def _build_time_filter(date_filter: str, today: str, now_time: str) -> tuple[str, list]:
-    """Возвращает чистое SQL условие БЕЗ 'AND' для фильтрации прошедших событий.
-    - Для where.append(): добавлять напрямую, ' AND '.join() сам добавит AND.
-    - Для query +=: использовать query += ' AND ' + time_filter.
-    Логика: нет show_time → показываем до VENUE_CLOSE_TIME (21:00).
-                            После 21:00 скрываем — заведения закрыты.
-                            До 09:00 показываем — люди должны видеть план на день.
-            есть end_time → фильтруем по end_time > now.
-            нет end_time  → фильтруем по show_time > now.
-    """
-    if date_filter != today:
-        return "", []
-
-    venue_open = now_time < VENUE_CLOSE_TIME
-
-    if venue_open:
-        return (
-            "(show_time = '' OR show_time IS NULL "
-            "OR ((end_time != '' AND end_time IS NOT NULL AND (end_time > ? OR end_time < show_time)) "
-            "OR ((end_time = '' OR end_time IS NULL) AND show_time > ?)))"
-        ), [now_time, now_time]
-    else:
-        # Вне рабочих часов — только события с явным временем
-        return (
-            "((end_time != '' AND end_time IS NOT NULL AND (end_time > ? OR end_time < show_time)) "
-            "OR ((end_time = '' OR end_time IS NULL) AND show_time != '' AND show_time IS NOT NULL AND show_time > ?))"
-        ), [now_time, now_time]
 def get_stats_data(exclude_admin: bool = True) -> dict:
     today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
     admin_filter = ADMIN_ID if exclude_admin else -1  # -1 никогда не совпадёт
@@ -462,12 +440,22 @@ def get_events_count_by_category() -> dict:
         # FREE - ВСЕ бесплатные события (независимо от категории)
         cursor.execute("""
             SELECT COUNT(*) FROM (
-                SELECT DISTINCT title, COALESCE(place, ''), event_date 
+                SELECT DISTINCT title, COALESCE(place, ''), event_date
                 FROM events
                 WHERE event_date >= ? AND price = 'Бесплатно'
             )
         """, (today,))
         result["free"] = cursor.fetchone()[0]
+
+        # KIDS - все события с is_kids=1 (независимо от категории)
+        cursor.execute("""
+            SELECT COUNT(*) FROM (
+                SELECT DISTINCT title, COALESCE(place, ''), event_date
+                FROM events
+                WHERE event_date >= ? AND is_kids = 1
+            )
+        """, (today,))
+        result["kids"] = cursor.fetchone()[0]
         
         return result
 
@@ -513,40 +501,6 @@ def search_events_by_date_raw(date_str: str):
     return (events, formatted_date, "найдены") if events else ([], formatted_date, "нет_событий")
 
 
-def _overnight_clause(category: str | None, now_time: str | None) -> tuple[str, list]:
-    """
-    Returns (SQL fragment, params) for midnight-crossing events from the previous day.
-
-    Midnight-crossing event: show_time >= '20:00', end_time <= '08:00', end_time < show_time.
-    These events are stored under event_date = D-1 but are visible on date D until end_time.
-
-    Call with:
-      now_time = current HH:MM if querying today (filters out already-ended ones)
-      now_time = None if querying a future date (show all of them)
-
-    The caller must substitute '?' for prev_date_str and append returned params.
-    """
-    clause = """
-        SELECT id, title, details, description, event_date, show_time, end_time,
-               place, location, price, category, source_url
-        FROM events
-        WHERE event_date = ?
-          AND show_time >= '20:00'
-          AND end_time IS NOT NULL AND end_time != ''
-          AND end_time <= '08:00'
-          AND end_time < show_time
-    """
-    params: list = []
-    if category and category not in ("all", "free"):
-        clause += " AND category = ?"
-        params.append(category)
-    if now_time is not None:
-        if now_time >= "08:00":
-            # All overnight events have already ended — return nothing
-            return "", []
-        clause += " AND end_time > ?"
-        params.append(now_time)
-    return clause, params
 
 
 def get_events_by_date_and_category(target_date: datetime, category: str | None = None):
@@ -559,88 +513,49 @@ def get_events_by_date_and_category(target_date: datetime, category: str | None 
     with get_db_connection() as conn:
         cursor = conn.cursor()
 
-        # Вспомогательная функция для фильтра времени
-        def add_time_filter(query, params, date_str, now_time):
-            """Добавляет условие для фильтрации прошедших сеансов."""
-            venue_open = now_time < VENUE_CLOSE_TIME
-            if venue_open:
-                time_filter = """
-                    AND (
-                        show_time = '' OR show_time IS NULL
-                        OR (
-                            (end_time != '' AND end_time IS NOT NULL AND (end_time > ? OR end_time < show_time))
-                            OR
-                            ((end_time = '' OR end_time IS NULL) AND show_time > ?)
-                        )
-                    )
-                """
-            else:
-                time_filter = """
-                    AND (
-                        (end_time != '' AND end_time IS NOT NULL AND (end_time > ? OR end_time < show_time))
-                        OR
-                        ((end_time = '' OR end_time IS NULL) AND show_time != '' AND show_time IS NOT NULL AND show_time > ?)
-                    )
-                """
-            query += time_filter
-            params.append(now_time)  # для end_time
-            params.append(now_time)  # для show_time
-            return query, params
-        
+        SELECT = """SELECT id, title, details, description, event_date, show_time, end_time,
+                           place, location, price, category, source_url, source_name, is_kids
+                    FROM events"""
+        overnight_now = now_time if date_str == today_str else None
+
         # ОСОБЫЙ СЛУЧАЙ: категория "free" показывает ВСЕ бесплатные события
         if category == "free":
-            query = """
-                SELECT id, title, details, description, event_date, show_time, end_time,
-                       place, location, price, category, source_url
-                FROM events
-                WHERE event_date = ? AND price = 'Бесплатно'
-            """
+            query = f"{SELECT} WHERE event_date = ? AND price = 'Бесплатно'"
             params = [date_str]
-
-            # Для сегодня — исключаем прошедшие сеансы
             if date_str == today_str:
-                time_filter, time_params = _build_time_filter(date_str, today_str, now_time)
-                if time_filter:
-                    query += " AND " + time_filter
-                params.extend(time_params)
+                tf, tp = _build_time_filter(date_str, today_str, now_time)
+                if tf:
+                    query += " AND " + tf
+                params.extend(tp)
 
-            # Midnight-crossing free events from previous day
-            prev_date_str = (target_date - timedelta(days=1)).strftime("%Y-%m-%d")
-            overnight_now = now_time if date_str == today_str else None
-            overnight_sql, overnight_params = _overnight_clause("free", overnight_now)
-            if overnight_sql:
-                query = f"{query} UNION {overnight_sql}"
-                params = params + [prev_date_str] + overnight_params
+        # ОСОБЫЙ СЛУЧАЙ: категория "kids" — все события с is_kids=1
+        elif category == "kids":
+            query = f"{SELECT} WHERE event_date = ? AND is_kids = 1"
+            params = [date_str]
+            if date_str == today_str:
+                tf, tp = _build_time_filter(date_str, today_str, now_time)
+                if tf:
+                    query += " AND " + tf
+                params.extend(tp)
 
-            query += " ORDER BY show_time, title"
-            cursor.execute(query, params)
-            return cursor.fetchall()
-        
-        # Обычная категория (не free)
-        query = """
-            SELECT id, title, details, description, event_date, show_time, end_time,
-                   place, location, price, category, source_url
-            FROM events WHERE event_date = ?
-        """
-        params = [date_str]
+        # Обычная категория (не free/kids)
+        else:
+            query = f"{SELECT} WHERE event_date = ?"
+            params = [date_str]
+            if category and category != "all":
+                query += " AND category = ?"
+                params.append(category)
+            if date_str == today_str:
+                tf, tp = _build_time_filter(date_str, today_str, now_time)
+                if tf:
+                    query += " AND " + tf
+                params.extend(tp)
 
-        if category and category != "all":
-            query += " AND category = ?"
-            params.append(category)
-
-        if date_str == today_str:
-            time_filter, time_params = _build_time_filter(date_str, today_str, now_time)
-            if time_filter:
-                query += " AND " + time_filter
-            params.extend(time_params)
-
-        # Midnight-crossing events: stored under D-1 but visible on D until end_time
-        prev_date_str = (target_date - timedelta(days=1)).strftime("%Y-%m-%d")
-        overnight_now = now_time if date_str == today_str else None
-        overnight_sql, overnight_params = _overnight_clause(category, overnight_now)
-        if overnight_sql:
+        overnight = _build_overnight_union(date_str, overnight_now, category)
+        if overnight:
+            overnight_sql, overnight_params = overnight
             query = f"{query} UNION {overnight_sql}"
-            params = params + [prev_date_str] + overnight_params
+            params = params + overnight_params
 
         query += " ORDER BY show_time, title"
         cursor.execute(query, params)
@@ -687,19 +602,31 @@ def get_upcoming_events(limit: int = 20, category: str | None = None):
         if category == "free":
             cursor.execute(f"""
                 SELECT id, title, details, description, event_date, show_time, end_time,
-                       place, location, price, category, source_url
-                FROM events 
+                       place, location, price, category, source_url, is_kids
+                FROM events
                 WHERE event_date >= ? AND price = 'Бесплатно'
                 {time_filter}
                 ORDER BY event_date, show_time, title LIMIT ?
             """, (today, today, now_time, now_time, limit * SEARCH_MULTIPLIER))
             return cursor.fetchall()
-        
-        # Обычная категория (не free)
+
+        # ОСОБЫЙ СЛУЧАЙ: категория "kids" — все события с is_kids=1
+        if category == "kids":
+            cursor.execute(f"""
+                SELECT id, title, details, description, event_date, show_time, end_time,
+                       place, location, price, category, source_url, is_kids
+                FROM events
+                WHERE event_date >= ? AND is_kids = 1
+                {time_filter}
+                ORDER BY event_date, show_time, title LIMIT ?
+            """, (today, today, now_time, now_time, limit * SEARCH_MULTIPLIER))
+            return cursor.fetchall()
+
+        # Обычная категория (не free/kids)
         if category and category != "all":
             cursor.execute(f"""
                 SELECT id, title, details, description, event_date, show_time, end_time,
-                       place, location, price, category, source_url
+                       place, location, price, category, source_url, is_kids
                 FROM events WHERE event_date >= ? AND category = ?
                 {time_filter}
                 ORDER BY event_date, show_time, title LIMIT ?
@@ -707,7 +634,7 @@ def get_upcoming_events(limit: int = 20, category: str | None = None):
         else:
             cursor.execute(f"""
                 SELECT id, title, details, description, event_date, show_time, end_time,
-                       place, location, price, category, source_url
+                       place, location, price, category, source_url, is_kids
                 FROM events WHERE event_date >= ?
                 {time_filter}
                 ORDER BY event_date, show_time, title LIMIT ?
@@ -735,25 +662,36 @@ def get_weekend_events(category: str | None = None):
         if category == "free":
             cursor.execute("""
                 SELECT id, title, details, description, event_date, show_time, end_time,
-                       place, location, price, category, source_url
-                FROM events 
+                       place, location, price, category, source_url, is_kids
+                FROM events
                 WHERE event_date IN (?, ?) AND price = 'Бесплатно'
                 ORDER BY event_date, show_time, title
             """, (saturday_str, sunday_str))
             return cursor.fetchall(), saturday, sunday
-        
-        # Обычная категория (не free)
+
+        # ОСОБЫЙ СЛУЧАЙ: категория "kids" — все события с is_kids=1
+        if category == "kids":
+            cursor.execute("""
+                SELECT id, title, details, description, event_date, show_time, end_time,
+                       place, location, price, category, source_url, is_kids
+                FROM events
+                WHERE event_date IN (?, ?) AND is_kids = 1
+                ORDER BY event_date, show_time, title
+            """, (saturday_str, sunday_str))
+            return cursor.fetchall(), saturday, sunday
+
+        # Обычная категория (не free/kids)
         if category and category != "all":
             cursor.execute("""
                 SELECT id, title, details, description, event_date, show_time, end_time,
-                       place, location, price, category, source_url
+                       place, location, price, category, source_url, is_kids
                 FROM events WHERE event_date IN (?, ?) AND category = ?
                 ORDER BY event_date, show_time, title
             """, (saturday_str, sunday_str, category))
         else:
             cursor.execute("""
                 SELECT id, title, details, description, event_date, show_time, end_time,
-                       place, location, price, category, source_url
+                       place, location, price, category, source_url, is_kids
                 FROM events WHERE event_date IN (?, ?)
                 ORDER BY event_date, show_time, title
             """, (saturday_str, sunday_str))
@@ -762,9 +700,11 @@ def get_weekend_events(category: str | None = None):
 
 
 def filter_events_by_category(events, category: str):
-    """Фильтрует события по категории. Для free фильтрует по цене."""
+    """Фильтрует события по категории. Для free/kids — особая обработка."""
     if category == "free":
         return [e for e in events if e.get("price") == "Бесплатно"]
+    if category == "kids":
+        return [e for e in events if e.get("is_kids") or e.get("category") == "kids"]
     return [e for e in events if e.get("category") == category]
 
 
@@ -2289,7 +2229,16 @@ def _format_daytime_report(report: dict, elapsed: float) -> str:
             parse_results = src.get("parse_results", [])
             ok = parse_results[0].get("ok") if parse_results else False
             icon = "✅" if ok else "❌"
-            lines.append(f"{icon} *{name}*: бесплатные события за {elapsed_src}с")
+            free_updated = src.get("free_updated", 0)
+            lines.append(f"{icon} *{name}*: бесплатные события за {elapsed_src}с (обновлено цен: {free_updated})")
+
+        elif action == "kids_pass":
+            parse_results = src.get("parse_results", [])
+            ok = parse_results[0].get("ok") if parse_results else False
+            icon = "✅" if ok else "❌"
+            kids_marked = src.get("kids_marked", 0)
+            kids_added  = src.get("kids_added", 0)
+            lines.append(f"{icon} *{name}*: детские события за {elapsed_src}с (is_kids={kids_marked}, уникальных: {kids_added})")
 
         elif action == "fallback_full_parse":
             parse_results = src.get("parse_results", [])
@@ -2366,18 +2315,17 @@ CATEGORY_KEYBOARD = InlineKeyboardMarkup([
      InlineKeyboardButton("🎵 Концерт", callback_data="sc_concert")],
     [InlineKeyboardButton("🎭 Театр", callback_data="sc_theater"),
      InlineKeyboardButton("🖼️ Выставка", callback_data="sc_exhibition")],
-    [InlineKeyboardButton("🧸 Детям", callback_data="sc_kids"),
+    [InlineKeyboardButton("🎪 Фесты", callback_data="sc_fest"),
      InlineKeyboardButton("⚽ Спорт", callback_data="sc_sport")],
     [InlineKeyboardButton("🌟 Движ", callback_data="sc_party"),
-     InlineKeyboardButton("🆓 Бесплатно", callback_data="sc_free")],
+     InlineKeyboardButton("📌 Другое", callback_data="sc_other")],
     [InlineKeyboardButton("🗺️ Экскурсия", callback_data="sc_excursion"),
      InlineKeyboardButton("🛍️ Маркет", callback_data="sc_market")],
     [InlineKeyboardButton("🎨 Мастер-класс", callback_data="sc_masterclass"),
      InlineKeyboardButton("🎲 Настолки", callback_data="sc_boardgames")],
     [InlineKeyboardButton("📺 Трансляция", callback_data="sc_broadcast"),
      InlineKeyboardButton("📚 Обучение", callback_data="sc_education")],
-    [InlineKeyboardButton("❓ Квизы", callback_data="sc_quiz"),
-     InlineKeyboardButton("📌 Другое", callback_data="sc_other")],
+    [InlineKeyboardButton("❓ Квизы", callback_data="sc_quiz")],
 ])
 
 
@@ -2432,6 +2380,10 @@ def build_fields_keyboard(data: dict, mode: str = "submit") -> InlineKeyboardMar
     if row:
         rows.append(row)
     if mode == "submit":
+        # Чекбокс "Для детей"
+        is_kids = data.get("is_kids", False)
+        kids_label = "🧸 Для детей: ДА ✅" if is_kids else "🧸 Для детей: НЕТ"
+        rows.append([InlineKeyboardButton(kids_label, callback_data="submit_toggle_kids")])
         # Кнопка промо-публикации (тоггл)
         is_promo = data.get("is_promo", False)
         promo_label = "📣 Промо: ВКЛ ✅" if is_promo else "📣 Промо: ВЫКЛ"
@@ -2631,8 +2583,8 @@ def save_pending_event(user_id, username, first_name, data: dict) -> int:
         cursor.execute("""
             INSERT INTO pending_events
               (user_id, username, first_name, title, event_date, show_time, end_time,
-               place, address, category, details, description, price, source_url, is_promo, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               place, address, category, details, description, price, source_url, is_promo, is_kids, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             user_id, username, first_name,
             data.get("title", ""),
@@ -2647,6 +2599,7 @@ def save_pending_event(user_id, username, first_name, data: dict) -> int:
             data.get("price", ""),
             data.get("source_url", ""),
             1 if data.get("is_promo") else 0,
+            1 if data.get("is_kids") else 0,
             datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"),
         ))
         conn.commit()
@@ -2758,6 +2711,9 @@ def approve_pending_event(pending_id: int) -> tuple[bool, dict | None]:
         row = cursor.fetchone()
         if not row:
             return False, None
+        # Guard against double-approval (double-click race condition)
+        if row["status"] == "approved":
+            return False, None
 
         _addr = (row["address"] or "") if "address" in row.keys() else ""
         try:
@@ -2794,11 +2750,15 @@ def approve_pending_event(pending_id: int) -> tuple[bool, dict | None]:
                 _end_time = row["end_time"] or ""
             except Exception:
                 _end_time = ""
+            try:
+                _is_kids = int(row["is_kids"] or 0)
+            except Exception:
+                _is_kids = 0
             cursor.execute("""
                 INSERT INTO events
                   (title, details, description, event_date, show_time, end_time,
-                   place, location, price, category, source_name, source_url)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                   place, location, price, category, source_name, source_url, is_kids)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
             """, (
                 row["title"],
                 _details,
@@ -2812,6 +2772,7 @@ def approve_pending_event(pending_id: int) -> tuple[bool, dict | None]:
                 row["category"] or "other",
                 "user_submitted",
                 row["source_url"] or "",
+                _is_kids,
             ))
 
         cursor.execute("UPDATE pending_events SET status = 'approved' WHERE id = ?", (pending_id,))
@@ -3426,7 +3387,12 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
     amount = update.message.successful_payment.total_amount
     log_user_action(user.id, user.username, user.first_name, "donate_success", str(amount))
     await update.message.reply_text(
-        f"✅ **Спасибо за поддержку!**\n\nВы отправили {amount} ⭐ Stars.\nВаша помощь очень ценится! 🙏",
+        f"*{user.first_name}, спасибо от всего сердца!* 🙏\n\n"
+        f"Ваши {amount} ⭐ Stars — это не просто поддержка, это сигнал что проект нужен и важен.\n\n"
+        "MinskDvizh будет развиваться: больше источников, лучше поиск, умнее рекомендации. "
+        "Мы хотим, чтобы ни одно интересное событие в Минске не прошло мимо вас.\n\n"
+        "Искренне надеемся, что бот станет для вас по-настоящему полезным спутником в городе 🌆\n\n"
+        "— Автор проекта",
         parse_mode=ParseMode.MARKDOWN,
     )
     await context.bot.send_message(
@@ -3607,7 +3573,9 @@ async def inline_query_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                     params.append(today)
                     where.append(inline_time_clause)
                     params += inline_time_params
-                if cat_filter:
+                if cat_filter == "kids":
+                    where.append("is_kids = 1")
+                elif cat_filter:
                     where.append("category = ?")
                     params.append(cat_filter)
             if text_filter:
@@ -4159,6 +4127,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # Подтверждение/отмена отправки события
+        if data == "submit_toggle_kids":
+            submit_data = context.user_data.get("submit", {})
+            submit_data["is_kids"] = not submit_data.get("is_kids", False)
+            context.user_data["submit"] = submit_data
+            await query.answer(
+                "🧸 Отмечено: для детей!" if submit_data["is_kids"] else "Отметка «для детей» снята",
+                show_alert=False
+            )
+            await query.edit_message_reply_markup(
+                reply_markup=build_fields_keyboard(submit_data, mode="submit")
+            )
+            return
+
         if data == "submit_toggle_promo":
             submit_data = context.user_data.get("submit", {})
             submit_data["is_promo"] = not submit_data.get("is_promo", False)
@@ -4212,6 +4193,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             log_user_action(user.id, user.username, user.first_name, "submit_event_sent", data_form.get("title"))
             preview = format_pending_preview(data_form, user)
+            if data_form.get("is_kids"):
+                preview += "\n\n🧸 <b>Отмечено: событие для детей</b>"
             if data_form.get("is_promo"):
                 preview += "\n\n📣 <b>Пользователь запросил промо-публикацию в канале</b>"
             admin_keyboard = InlineKeyboardMarkup([

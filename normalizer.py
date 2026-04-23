@@ -529,6 +529,82 @@ def mark_free_duplicates(relax_events: list, free_events: list) -> list:
     return result
 
 
+def apply_kids_pass(kids_events: list, conn) -> dict:
+    """
+    Обрабатывает события из relax.by/kids/:
+    - Сбрасывает is_kids=0 для всех событий в БД (полный ресcan).
+    - Для каждого kids-события ищет совпадение в БД по source_url или (title, event_date).
+      Нашли → UPDATE is_kids=1.
+      Не нашли → INSERT как уникальное детское событие (category='kids', is_kids=1).
+    Returns: {'marked': int, 'added': int}
+    """
+    # Always clean up stale state regardless of whether kids_events is empty:
+    # - remove synthetic rows inserted by a previous kids pass (unique circus/zoo events)
+    # - reset is_kids flag on all remaining events
+    conn.execute("DELETE FROM events WHERE source_name = 'relax.by' AND category = 'kids'")
+    conn.execute("UPDATE events SET is_kids = 0 WHERE source_name != 'user_submitted'")
+
+    if not kids_events:
+        conn.commit()
+        return {"marked": 0, "added": 0}
+
+    marked = 0
+    added = 0
+
+    for ev in kids_events:
+        source_url = (ev.get("source_url") or "").strip()
+        title = (ev.get("title") or "").strip()
+        event_date = (ev.get("event_date") or "").strip()
+        place = (ev.get("place") or "").strip()
+
+        found_ids = []
+
+        if source_url:
+            rows = conn.execute(
+                "SELECT id FROM events WHERE source_url = ?", (source_url,)
+            ).fetchall()
+            found_ids = [r[0] for r in rows]
+
+        if not found_ids and title and event_date:
+            rows = conn.execute(
+                "SELECT id FROM events WHERE LOWER(title) = ? AND event_date = ?",
+                (title.lower(), event_date)
+            ).fetchall()
+            found_ids = [r[0] for r in rows]
+
+        if found_ids:
+            placeholders = ",".join("?" * len(found_ids))
+            conn.execute(
+                f"UPDATE events SET is_kids = 1 WHERE id IN ({placeholders})",
+                found_ids,
+            )
+            marked += len(found_ids)
+        elif title and event_date:
+            conn.execute(
+                """INSERT INTO events
+                   (title, details, description, event_date, show_time, end_time,
+                    place, location, price, category, source_url, source_name, is_kids)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'kids', ?, 'relax.by', 1)""",
+                (
+                    title,
+                    ev.get("details") or "",
+                    ev.get("description") or "",
+                    event_date,
+                    ev.get("show_time") or "",
+                    ev.get("end_time") or "",
+                    place,
+                    ev.get("location") or "Минск",
+                    ev.get("price") or "",
+                    source_url,
+                ),
+            )
+            added += 1
+
+    conn.commit()
+    logger.info(f"🧸 Kids pass: is_kids=1 проставлено для {marked} событий, добавлено уникальных: {added}")
+    return {"marked": marked, "added": added}
+
+
 def is_likely_free(event: dict) -> bool:
     """
     Проверяет, является ли событие вероятно бесплатным.
