@@ -417,46 +417,27 @@ def get_events_count_by_category() -> dict:
     with get_db_connection() as conn:
         cursor = conn.cursor()
         
-        # Обычные категории (все события, включая бесплатные)
-        cursor.execute("""
-            SELECT category, COUNT(*) FROM (
-                SELECT DISTINCT category, title, COALESCE(place, '') as place 
-                FROM events
-                WHERE category IS NOT NULL AND category != '' AND category != 'cinema'
-                AND event_date >= ?
-            ) GROUP BY category
-        """, (today,))
+        # Обычные категории — простой COUNT(*) как в API
+        cursor.execute(
+            "SELECT category, COUNT(*) FROM events WHERE event_date >= ? GROUP BY category",
+            (today,),
+        )
         result = {row[0]: row[1] for row in cursor.fetchall()}
-        
-        # Кино (отдельная логика)
-        cursor.execute("""
-            SELECT COUNT(*) FROM (
-                SELECT DISTINCT title, event_date FROM events
-                WHERE category = 'cinema' AND event_date >= ?
-            )
-        """, (today,))
-        result["cinema"] = cursor.fetchone()[0]
-        
-        # FREE - ВСЕ бесплатные события (независимо от категории)
-        cursor.execute("""
-            SELECT COUNT(*) FROM (
-                SELECT DISTINCT title, COALESCE(place, ''), event_date
-                FROM events
-                WHERE event_date >= ? AND price = 'Бесплатно'
-            )
-        """, (today,))
+
+        # FREE — все бесплатные события (независимо от категории)
+        cursor.execute(
+            "SELECT COUNT(*) FROM events WHERE event_date >= ? AND price = 'Бесплатно'",
+            (today,),
+        )
         result["free"] = cursor.fetchone()[0]
 
-        # KIDS - все события с is_kids=1 (независимо от категории)
-        cursor.execute("""
-            SELECT COUNT(*) FROM (
-                SELECT DISTINCT title, COALESCE(place, ''), event_date
-                FROM events
-                WHERE event_date >= ? AND is_kids = 1
-            )
-        """, (today,))
+        # KIDS — все события с is_kids=1 (независимо от категории)
+        cursor.execute(
+            "SELECT COUNT(*) FROM events WHERE event_date >= ? AND is_kids = 1",
+            (today,),
+        )
         result["kids"] = cursor.fetchone()[0]
-        
+
         return result
 
 
