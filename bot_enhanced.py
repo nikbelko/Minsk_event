@@ -2047,16 +2047,24 @@ def _format_parser_report(report: dict, elapsed: float | None = None) -> str:
         "",
     ]
 
+    kids_stats = report.get("kids_stats", {})
+
     # Каждый парсер — отдельный блок
     for p in report.get("parsers", []):
         status = "✅" if p["ok"] else "❌"
         lines.append(f"{status} *{p['name']}*")
         if p["ok"]:
+            is_kids_parser = "kids" in p["name"].lower() or "детям" in p["name"].lower()
             for r in p.get("results", []):
                 parts = r.split(":")
                 if len(parts) == 4:
                     label, found, saved = parts[1], parts[2], parts[3]
-                    lines.append(f"   └ {label}: найдено {found}, добавлено {saved}")
+                    if is_kids_parser and kids_stats:
+                        marked = kids_stats.get("marked", 0)
+                        added  = kids_stats.get("added", 0)
+                        lines.append(f"   └ {label}: найдено {found}, is\\_kids={marked}, уникальных: {added}")
+                    else:
+                        lines.append(f"   └ {label}: найдено {found}, добавлено {saved}")
         else:
             lines.append("   └ завершился с ошибкой")
 

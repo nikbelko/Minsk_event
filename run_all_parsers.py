@@ -336,13 +336,14 @@ def main():
     # Kids pass — проставляем is_kids=1 и сохраняем уникальные kids-события
     logger.info("=" * 40)
     logger.info("🧸 ОБРАБОТКА KIDS (is_kids маркер)")
+    kids_stats: dict = {"marked": 0, "added": 0}
     if kids_parser_ok:
         # Вызываем apply_kids_pass даже при пустом списке: функция очищает stale is_kids
         # и synthetic relax.by/kids строки, что нужно для корректного full rescan.
         try:
             with sqlite3.connect(DB_PATH) as conn:
-                stats = apply_kids_pass(kids_events, conn)
-            logger.info(f"🧸 is_kids=1: {stats['marked']} событий; добавлено уникальных: {stats['added']}")
+                kids_stats = apply_kids_pass(kids_events, conn)
+            logger.info(f"🧸 is_kids=1: {kids_stats['marked']} событий; добавлено уникальных: {kids_stats['added']}")
         except Exception as e:
             logger.error(f"❌ Ошибка kids pass: {e}")
     else:
@@ -362,6 +363,7 @@ def main():
         "success": success,
         "failed": failed,
         "duration": round(duration, 1),
+        "kids_stats": kids_stats,
         "parsers": [
             {
                 "name": name,
