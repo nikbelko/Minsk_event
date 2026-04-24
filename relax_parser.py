@@ -601,8 +601,10 @@ class RelaxKinoParser(RelaxBaseParser):
 
                     for seance in item.find_all("div", class_="schedule__seance"):
                         # время — <a> для активных сеансов, <span> для закрытых (buy-timeout)
-                        time_elem = seance.find("a", class_="schedule__seance-time") or                                     seance.find("span", class_="schedule__seance-time")
-                        show_time = time_elem.get_text(strip=True) if time_elem else ""
+                        time_elem = seance.find("a", class_="schedule__seance-time") or \
+                                    seance.find("span", class_="schedule__seance-time")
+                        raw_time  = time_elem.get_text(strip=True) if time_elem else ""
+                        show_time = raw_time if re.match(r"^\d{1,2}:\d{2}$", raw_time) else ""
                         # цена — сначала в data-summ, иначе в span
                         price_span = seance.find("span", class_="seance-price")
                         if price_span:
