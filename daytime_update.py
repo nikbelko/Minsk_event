@@ -873,7 +873,7 @@ def main():
             log.info("[relax.by:kids] running kids-pass (is_kids marker)")
             kids_result = run_kids_pass()
             summary["sources"].append({
-                "name":          "relax.by:kids",
+                "name":          "kids_pass",
                 "action":        "kids_pass",
                 "parse_results": [kids_result],
                 "elapsed":       kids_result["elapsed"],

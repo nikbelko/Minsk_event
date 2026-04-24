@@ -554,7 +554,7 @@ def apply_kids_pass(kids_events: list, conn) -> dict:
     # не добавлял остальные тайм-слоты).
     existing_ids: set = {r[0] for r in conn.execute("SELECT id FROM events").fetchall()}
 
-    marked = 0
+    matched = 0  # уникальных kids-событий найдено в БД (не строк)
     added = 0
 
     for ev in kids_events:
@@ -584,7 +584,7 @@ def apply_kids_pass(kids_events: list, conn) -> dict:
                 f"UPDATE events SET is_kids = 1 WHERE id IN ({placeholders})",
                 found_ids,
             )
-            marked += len(found_ids)
+            matched += 1  # считаем уникальные kids-события, а не строки в БД
         elif title and event_date:
             conn.execute(
                 """INSERT INTO events
@@ -607,8 +607,8 @@ def apply_kids_pass(kids_events: list, conn) -> dict:
             added += 1
 
     conn.commit()
-    logger.info(f"🧸 Kids pass: is_kids=1 проставлено для {marked} событий, добавлено уникальных: {added}")
-    return {"marked": marked, "added": added}
+    logger.info(f"🧸 Kids pass: is_kids=1 проставлено для {matched} событий, добавлено уникальных: {added}")
+    return {"marked": matched, "added": added}
 
 
 def is_likely_free(event: dict) -> bool:
