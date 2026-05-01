@@ -536,10 +536,11 @@ def get_events_by_date_and_category(target_date: datetime, category: str | None 
         overnight = _build_overnight_union(date_str, overnight_now, category)
         if overnight:
             overnight_sql, overnight_params = overnight
-            query = f"{query} UNION {overnight_sql}"
+            query = f"({query} ORDER BY {TIME_ORDER_SQL}, title) UNION ({overnight_sql} ORDER BY {TIME_ORDER_SQL}, title)"
             params = params + overnight_params
+        else:
+            query += f" ORDER BY {TIME_ORDER_SQL}, title"
 
-        query += f" ORDER BY {TIME_ORDER_SQL}, title"
         cursor.execute(query, params)
         return cursor.fetchall()
 
@@ -1599,13 +1600,7 @@ async def show_pending_list(update_or_query, context: ContextTypes.DEFAULT_TYPE)
     lines = [f"📋 <b>На модерации: {len(rows)} событий</b>\n"]
     keyboard = []
     for r in rows:
-        try:
-            ed = r["event_date"] or ""
-            d = datetime.strptime(ed.split("|")[0].strip(), "%Y-%m-%d").strftime("%d.%m.%Y")
-            if "|" in ed:
-                d += "–" + datetime.strptime(ed.split("|")[1].strip(), "%Y-%m-%d").strftime("%d.%m.%Y")
-        except Exception:
-            d = r["event_date"] or "?"
+        d = format_event_dates_for_display(r["event_date"] or "")
         cat_emoji = CATEGORY_EMOJI.get(r["category"] or "", "📌")
         mark = "🆕" if r["status"] == "pending" else "✏️"
         uname = f"@{r['username']}" if r["username"] else (r["first_name"] or "?")
@@ -2419,19 +2414,7 @@ def format_promo_post(data: dict) -> str:
 
     # Дата
     ed = data.get("event_date", "")
-    if "|" in str(ed):
-        parts = ed.split("|", 1)
-        try:
-            d1 = datetime.strptime(parts[0].strip(), "%Y-%m-%d").strftime("%d.%m.%Y")
-            d2 = datetime.strptime(parts[1].strip(), "%Y-%m-%d").strftime("%d.%m.%Y")
-            date_str = f"{d1} — {d2}"
-        except Exception:
-            date_str = ed
-    else:
-        try:
-            date_str = datetime.strptime(ed, "%Y-%m-%d").strftime("%d.%m.%Y")
-        except Exception:
-            date_str = ed
+    date_str = format_event_dates_for_display(ed)
 
     # Нормализуем цену (на всякий случай, если вдруг пришло сырое)
     price_raw = data.get("price", "")
@@ -2635,11 +2618,12 @@ def check_duplicate_event(title: str, event_date: str, place: str) -> dict | Non
     t_norm  = _norm_title(title)
     p_norm  = _norm_place(place)
 
-    # Для периода берём начальную дату
-    if "|" in (event_date or ""):
-        dates = [event_date.split("|")[0].strip()]
-    else:
-        dates = [event_date] if event_date else []
+    dates = []
+    for part in [p.strip() for p in (event_date or "").split(",") if p.strip()]:
+        if "|" in part:
+            dates.append(part.split("|")[0].strip())
+        else:
+            dates.append(part)
 
     if not dates or not t_norm:
         return None
@@ -2737,19 +2721,7 @@ def approve_pending_event(pending_id: int) -> tuple[bool, dict | None]:
         price_normalized = normalize_price(row["price"] or "")
             
         event_date_raw = row["event_date"] or ""
-        if "|" in event_date_raw:
-            parts = event_date_raw.split("|", 1)
-            try:
-                d_from = _date.fromisoformat(parts[0].strip())
-                d_to   = _date.fromisoformat(parts[1].strip())
-                dates = [d_from + _td(days=i) for i in range((d_to - d_from).days + 1)]
-            except Exception:
-                dates = [_date.today()]
-        else:
-            try:
-                dates = [_date.fromisoformat(event_date_raw)]
-            except Exception:
-                dates = []
+        dates = expand_event_dates(event_date_raw)
 
         for d in dates:
             try:
@@ -2798,6 +2770,60 @@ def reject_pending_event(pending_id: int):
         conn.commit()
 
 
+def format_event_dates_for_display(event_date_raw: str) -> str:
+    """Форматирует ISO-дату, период YYYY-MM-DD|YYYY-MM-DD или список через запятую."""
+    raw = (event_date_raw or "").strip()
+    if not raw:
+        return "?"
+
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    if not parts:
+        parts = [raw]
+
+    formatted_parts = []
+    for part in parts:
+        if "|" in part:
+            d1_raw, d2_raw = part.split("|", 1)
+            try:
+                d1 = datetime.strptime(d1_raw.strip(), "%Y-%m-%d").strftime("%d.%m.%Y")
+                d2 = datetime.strptime(d2_raw.strip(), "%Y-%m-%d").strftime("%d.%m.%Y")
+                formatted_parts.append(f"{d1} — {d2}")
+            except Exception:
+                formatted_parts.append(part)
+        else:
+            try:
+                formatted_parts.append(datetime.strptime(part, "%Y-%m-%d").strftime("%d.%m.%Y"))
+            except Exception:
+                formatted_parts.append(part)
+    return ", ".join(formatted_parts)
+
+
+def expand_event_dates(event_date_raw: str) -> list:
+    """Разворачивает дату/период/список дат pending-события в список concrete dates."""
+    from datetime import date as _date, timedelta as _td
+
+    raw = (event_date_raw or "").strip()
+    if not raw:
+        return []
+
+    dates: list[_date] = []
+    for part in [p.strip() for p in raw.split(",") if p.strip()]:
+        if "|" in part:
+            d_from_raw, d_to_raw = part.split("|", 1)
+            try:
+                d_from = _date.fromisoformat(d_from_raw.strip())
+                d_to = _date.fromisoformat(d_to_raw.strip())
+                dates.extend(d_from + _td(days=i) for i in range((d_to - d_from).days + 1))
+            except Exception:
+                continue
+        else:
+            try:
+                dates.append(_date.fromisoformat(part))
+            except Exception:
+                continue
+    return dates
+
+
 def format_pending_preview(data: dict, user=None) -> str:
     import html as _html
     cat_emoji = CATEGORY_EMOJI.get(data.get("category", "other"), "📌")
@@ -2809,20 +2835,7 @@ def format_pending_preview(data: dict, user=None) -> str:
     lines.append("")
     lines.append(f"{cat_emoji} <b>{_html.escape(data.get('title', '—'))}</b>")
     if data.get("event_date"):
-        ed = data["event_date"]
-        if "|" in str(ed):
-            parts = ed.split("|", 1)
-            try:
-                d1 = datetime.strptime(parts[0].strip(), "%Y-%m-%d").strftime("%d.%m.%Y")
-                d2 = datetime.strptime(parts[1].strip(), "%Y-%m-%d").strftime("%d.%m.%Y")
-                d = f"{d1} — {d2}"
-            except Exception:
-                d = ed
-        else:
-            try:
-                d = datetime.strptime(ed, "%Y-%m-%d").strftime("%d.%m.%Y")
-            except Exception:
-                d = ed
+        d = format_event_dates_for_display(data["event_date"])
         line = f"📅 {d}"
         if data.get("show_time"):
             line += f" ⏰ {data['show_time']}"

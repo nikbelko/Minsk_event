@@ -506,6 +506,7 @@ class EventSubmit(BaseModel):
     category: str
     event_date: str
     event_date_to: Optional[str] = None
+    event_dates: Optional[list[str]] = None
     show_time: Optional[str] = ""
     end_time: Optional[str] = ""
     place: str
@@ -534,6 +535,38 @@ def _dates_in_range(date_from: str, date_to: str) -> list[str]:
     return result
 
 
+def _expand_submit_entries(entries: list[str]) -> list[str]:
+    """Разворачивает список ISO-дат/периодов в concrete ISO dates для duplicate checks."""
+    all_dates: list[str] = []
+    for entry in entries:
+        if "|" in entry:
+            date_from, date_to = entry.split("|", 1)
+            all_dates.extend(_dates_in_range(date_from.strip(), date_to.strip()))
+        else:
+            all_dates.append(entry.strip())
+    return all_dates
+
+
+def _format_submit_dates(entries: list[str]) -> str:
+    """Форматирует список ISO-дат/периодов для уведомления админу."""
+    parts = []
+    for entry in entries:
+        if "|" in entry:
+            date_from, date_to = entry.split("|", 1)
+            try:
+                d1 = datetime.strptime(date_from.strip(), "%Y-%m-%d").strftime("%d.%m.%Y")
+                d2 = datetime.strptime(date_to.strip(), "%Y-%m-%d").strftime("%d.%m.%Y")
+                parts.append(f"{d1} → {d2}")
+            except Exception:
+                parts.append(entry)
+        else:
+            try:
+                parts.append(datetime.strptime(entry, "%Y-%m-%d").strftime("%d.%m.%Y"))
+            except Exception:
+                parts.append(entry)
+    return ", ".join(parts)
+
+
 @app.post("/api/events/submit")
 def submit_event(event: EventSubmit):
     """Принимает событие → валидирует даты → проверяет дубликат → сохраняет в pending_events."""
@@ -543,36 +576,55 @@ def submit_event(event: EventSubmit):
     # ── Валидация дат ────────────────────────────────────────────────────────
     today_d = _date.today()
 
-    try:
-        d_from = _date.fromisoformat(event.event_date)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Некорректная дата начала. Формат: YYYY-MM-DD")
+    normalized_entries: list[str] = []
+    raw_entries = [e.strip() for e in (event.event_dates or []) if e and e.strip()]
+    if not raw_entries:
+        raw_entries = [event.event_date]
+        if event.event_date_to:
+            raw_entries = [f"{event.event_date}|{event.event_date_to}"]
 
-    if d_from < today_d:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Дата {d_from.strftime('%d.%m.%Y')} уже в прошлом. Сегодня {today_d.strftime('%d.%m.%Y')}"
-        )
+    if len(raw_entries) > 30:
+        raise HTTPException(status_code=400, detail="Слишком много отдельных дат. Максимум 30 записей за одно событие.")
 
-    if event.event_date_to:
-        try:
-            d_to = _date.fromisoformat(event.event_date_to)
-        except Exception:
-            raise HTTPException(status_code=400, detail="Некорректная дата окончания. Формат: YYYY-MM-DD")
-        if d_to < today_d:
-            raise HTTPException(status_code=400, detail=f"Дата окончания {d_to.strftime('%d.%m.%Y')} уже в прошлом.")
-        if d_to < d_from:
-            raise HTTPException(status_code=400, detail="Дата окончания раньше даты начала.")
-        if d_to == d_from:
-            raise HTTPException(status_code=400, detail="Для одного дня не указывайте дату окончания.")
-        if (d_to - d_from).days > 90:
-            raise HTTPException(status_code=400, detail="Период не может быть больше 90 дней.")
-        # НЕ создаем список дат, только проверяем период
-        is_period = True
-        event_date_value = f"{event.event_date}|{event.event_date_to}"
-    else:
-        is_period = False
-        event_date_value = event.event_date
+    for raw_entry in raw_entries:
+        if "|" in raw_entry:
+            try:
+                d_from_raw, d_to_raw = raw_entry.split("|", 1)
+                d_from = _date.fromisoformat(d_from_raw.strip())
+                d_to = _date.fromisoformat(d_to_raw.strip())
+            except Exception:
+                raise HTTPException(status_code=400, detail="Некорректный период. Формат: YYYY-MM-DD|YYYY-MM-DD")
+            if d_from < today_d:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Дата {d_from.strftime('%d.%m.%Y')} уже в прошлом. Сегодня {today_d.strftime('%d.%m.%Y')}"
+                )
+            if d_to < today_d:
+                raise HTTPException(status_code=400, detail=f"Дата окончания {d_to.strftime('%d.%m.%Y')} уже в прошлом.")
+            if d_to < d_from:
+                raise HTTPException(status_code=400, detail="Дата окончания раньше даты начала.")
+            if d_to == d_from:
+                raise HTTPException(status_code=400, detail="Для одного дня не указывайте дату окончания.")
+            if (d_to - d_from).days > 90:
+                raise HTTPException(status_code=400, detail="Период не может быть больше 90 дней.")
+            normalized_entries.append(f"{d_from.isoformat()}|{d_to.isoformat()}")
+        else:
+            try:
+                d_single = _date.fromisoformat(raw_entry)
+            except Exception:
+                raise HTTPException(status_code=400, detail="Некорректная дата. Формат: YYYY-MM-DD")
+            if d_single < today_d:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Дата {d_single.strftime('%d.%m.%Y')} уже в прошлом. Сегодня {today_d.strftime('%d.%m.%Y')}"
+                )
+            normalized_entries.append(d_single.isoformat())
+
+    # Дедупликация при сохранении порядка
+    normalized_entries = list(dict.fromkeys(normalized_entries))
+    event_date_value = ",".join(normalized_entries)
+    concrete_dates = list(dict.fromkeys(_expand_submit_entries(normalized_entries)))
+    is_period = any("|" in entry for entry in normalized_entries)
 
     # ── Проверка дубликата ───────────────────────────────────────────────────
     def _norm(s: str) -> str:
@@ -581,49 +633,44 @@ def submit_event(event: EventSubmit):
     t_norm = _norm(event.title)
     p_norm = _norm(event.place)
 
-    # Для проверки дубликата используем первую дату (если период)
-    check_date = event.event_date
-
     with get_db() as conn:
-        # Уровень 1: title + date + place
-        rows = conn.execute(
-            "SELECT id, title, event_date, place FROM events "
-            "WHERE event_date = ? AND LOWER(title) LIKE ? AND LOWER(COALESCE(place,'')) LIKE ?",
-            (check_date, f"%{t_norm[:20]}%", f"%{p_norm[:20]}%")
-        ).fetchall()
-        for r in rows:
-            if _norm(r["title"]) == t_norm and _norm(r["place"] or "") == p_norm:
-                try:
-                    from datetime import datetime as _dt
-                    d_fmt = _dt.strptime(r["event_date"], "%Y-%m-%d").strftime("%d.%m.%Y")
-                except Exception:
-                    d_fmt = r["event_date"]
-                raise HTTPException(status_code=409, detail=f"Событие уже есть в афише: «{r['title']}» {d_fmt}")
+        for check_date in concrete_dates:
+            rows = conn.execute(
+                "SELECT id, title, event_date, place FROM events "
+                "WHERE event_date = ? AND LOWER(title) LIKE ? AND LOWER(COALESCE(place,'')) LIKE ?",
+                (check_date, f"%{t_norm[:20]}%", f"%{p_norm[:20]}%")
+            ).fetchall()
+            for r in rows:
+                if _norm(r["title"]) == t_norm and _norm(r["place"] or "") == p_norm:
+                    try:
+                        from datetime import datetime as _dt
+                        d_fmt = _dt.strptime(r["event_date"], "%Y-%m-%d").strftime("%d.%m.%Y")
+                    except Exception:
+                        d_fmt = r["event_date"]
+                    raise HTTPException(status_code=409, detail=f"Событие уже есть в афише: «{r['title']}» {d_fmt}")
 
-        # Уровень 2: title + date (без места)
-        rows = conn.execute(
-            "SELECT id, title, event_date, place FROM events "
-            "WHERE event_date = ? AND LOWER(title) LIKE ?",
-            (check_date, f"%{t_norm[:20]}%")
-        ).fetchall()
-        for r in rows:
-            if _norm(r["title"]) == t_norm:
-                try:
-                    from datetime import datetime as _dt
-                    d_fmt = _dt.strptime(r["event_date"], "%Y-%m-%d").strftime("%d.%m.%Y")
-                except Exception:
-                    d_fmt = r["event_date"]
-                raise HTTPException(status_code=409, detail=f"Событие уже есть в афише: «{r['title']}» {d_fmt}")
+            rows = conn.execute(
+                "SELECT id, title, event_date, place FROM events "
+                "WHERE event_date = ? AND LOWER(title) LIKE ?",
+                (check_date, f"%{t_norm[:20]}%")
+            ).fetchall()
+            for r in rows:
+                if _norm(r["title"]) == t_norm:
+                    try:
+                        from datetime import datetime as _dt
+                        d_fmt = _dt.strptime(r["event_date"], "%Y-%m-%d").strftime("%d.%m.%Y")
+                    except Exception:
+                        d_fmt = r["event_date"]
+                    raise HTTPException(status_code=409, detail=f"Событие уже есть в афише: «{r['title']}» {d_fmt}")
 
-        # Проверяем pending_events
-        rows_p = conn.execute(
-            "SELECT id, title, event_date FROM pending_events "
-            "WHERE event_date LIKE ? AND status NOT IN ('rejected','approved') AND LOWER(title) LIKE ?",
-            (f"%{check_date}%", f"%{t_norm[:20]}%")
-        ).fetchall()
-        for r in rows_p:
-            if _norm(r["title"]) == t_norm:
-                raise HTTPException(status_code=409, detail=f"Событие уже отправлено на модерацию: «{r['title']}»")
+            rows_p = conn.execute(
+                "SELECT id, title, event_date FROM pending_events "
+                "WHERE event_date LIKE ? AND status NOT IN ('rejected','approved') AND LOWER(title) LIKE ?",
+                (f"%{check_date}%", f"%{t_norm[:20]}%")
+            ).fetchall()
+            for r in rows_p:
+                if _norm(r["title"]) == t_norm:
+                    raise HTTPException(status_code=409, detail=f"Событие уже отправлено на модерацию: «{r['title']}»")
 
     try:
         user_id   = event.tg_user_id or 0
@@ -671,11 +718,9 @@ def submit_event(event: EventSubmit):
         
         # Формируем информацию о датах для уведомления
         days_info = ""
-        date_info = event.event_date
         if is_period:
-            days_count = (d_to - d_from).days + 1
-            days_info = f" ({days_count} дней)"
-            date_info = f"{event.event_date} → {event.event_date_to}"
+            days_info = f" ({len(concrete_dates)} дней)"
+        date_info = _format_submit_dates(normalized_entries)
 
         # Формируем строку времени для уведомления
         time_str = ""
