@@ -500,49 +500,44 @@ def get_events_by_date_and_category(target_date: datetime, category: str | None 
                     FROM events"""
         overnight_now = now_time if date_str == today_str else None
 
-        # ОСОБЫЙ СЛУЧАЙ: категория "free" показывает ВСЕ бесплатные события
+        # Build WHERE clause
+        where_parts = ["event_date = ?"]
+        params = [date_str]
+
         if category == "free":
-            query = f"{SELECT} WHERE event_date = ? AND price = 'Бесплатно'"
-            params = [date_str]
-            if date_str == today_str:
-                tf, tp = _build_time_filter(date_str, today_str, now_time)
-                if tf:
-                    query += " AND " + tf
-                params.extend(tp)
-
-        # ОСОБЫЙ СЛУЧАЙ: категория "kids" — все события с is_kids=1
+            where_parts.append("price = 'Бесплатно'")
         elif category == "kids":
-            query = f"{SELECT} WHERE event_date = ? AND is_kids = 1"
-            params = [date_str]
-            if date_str == today_str:
-                tf, tp = _build_time_filter(date_str, today_str, now_time)
-                if tf:
-                    query += " AND " + tf
+            where_parts.append("is_kids = 1")
+        elif category and category != "all":
+            where_parts.append("category = ?")
+            params.append(category)
+
+        if date_str == today_str:
+            tf, tp = _build_time_filter(date_str, today_str, now_time)
+            if tf:
+                where_parts.append(tf)
                 params.extend(tp)
 
-        # Обычная категория (не free/kids)
-        else:
-            query = f"{SELECT} WHERE event_date = ?"
-            params = [date_str]
-            if category and category != "all":
-                query += " AND category = ?"
-                params.append(category)
-            if date_str == today_str:
-                tf, tp = _build_time_filter(date_str, today_str, now_time)
-                if tf:
-                    query += " AND " + tf
-                params.extend(tp)
+        query = f"{SELECT} WHERE {' AND '.join(where_parts)} ORDER BY {TIME_ORDER_SQL}, title"
+        cursor.execute(query, params)
+        events = cursor.fetchall()
 
+        # Add overnight events if applicable
         overnight = _build_overnight_union(date_str, overnight_now, category)
         if overnight:
             overnight_sql, overnight_params = overnight
-            query = f"({query} ORDER BY {TIME_ORDER_SQL}, title) UNION ({overnight_sql} ORDER BY {TIME_ORDER_SQL}, title)"
-            params = params + overnight_params
-        else:
-            query += f" ORDER BY {TIME_ORDER_SQL}, title"
+            cursor.execute(overnight_sql, overnight_params)
+            overnight_events = cursor.fetchall()
+            
+            # Merge and sort in Python
+            all_events = events + overnight_events
+            all_events = sorted(
+                all_events,
+                key=lambda e: (e['event_date'], _time_sort_value(e['show_time']), e['title'])
+            )
+            return all_events
 
-        cursor.execute(query, params)
-        return cursor.fetchall()
+        return events
 
 
 def get_upcoming_events(limit: int = 20, category: str | None = None):
