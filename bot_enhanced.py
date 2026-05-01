@@ -68,6 +68,7 @@ DONATION_CURRENCY = "XTR"  # Telegram Stars
 
 PER_PAGE = 10
 SEARCH_MULTIPLIER = 3
+TIME_ORDER_SQL = "CASE WHEN show_time = '' OR show_time IS NULL THEN 1 ELSE 0 END, show_time"
 
 CATEGORY_EMOJI = {
     "cinema": "🎬",
@@ -452,7 +453,7 @@ def search_events_by_title(query: str, limit: int = 20):
             FROM events
             WHERE (pylow(title) LIKE ? OR pylow(details) LIKE ? OR pylow(place) LIKE ?)
               AND event_date >= ?
-            ORDER BY event_date, show_time, title
+            ORDER BY event_date, CASE WHEN show_time = '' OR show_time IS NULL THEN 1 ELSE 0 END, show_time, title
             LIMIT ?
         """, (f"%{q}%", f"%{q}%", f"%{q}%", today, limit * SEARCH_MULTIPLIER))
         return cursor.fetchall()
@@ -476,7 +477,7 @@ def search_events_by_date_raw(date_str: str):
         cursor.execute("""
             SELECT id, title, details, description, event_date, show_time, end_time,
                    place, location, price, category, source_url
-            FROM events WHERE event_date = ? ORDER BY show_time, title LIMIT 300
+            FROM events WHERE event_date = ? ORDER BY CASE WHEN show_time = '' OR show_time IS NULL THEN 1 ELSE 0 END, show_time, title LIMIT 300
         """, (search_date,))
         events = cursor.fetchall()
     return (events, formatted_date, "найдены") if events else ([], formatted_date, "нет_событий")
@@ -538,7 +539,7 @@ def get_events_by_date_and_category(target_date: datetime, category: str | None 
             query = f"{query} UNION {overnight_sql}"
             params = params + overnight_params
 
-        query += " ORDER BY show_time, title"
+        query += f" ORDER BY {TIME_ORDER_SQL}, title"
         cursor.execute(query, params)
         return cursor.fetchall()
 
@@ -587,7 +588,7 @@ def get_upcoming_events(limit: int = 20, category: str | None = None):
                 FROM events
                 WHERE event_date >= ? AND price = 'Бесплатно'
                 {time_filter}
-                ORDER BY event_date, show_time, title LIMIT ?
+                ORDER BY event_date, {TIME_ORDER_SQL}, title LIMIT ?
             """, (today, today, now_time, now_time, limit * SEARCH_MULTIPLIER))
             return cursor.fetchall()
 
@@ -599,7 +600,7 @@ def get_upcoming_events(limit: int = 20, category: str | None = None):
                 FROM events
                 WHERE event_date >= ? AND is_kids = 1
                 {time_filter}
-                ORDER BY event_date, show_time, title LIMIT ?
+                ORDER BY event_date, {TIME_ORDER_SQL}, title LIMIT ?
             """, (today, today, now_time, now_time, limit * SEARCH_MULTIPLIER))
             return cursor.fetchall()
 
@@ -610,7 +611,7 @@ def get_upcoming_events(limit: int = 20, category: str | None = None):
                        place, location, price, category, source_url, is_kids
                 FROM events WHERE event_date >= ? AND category = ?
                 {time_filter}
-                ORDER BY event_date, show_time, title LIMIT ?
+                ORDER BY event_date, {TIME_ORDER_SQL}, title LIMIT ?
             """, (today, category, today, now_time, now_time, limit * SEARCH_MULTIPLIER))
         else:
             cursor.execute(f"""
@@ -618,7 +619,7 @@ def get_upcoming_events(limit: int = 20, category: str | None = None):
                        place, location, price, category, source_url, is_kids
                 FROM events WHERE event_date >= ?
                 {time_filter}
-                ORDER BY event_date, show_time, title LIMIT ?
+                ORDER BY event_date, {TIME_ORDER_SQL}, title LIMIT ?
             """, (today, today, now_time, now_time, limit * SEARCH_MULTIPLIER))
         
         return cursor.fetchall()
@@ -646,7 +647,7 @@ def get_weekend_events(category: str | None = None):
                        place, location, price, category, source_url, is_kids
                 FROM events
                 WHERE event_date IN (?, ?) AND price = 'Бесплатно'
-                ORDER BY event_date, show_time, title
+                ORDER BY event_date, {TIME_ORDER_SQL}, title
             """, (saturday_str, sunday_str))
             return cursor.fetchall(), saturday, sunday
 
@@ -657,7 +658,7 @@ def get_weekend_events(category: str | None = None):
                        place, location, price, category, source_url, is_kids
                 FROM events
                 WHERE event_date IN (?, ?) AND is_kids = 1
-                ORDER BY event_date, show_time, title
+                ORDER BY event_date, {TIME_ORDER_SQL}, title
             """, (saturday_str, sunday_str))
             return cursor.fetchall(), saturday, sunday
 
@@ -667,14 +668,14 @@ def get_weekend_events(category: str | None = None):
                 SELECT id, title, details, description, event_date, show_time, end_time,
                        place, location, price, category, source_url, is_kids
                 FROM events WHERE event_date IN (?, ?) AND category = ?
-                ORDER BY event_date, show_time, title
+                ORDER BY event_date, {TIME_ORDER_SQL}, title
             """, (saturday_str, sunday_str, category))
         else:
             cursor.execute("""
                 SELECT id, title, details, description, event_date, show_time, end_time,
                        place, location, price, category, source_url, is_kids
                 FROM events WHERE event_date IN (?, ?)
-                ORDER BY event_date, show_time, title
+                ORDER BY event_date, {TIME_ORDER_SQL}, title
             """, (saturday_str, sunday_str))
         
         return cursor.fetchall(), saturday, sunday
@@ -687,6 +688,11 @@ def filter_events_by_category(events, category: str):
     if category == "kids":
         return [e for e in events if e.get("is_kids") or e.get("category") == "kids"]
     return [e for e in events if e.get("category") == category]
+
+
+def _time_sort_value(show_time: str | None) -> str:
+    """Пустое время уходит в конец сортировки внутри дня."""
+    return show_time or "99:99"
 
 
 def add_subscription(user_id: int, category: str, date_type: str):
@@ -816,7 +822,7 @@ async def check_flash_subscriptions(bot) -> int:
                 WHERE event_date >= ?
                 AND (pylow(title) LIKE ? OR pylow(details) LIKE ?)
                 {"AND (created_at IS NULL OR created_at > ?)" if last_notified else ""}
-                ORDER BY event_date, show_time
+                ORDER BY event_date, {TIME_ORDER_SQL}
                 LIMIT 5
             """, (today, spl, spl, *((last_notified,) if last_notified else ()))).fetchall()
 
@@ -996,7 +1002,10 @@ def group_other_events(events: list) -> list:
             text += f"\n💰 {g['price']}"
 
         # Группируем по времени (show_time + end_time)
-        dates_sorted = sorted(set(g["dates"]))  # [(date_str, show_time, end_time), ...]
+        dates_sorted = sorted(
+            set(g["dates"]),
+            key=lambda x: (x[0], _time_sort_value(x[1]), x[2] or "")
+        )  # [(date_str, show_time, end_time), ...]
         by_time = defaultdict(list)
         for date_str, show_time, end_time in dates_sorted:
             time_key = f"{show_time}|{end_time}" if end_time else show_time
@@ -1037,7 +1046,7 @@ def group_other_events(events: list) -> list:
                     d_fmt = datetime.strptime(date_str, "%Y-%m-%d").strftime("%d.%m.%Y")
                 except Exception:
                     d_fmt = date_str
-                times_str = ", ".join(sorted(set(by_date[date_str])))
+                times_str = ", ".join(sorted(set(by_date[date_str]), key=_time_sort_value))
                 text += f"\n📅 {d_fmt} — {times_str}"
         else:
             for time_key, date_strs in by_time.items():
@@ -1054,12 +1063,12 @@ def group_other_events(events: list) -> list:
         # _sort_key: (date, show_time) — минимальный первый сеанс
         # min() по кортежу (date_str, show_time, end_time) → берём date и show_time
         if g["dates"]:
-            first = min(g["dates"])   # (date_str, show_time, end_time)
+            first = min(g["dates"], key=lambda x: (x[0], _time_sort_value(x[1]), x[2] or ""))
             first_date = first[0]
-            first_time = first[1] or ""
+            first_time = _time_sort_value(first[1])
         else:
             first_date = "9999"
-            first_time = ""
+            first_time = "99:99"
 
         result.append({
             "_pre_formatted": True, "text": text,
@@ -1084,7 +1093,7 @@ def pre_group_for_pagination(events: list) -> list:
         cinema_sort: dict[str, tuple] = {}
         for e in cinema:
             key = e.get("title", "")
-            dt = (e.get("event_date", "9999-12-31"), e.get("show_time", ""))
+            dt = (e.get("event_date", "9999-12-31"), _time_sort_value(e.get("show_time", "")))
             if key not in cinema_sort or dt < cinema_sort[key]:
                 cinema_sort[key] = dt
         grouped_items = format_grouped_cinema_events(group_cinema_events(cinema))
