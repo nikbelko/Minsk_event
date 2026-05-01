@@ -21,6 +21,10 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "502917728"))
 VENUE_OPEN_TIME  = "09:00"
 VENUE_CLOSE_TIME = "21:00"
 
+# ── Сортировка событий (события без времени в конец дня) ────────────────────────
+
+TIME_ORDER_SQL = "CASE WHEN show_time = '' OR show_time IS NULL THEN 1 ELSE 0 END, show_time"
+
 # ── Batch-загрузка событий ────────────────────────────────────────────────────
 
 BATCH_TEMPLATE_HEADERS = [

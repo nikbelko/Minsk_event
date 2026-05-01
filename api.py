@@ -18,7 +18,7 @@ from pydantic import BaseModel
 
 from config import (
     MINSK_TZ, DB_PATH, ADMIN_ID,
-    VENUE_OPEN_TIME, VENUE_CLOSE_TIME,
+    VENUE_OPEN_TIME, VENUE_CLOSE_TIME, TIME_ORDER_SQL,
     BATCH_TEMPLATE_HEADERS, BATCH_TEMPLATE_EXAMPLE, BATCH_CATEGORY_MAP,
     _build_time_filter, _build_overnight_union,
 )
@@ -144,7 +144,7 @@ def fetch_events_paged(
     params: list,
     page: int,
     per_page: int,
-    order: str = "event_date, show_time, title",
+    order: str = None,
     extra_union: tuple[str, list] | None = None,
 ) -> tuple[list[dict], int]:
     """Возвращает (события на странице, total) через SQL COUNT + LIMIT/OFFSET.
@@ -153,6 +153,9 @@ def fetch_events_paged(
     events. When provided, COUNT and pagination run over the combined set, so paging
     is consistent across all pages.
     """
+    if order is None:
+        order = f"event_date, {TIME_ORDER_SQL}, title"
+    
     SELECT_COLS = """id, title, details, description, event_date, show_time, end_time,
                      place, location, price, category, source_url, source_name, is_kids"""
     where = " AND ".join(where_clauses) if where_clauses else "1=1"
