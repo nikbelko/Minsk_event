@@ -72,6 +72,269 @@ def row_to_dict(row) -> dict:
     return dict(row)
 
 
+def require_admin(user_id: int):
+    if user_id != ADMIN_ID:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+
+def _rows_to_dicts(rows) -> list[dict]:
+    return [dict(r) for r in rows]
+
+
+def get_admin_dashboard_data(days: int = 30, exclude_admin: bool = True) -> dict:
+    """Aggregated admin metrics for dashboard charts and KPI cards."""
+    days = max(7, min(days, 180))
+    today = datetime.now(MINSK_TZ).strftime("%Y-%m-%d")
+    admin_filter = ADMIN_ID if exclude_admin else -1
+    date_from_expr = f"-{days} days"
+
+    with get_db() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE user_id != ?", (admin_filter,))
+        total_users = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM user_stats WHERE user_id != ?", (admin_filter,))
+        total_actions = cursor.fetchone()[0]
+        cursor.execute("SELECT MIN(DATE(created_at)) FROM user_stats WHERE user_id != ?", (admin_filter,))
+        first_date_row = cursor.fetchone()[0]
+        if first_date_row:
+            days_alive = (datetime.now(MINSK_TZ).date() - datetime.strptime(first_date_row, "%Y-%m-%d").date()).days
+        else:
+            days_alive = 0
+
+        cursor.execute("""SELECT COUNT(DISTINCT user_id) FROM user_stats
+            WHERE user_id != ? AND created_at LIKE ?""", (admin_filter, f"{today}%"))
+        dau = cursor.fetchone()[0]
+        cursor.execute("""SELECT COUNT(DISTINCT user_id) FROM user_stats
+            WHERE user_id != ? AND created_at >= DATE('now', '-7 days')""", (admin_filter,))
+        wau = cursor.fetchone()[0]
+        cursor.execute("""SELECT COUNT(DISTINCT user_id) FROM user_stats
+            WHERE user_id != ? AND created_at >= DATE('now', '-30 days')""", (admin_filter,))
+        mau = cursor.fetchone()[0]
+        cursor.execute("""SELECT COUNT(*) FROM user_stats
+            WHERE user_id != ? AND created_at LIKE ?""", (admin_filter, f"{today}%"))
+        actions_today = cursor.fetchone()[0]
+
+        cursor.execute("""SELECT COUNT(*) FROM (
+            SELECT user_id FROM user_stats WHERE user_id != ?
+            GROUP BY user_id HAVING MIN(DATE(created_at)) = ?
+        )""", (admin_filter, today))
+        new_today = cursor.fetchone()[0]
+        cursor.execute("""SELECT COUNT(*) FROM (
+            SELECT user_id FROM user_stats WHERE user_id != ?
+            GROUP BY user_id HAVING MIN(DATE(created_at)) >= DATE('now', '-30 days')
+        )""", (admin_filter,))
+        new_30d = cursor.fetchone()[0]
+
+        wa_filter = "action IN ('open_webapp', 'webapp_ping') AND user_id != ?"
+        cursor.execute(f"SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE {wa_filter}", (admin_filter,))
+        webapp_total = cursor.fetchone()[0]
+        cursor.execute(f"SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE {wa_filter} AND created_at LIKE ?",
+                       (admin_filter, f"{today}%"))
+        webapp_dau = cursor.fetchone()[0]
+        cursor.execute(f"SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE {wa_filter} AND created_at >= DATE('now', '-7 days')",
+                       (admin_filter,))
+        webapp_wau = cursor.fetchone()[0]
+        cursor.execute(f"SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE {wa_filter} AND created_at >= DATE('now', '-30 days')",
+                       (admin_filter,))
+        webapp_mau = cursor.fetchone()[0]
+
+        cursor.execute("""
+            SELECT
+                DATE(u.created_at) as day,
+                COUNT(*) as actions,
+                COUNT(DISTINCT u.user_id) as users,
+                COUNT(DISTINCT CASE WHEN DATE(u.created_at) = fv.first_day THEN u.user_id END) as new_users
+            FROM user_stats u
+            LEFT JOIN (
+                SELECT user_id, MIN(DATE(created_at)) as first_day
+                FROM user_stats WHERE user_id != ? GROUP BY user_id
+            ) fv ON u.user_id = fv.user_id
+            WHERE DATE(u.created_at) >= DATE('now', ?) AND u.user_id != ?
+            GROUP BY day ORDER BY day ASC
+        """, (admin_filter, date_from_expr, admin_filter))
+        daily_activity = _rows_to_dicts(cursor.fetchall())
+
+        cursor.execute("""
+            SELECT DATE(created_at) as day, COUNT(DISTINCT user_id) as webapp_users
+            FROM user_stats
+            WHERE action IN ('open_webapp','webapp_ping') AND user_id != ? AND DATE(created_at) >= DATE('now', ?)
+            GROUP BY day ORDER BY day ASC
+        """, (admin_filter, date_from_expr))
+        webapp_by_day = {r["day"]: r["webapp_users"] for r in cursor.fetchall()}
+
+        cursor.execute("""
+            SELECT DATE(created_at) as day, COUNT(*) as submissions
+            FROM pending_events
+            WHERE DATE(created_at) >= DATE('now', ?)
+            GROUP BY day ORDER BY day ASC
+        """, (date_from_expr,))
+        submissions_by_day = {r["day"]: r["submissions"] for r in cursor.fetchall()}
+
+        daily_chart = []
+        for row in daily_activity:
+            day = row["day"]
+            daily_chart.append({
+                "day": day,
+                "actions": row["actions"],
+                "users": row["users"],
+                "new_users": row["new_users"],
+                "webapp_users": webapp_by_day.get(day, 0),
+                "submissions": submissions_by_day.get(day, 0),
+            })
+
+        cursor.execute("""
+            SELECT
+                strftime('%Y-%m', u.created_at) as month,
+                COUNT(*) as actions,
+                COUNT(DISTINCT u.user_id) as users,
+                COUNT(DISTINCT CASE
+                    WHEN strftime('%Y-%m', u.created_at) = strftime('%Y-%m', fv.first_day)
+                    THEN u.user_id END) as new_users
+            FROM user_stats u
+            LEFT JOIN (
+                SELECT user_id, MIN(DATE(created_at)) as first_day
+                FROM user_stats WHERE user_id != ? GROUP BY user_id
+            ) fv ON u.user_id = fv.user_id
+            WHERE u.user_id != ?
+            GROUP BY month ORDER BY month ASC
+        """, (admin_filter, admin_filter))
+        monthly_activity = _rows_to_dicts(cursor.fetchall())
+
+        cursor.execute("""
+            SELECT strftime('%Y-%m', created_at) as month, COUNT(DISTINCT user_id) as webapp_users
+            FROM user_stats
+            WHERE action IN ('open_webapp','webapp_ping') AND user_id != ?
+            GROUP BY month ORDER BY month ASC
+        """, (admin_filter,))
+        webapp_by_month = {r["month"]: r["webapp_users"] for r in cursor.fetchall()}
+
+        monthly_chart = []
+        for row in monthly_activity[-12:]:
+            month = row["month"]
+            monthly_chart.append({
+                "month": month,
+                "actions": row["actions"],
+                "users": row["users"],
+                "new_users": row["new_users"],
+                "webapp_users": webapp_by_month.get(month, 0),
+            })
+
+        cursor.execute("""SELECT action, COUNT(*) as count FROM user_stats
+            WHERE user_id != ? GROUP BY action ORDER BY count DESC LIMIT 12""", (admin_filter,))
+        top_actions = _rows_to_dicts(cursor.fetchall())
+
+        cursor.execute("SELECT COUNT(*) FROM events WHERE event_date >= ?", (today,))
+        events_count = cursor.fetchone()[0]
+        cursor.execute("""
+            SELECT source_name, COUNT(*) as count
+            FROM events
+            WHERE event_date >= ?
+            GROUP BY source_name ORDER BY count DESC
+        """, (today,))
+        events_by_source = _rows_to_dicts(cursor.fetchall())
+
+        cursor.execute("""
+            SELECT category, COUNT(*) as count
+            FROM events
+            WHERE event_date >= ?
+            GROUP BY category ORDER BY count DESC
+        """, (today,))
+        events_by_category = _rows_to_dicts(cursor.fetchall())
+
+        cursor.execute("""SELECT COUNT(DISTINCT user_id) FROM subscriptions
+            WHERE user_id != ? AND (status IS NULL OR status = 'active')""", (admin_filter,))
+        subscribers_count = cursor.fetchone()[0]
+        cursor.execute("""SELECT COUNT(*) FROM subscriptions
+            WHERE user_id != ? AND (status IS NULL OR status = 'active')""", (admin_filter,))
+        subscriptions_total = cursor.fetchone()[0]
+        cursor.execute("""
+            SELECT category, COUNT(*) as count
+            FROM subscriptions
+            WHERE user_id != ? AND (status IS NULL OR status = 'active')
+            GROUP BY category ORDER BY count DESC
+        """, (admin_filter,))
+        subscriptions_by_category = _rows_to_dicts(cursor.fetchall())
+
+        cursor.execute("""SELECT COUNT(*) FROM flash_subscriptions
+            WHERE status = 'active' AND user_id != ?""", (admin_filter,))
+        flash_total = cursor.fetchone()[0]
+        cursor.execute("""SELECT COUNT(DISTINCT user_id) FROM flash_subscriptions
+            WHERE status = 'active' AND user_id != ?""", (admin_filter,))
+        flash_users = cursor.fetchone()[0]
+        cursor.execute("""SELECT COUNT(*) FROM flash_subscriptions
+            WHERE status = 'active' AND user_id != ? AND DATE(created_at) = ?""", (admin_filter, today))
+        flash_new_today = cursor.fetchone()[0]
+        cursor.execute("""SELECT COUNT(*) FROM flash_subscriptions
+            WHERE status = 'active' AND user_id != ? AND created_at >= DATE('now', '-30 days')""", (admin_filter,))
+        flash_new_30d = cursor.fetchone()[0]
+        cursor.execute("""SELECT COUNT(DISTINCT user_id) FROM flash_subscriptions
+            WHERE user_id != ? AND last_notified_at != '' AND last_notified_at >= DATE('now', '-30 days')""", (admin_filter,))
+        flash_notified_users_30d = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM pending_events WHERE status IN ('pending','edited')")
+        pending_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM pending_events WHERE status = 'approved'")
+        approved_total = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM pending_events WHERE status = 'rejected'")
+        rejected_total = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM pending_events WHERE DATE(created_at) >= DATE('now', ?)", (date_from_expr,))
+        submitted_period = cursor.fetchone()[0]
+
+        cursor.execute("""
+            SELECT action,
+                   SUM(CASE WHEN created_at >= DATE('now', '-30 days') THEN 1 ELSE 0 END) as count_30d
+            FROM user_stats
+            WHERE user_id != ? AND action IN (
+                'start', 'menu_today', 'menu_weekend', 'menu_tomorrow',
+                'menu_categories', 'open_category', 'filter_category',
+                'webapp_ping', 'subscribe', 'web_flash_subscribe',
+                'submit_event_sent', 'web_submit_event'
+            )
+            GROUP BY action
+        """, (admin_filter,))
+        funnel = {r["action"]: r["count_30d"] for r in cursor.fetchall()}
+
+        return {
+            "generated_at": datetime.now(MINSK_TZ).isoformat(),
+            "period_days": days,
+            "overview": {
+                "total_users": total_users,
+                "days_alive": days_alive,
+                "total_actions": total_actions,
+                "actions_today": actions_today,
+                "dau": dau,
+                "wau": wau,
+                "mau": mau,
+                "new_today": new_today,
+                "new_30d": new_30d,
+                "webapp_total": webapp_total,
+                "webapp_dau": webapp_dau,
+                "webapp_wau": webapp_wau,
+                "webapp_mau": webapp_mau,
+                "events_count": events_count,
+                "subscribers_count": subscribers_count,
+                "subscriptions_total": subscriptions_total,
+                "flash_total": flash_total,
+                "flash_users": flash_users,
+                "flash_new_today": flash_new_today,
+                "flash_new_30d": flash_new_30d,
+                "flash_notified_users_30d": flash_notified_users_30d,
+                "pending_count": pending_count,
+                "approved_total": approved_total,
+                "rejected_total": rejected_total,
+                "submitted_period": submitted_period,
+            },
+            "daily_chart": daily_chart,
+            "monthly_chart": monthly_chart,
+            "top_actions": top_actions,
+            "events_by_source": events_by_source,
+            "events_by_category": events_by_category,
+            "subscriptions_by_category": subscriptions_by_category,
+            "funnel": funnel,
+        }
+
+
 # ── Pydantic схемы ───────────────────────────────────────────────────────────
 
 class Event(BaseModel):
@@ -190,6 +453,16 @@ def fetch_events_paged(
 @app.get("/health")
 def health():
     return {"status": "ok", "time": now_minsk().isoformat()}
+
+
+@app.get("/api/admin/dashboard")
+def admin_dashboard(
+    user_id: int = Query(..., description="Telegram user ID"),
+    days: int = Query(30, ge=7, le=180),
+    exclude_admin: bool = Query(True),
+):
+    require_admin(user_id)
+    return get_admin_dashboard_data(days=days, exclude_admin=exclude_admin)
 
 
 # ── Категории ────────────────────────────────────────────────────────────────
