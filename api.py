@@ -114,12 +114,28 @@ def get_admin_dashboard_data(days: int = 30, exclude_admin: bool = True) -> dict
         cursor.execute("""SELECT COUNT(*) FROM user_stats
             WHERE user_id != ? AND created_at LIKE ?""", (admin_filter, f"{today}%"))
         actions_today = cursor.fetchone()[0]
+        cursor.execute("""SELECT COUNT(*) FROM user_stats
+            WHERE user_id != ? AND created_at LIKE DATE('now', '-1 day') || '%'""", (admin_filter,))
+        actions_yesterday = cursor.fetchone()[0]
+        cursor.execute("""SELECT COUNT(DISTINCT user_id) FROM user_stats
+            WHERE user_id != ? AND created_at LIKE DATE('now', '-1 day') || '%'""", (admin_filter,))
+        dau_yesterday = cursor.fetchone()[0]
 
         cursor.execute("""SELECT COUNT(*) FROM (
             SELECT user_id FROM user_stats WHERE user_id != ?
             GROUP BY user_id HAVING MIN(DATE(created_at)) = ?
         )""", (admin_filter, today))
         new_today = cursor.fetchone()[0]
+        cursor.execute("""SELECT COUNT(*) FROM (
+            SELECT user_id FROM user_stats WHERE user_id != ?
+            GROUP BY user_id HAVING MIN(DATE(created_at)) = DATE('now', '-1 day')
+        )""", (admin_filter,))
+        new_yesterday = cursor.fetchone()[0]
+        cursor.execute("""SELECT COUNT(*) FROM (
+            SELECT user_id FROM user_stats WHERE user_id != ?
+            GROUP BY user_id HAVING MIN(DATE(created_at)) >= DATE('now', '-7 days')
+        )""", (admin_filter,))
+        new_7d = cursor.fetchone()[0]
         cursor.execute("""SELECT COUNT(*) FROM (
             SELECT user_id FROM user_stats WHERE user_id != ?
             GROUP BY user_id HAVING MIN(DATE(created_at)) >= DATE('now', '-30 days')
@@ -171,6 +187,14 @@ def get_admin_dashboard_data(days: int = 30, exclude_admin: bool = True) -> dict
         """, (date_from_expr,))
         submissions_by_day = {r["day"]: r["submissions"] for r in cursor.fetchall()}
 
+        cursor.execute("""
+            SELECT DATE(created_at) as day, COUNT(*) as submissions
+            FROM pending_events
+            WHERE DATE(created_at) >= DATE('now', ?) AND user_id != ?
+            GROUP BY day ORDER BY day ASC
+        """, (date_from_expr, ADMIN_ID))
+        submissions_by_day_no_admin = {r["day"]: r["submissions"] for r in cursor.fetchall()}
+
         daily_chart = []
         for row in daily_activity:
             day = row["day"]
@@ -178,9 +202,11 @@ def get_admin_dashboard_data(days: int = 30, exclude_admin: bool = True) -> dict
                 "day": day,
                 "actions": row["actions"],
                 "users": row["users"],
+                "dau": row["users"],
                 "new_users": row["new_users"],
                 "webapp_users": webapp_by_day.get(day, 0),
                 "submissions": submissions_by_day.get(day, 0),
+                "submissions_no_admin": submissions_by_day_no_admin.get(day, 0),
             })
 
         cursor.execute("""
@@ -216,12 +242,13 @@ def get_admin_dashboard_data(days: int = 30, exclude_admin: bool = True) -> dict
                 "month": month,
                 "actions": row["actions"],
                 "users": row["users"],
+                "mau": row["users"],
                 "new_users": row["new_users"],
                 "webapp_users": webapp_by_month.get(month, 0),
             })
 
         cursor.execute("""SELECT action, COUNT(*) as count FROM user_stats
-            WHERE user_id != ? GROUP BY action ORDER BY count DESC LIMIT 12""", (admin_filter,))
+            WHERE user_id != ? GROUP BY action ORDER BY count DESC LIMIT 10""", (admin_filter,))
         top_actions = _rows_to_dicts(cursor.fetchall())
 
         cursor.execute("SELECT COUNT(*) FROM events WHERE event_date >= ?", (today,))
@@ -280,6 +307,8 @@ def get_admin_dashboard_data(days: int = 30, exclude_admin: bool = True) -> dict
         rejected_total = cursor.fetchone()[0]
         cursor.execute("SELECT COUNT(*) FROM pending_events WHERE DATE(created_at) >= DATE('now', ?)", (date_from_expr,))
         submitted_period = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM pending_events WHERE DATE(created_at) >= DATE('now', ?) AND user_id != ?", (date_from_expr, ADMIN_ID))
+        submitted_period_no_admin = cursor.fetchone()[0]
 
         cursor.execute("""
             SELECT action,
@@ -298,6 +327,14 @@ def get_admin_dashboard_data(days: int = 30, exclude_admin: bool = True) -> dict
         return {
             "generated_at": datetime.now(MINSK_TZ).isoformat(),
             "period_days": days,
+            "today_summary": {
+                "total_users": total_users,
+                "total_users_delta": new_today - new_yesterday,
+                "unique_users_today": dau,
+                "unique_users_delta": dau - dau_yesterday,
+                "actions_today": actions_today,
+                "actions_delta": actions_today - actions_yesterday,
+            },
             "overview": {
                 "total_users": total_users,
                 "days_alive": days_alive,
@@ -307,6 +344,7 @@ def get_admin_dashboard_data(days: int = 30, exclude_admin: bool = True) -> dict
                 "wau": wau,
                 "mau": mau,
                 "new_today": new_today,
+                "new_7d": new_7d,
                 "new_30d": new_30d,
                 "webapp_total": webapp_total,
                 "webapp_dau": webapp_dau,
@@ -324,6 +362,7 @@ def get_admin_dashboard_data(days: int = 30, exclude_admin: bool = True) -> dict
                 "approved_total": approved_total,
                 "rejected_total": rejected_total,
                 "submitted_period": submitted_period,
+                "submitted_period_no_admin": submitted_period_no_admin,
             },
             "daily_chart": daily_chart,
             "monthly_chart": monthly_chart,
