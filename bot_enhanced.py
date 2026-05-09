@@ -183,6 +183,7 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 event_id INTEGER NOT NULL,
+                event_key TEXT DEFAULT '',
                 created_at TEXT NOT NULL,
                 UNIQUE (user_id, event_id)
             )
@@ -211,6 +212,7 @@ def init_db():
             "ALTER TABLE subscriptions ADD COLUMN status TEXT DEFAULT 'active'",
             "ALTER TABLE flash_subscriptions ADD COLUMN last_notified_at TEXT DEFAULT ''",
             "ALTER TABLE users ADD COLUMN telegram_username TEXT DEFAULT ''",
+            "ALTER TABLE event_attendees ADD COLUMN event_key TEXT DEFAULT ''",
         ]:
             try:
                 cursor.execute(col_sql)
@@ -235,6 +237,28 @@ def init_db():
                 pass
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_attendees_event_id ON event_attendees(event_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_attendees_user_id ON event_attendees(user_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_attendees_event_key ON event_attendees(event_key)")
+        cursor.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_event_attendees_user_event_key
+            ON event_attendees(user_id, event_key)
+            WHERE event_key IS NOT NULL AND event_key != ''
+        """)
+        try:
+            cursor.execute("""
+                UPDATE event_attendees
+                SET event_key = (
+                    SELECT CASE
+                        WHEN e.category = 'cinema' THEN 'cinema:' || e.title || ':' || e.event_date
+                        ELSE 'other:' || e.title || ':' || COALESCE(e.place, '')
+                    END
+                    FROM events e
+                    WHERE e.id = event_attendees.event_id
+                )
+                WHERE (event_key IS NULL OR event_key = '')
+                  AND EXISTS (SELECT 1 FROM events e WHERE e.id = event_attendees.event_id)
+            """)
+        except Exception:
+            pass
         conn.commit()
 
 
