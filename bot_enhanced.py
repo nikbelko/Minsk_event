@@ -169,6 +169,25 @@ def init_db():
             )
         """)
         cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT DEFAULT '',
+                first_name TEXT DEFAULT '',
+                telegram_username TEXT DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+        """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS event_attendees (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                event_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE (user_id, event_id)
+            )
+        """)
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS flash_subscriptions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -191,6 +210,7 @@ def init_db():
             "ALTER TABLE events ADD COLUMN is_kids INTEGER DEFAULT 0",
             "ALTER TABLE subscriptions ADD COLUMN status TEXT DEFAULT 'active'",
             "ALTER TABLE flash_subscriptions ADD COLUMN last_notified_at TEXT DEFAULT ''",
+            "ALTER TABLE users ADD COLUMN telegram_username TEXT DEFAULT ''",
         ]:
             try:
                 cursor.execute(col_sql)
@@ -213,6 +233,31 @@ def init_db():
                 cursor.execute(_migration); conn.commit()
             except Exception:
                 pass
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_attendees_event_id ON event_attendees(event_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_attendees_user_id ON event_attendees(user_id)")
+        conn.commit()
+
+
+def save_user_profile(user_id: int, username: str | None, first_name: str | None):
+    try:
+        now = datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO users (user_id, username, first_name, telegram_username, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    username = excluded.username,
+                    first_name = excluded.first_name,
+                    telegram_username = excluded.telegram_username,
+                    updated_at = excluded.updated_at
+                """,
+                (user_id, username or "", first_name or "", username or "", now, now),
+            )
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Ошибка сохранения профиля пользователя: {e}")
 
 
 def log_user_action(user_id: int, username: str | None, first_name: str | None, action: str, detail: str | None = None):
@@ -3422,6 +3467,7 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    save_user_profile(user.id, user.username, user.first_name)
     log_user_action(user.id, user.username, user.first_name, "start")
     await update.message.reply_text(
         f"🎉 Привет, {user.first_name}!\n\n"

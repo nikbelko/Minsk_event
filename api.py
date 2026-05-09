@@ -38,9 +38,31 @@ app = FastAPI(
 @app.on_event("startup")
 def _run_migrations():
     with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT DEFAULT '',
+                first_name TEXT DEFAULT '',
+                telegram_username TEXT DEFAULT '',
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS event_attendees (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                event_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(user_id, event_id)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_event_attendees_event_id ON event_attendees(event_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_event_attendees_user_id ON event_attendees(user_id)")
         for sql in [
             "ALTER TABLE events ADD COLUMN is_kids INTEGER DEFAULT 0",
             "ALTER TABLE pending_events ADD COLUMN is_kids INTEGER DEFAULT 0",
+            "ALTER TABLE users ADD COLUMN telegram_username TEXT DEFAULT ''",
         ]:
             try:
                 conn.execute(sql)
@@ -52,7 +74,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=False,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -79,6 +101,29 @@ def require_admin(user_id: int):
 
 def _rows_to_dicts(rows) -> list[dict]:
     return [dict(r) for r in rows]
+
+
+def upsert_user_profile(
+    conn: sqlite3.Connection,
+    user_id: int,
+    username: str | None = None,
+    first_name: str | None = None,
+    telegram_username: str | None = None,
+):
+    now = datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    telegram_username = telegram_username or username or ""
+    conn.execute(
+        """
+        INSERT INTO users (user_id, username, first_name, telegram_username, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            username = excluded.username,
+            first_name = excluded.first_name,
+            telegram_username = excluded.telegram_username,
+            updated_at = excluded.updated_at
+        """,
+        (user_id, username or "", first_name or "", telegram_username, now, now),
+    )
 
 
 def get_admin_dashboard_data(days: int = 30, exclude_admin: bool = True) -> dict:
@@ -423,6 +468,18 @@ class CategoryCounts(BaseModel):
     other: int = 0
 
 
+class AttendRequest(BaseModel):
+    user_id: int
+    username: Optional[str] = ""
+    first_name: Optional[str] = ""
+    telegram_username: Optional[str] = ""
+
+
+class AttendeeSummaryRequest(BaseModel):
+    event_ids: list[int]
+    user_id: Optional[int] = None
+
+
 # ── Вспомогательные функции ──────────────────────────────────────────────────
 
 def now_minsk() -> datetime:
@@ -492,6 +549,43 @@ def fetch_events_paged(
     return rows, total
 
 
+def _event_exists(conn: sqlite3.Connection, event_id: int) -> bool:
+    row = conn.execute("SELECT 1 FROM events WHERE id = ? LIMIT 1", (event_id,)).fetchone()
+    return bool(row)
+
+
+def _get_attendee_payload(conn: sqlite3.Connection, event_id: int, user_id: int | None = None) -> dict:
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT u.user_id, u.first_name, u.telegram_username, u.username
+        FROM event_attendees ea
+        JOIN users u ON u.user_id = ea.user_id
+        WHERE ea.event_id = ?
+        ORDER BY ea.created_at ASC, ea.id ASC
+        """,
+        (event_id,),
+    )
+    attendees = []
+    current_user_attending = False
+    for row in cursor.fetchall():
+        username = row["telegram_username"] or row["username"] or ""
+        attendees.append({
+            "user_id": row["user_id"],
+            "first_name": row["first_name"] or "",
+            "telegram_username": username,
+            "profile_url": f"https://t.me/{username}" if username else "",
+        })
+        if user_id is not None and row["user_id"] == user_id:
+            current_user_attending = True
+    return {
+        "event_id": event_id,
+        "count": len(attendees),
+        "current_user_attending": current_user_attending,
+        "attendees": attendees,
+    }
+
+
 # ── Health ───────────────────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -507,6 +601,113 @@ def admin_dashboard(
 ):
     require_admin(user_id)
     return get_admin_dashboard_data(days=days, exclude_admin=exclude_admin)
+
+
+@app.post("/api/events/{event_id}/attend")
+def add_event_attendee(event_id: int, payload: AttendRequest):
+    with get_db() as conn:
+        if not _event_exists(conn, event_id):
+            raise HTTPException(status_code=404, detail="Event not found")
+
+        upsert_user_profile(
+            conn,
+            user_id=payload.user_id,
+            username=payload.username,
+            first_name=payload.first_name,
+            telegram_username=payload.telegram_username,
+        )
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO event_attendees (user_id, event_id, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (payload.user_id, event_id, datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        conn.execute(
+            "INSERT INTO user_stats (user_id, username, first_name, action, detail, created_at) VALUES (?,?,?,?,?,?)",
+            (
+                payload.user_id,
+                payload.username or "",
+                payload.first_name or "",
+                "event_attend",
+                str(event_id),
+                datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        )
+        conn.commit()
+        return _get_attendee_payload(conn, event_id, payload.user_id)
+
+
+@app.delete("/api/events/{event_id}/attend")
+def remove_event_attendee(event_id: int, user_id: int = Query(...), username: str = Query(""), first_name: str = Query("")):
+    with get_db() as conn:
+        if not _event_exists(conn, event_id):
+            raise HTTPException(status_code=404, detail="Event not found")
+
+        conn.execute("DELETE FROM event_attendees WHERE event_id = ? AND user_id = ?", (event_id, user_id))
+        conn.execute(
+            "INSERT INTO user_stats (user_id, username, first_name, action, detail, created_at) VALUES (?,?,?,?,?,?)",
+            (
+                user_id,
+                username,
+                first_name,
+                "event_unattend",
+                str(event_id),
+                datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+            ),
+        )
+        conn.commit()
+        return _get_attendee_payload(conn, event_id, user_id)
+
+
+@app.get("/api/events/{event_id}/attendees")
+def get_event_attendees(event_id: int, user_id: Optional[int] = Query(None)):
+    with get_db() as conn:
+        if not _event_exists(conn, event_id):
+            raise HTTPException(status_code=404, detail="Event not found")
+        return _get_attendee_payload(conn, event_id, user_id)
+
+
+@app.post("/api/events/attendees/summary")
+def get_attendees_summary(payload: AttendeeSummaryRequest):
+    event_ids = sorted({eid for eid in payload.event_ids if eid > 0})
+    if not event_ids:
+        return {"items": []}
+
+    placeholders = ",".join("?" for _ in event_ids)
+    items = []
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT event_id, COUNT(*) as count
+            FROM event_attendees
+            WHERE event_id IN ({placeholders})
+            GROUP BY event_id
+            """,
+            event_ids,
+        )
+        counts = {row["event_id"]: row["count"] for row in cursor.fetchall()}
+
+        current = set()
+        if payload.user_id is not None:
+            cursor.execute(
+                f"""
+                SELECT event_id
+                FROM event_attendees
+                WHERE user_id = ? AND event_id IN ({placeholders})
+                """,
+                [payload.user_id, *event_ids],
+            )
+            current = {row["event_id"] for row in cursor.fetchall()}
+
+        for event_id in event_ids:
+            items.append({
+                "event_id": event_id,
+                "count": counts.get(event_id, 0),
+                "current_user_attending": event_id in current,
+            })
+    return {"items": items}
 
 
 # ── Категории ────────────────────────────────────────────────────────────────
