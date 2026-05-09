@@ -328,12 +328,17 @@ def get_admin_dashboard_data(days: int = 30, exclude_admin: bool = True) -> dict
             "generated_at": datetime.now(MINSK_TZ).isoformat(),
             "period_days": days,
             "today_summary": {
-                "total_users": total_users,
-                "total_users_delta": new_today - new_yesterday,
-                "unique_users_today": dau,
-                "unique_users_delta": dau - dau_yesterday,
+                "users_today": dau,
+                "users_delta": dau - dau_yesterday,
+                "unique_users_today": new_today,
+                "unique_users_delta": new_today - new_yesterday,
                 "actions_today": actions_today,
                 "actions_delta": actions_today - actions_yesterday,
+                "activity_today": round(actions_today / dau, 2) if dau > 0 else 0,
+                "activity_delta": round(
+                    (actions_today / dau) - (actions_yesterday / dau_yesterday),
+                    2,
+                ) if dau > 0 and dau_yesterday > 0 else 0,
             },
             "overview": {
                 "total_users": total_users,
