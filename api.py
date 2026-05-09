@@ -378,6 +378,8 @@ def get_admin_dashboard_data(days: int = 30, exclude_admin: bool = True) -> dict
         submitted_period = cursor.fetchone()[0]
         cursor.execute("SELECT COUNT(*) FROM pending_events WHERE DATE(created_at) >= DATE('now', ?) AND user_id != ?", (date_from_expr, ADMIN_ID))
         submitted_period_no_admin = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM event_attendees")
+        attendees_total = cursor.fetchone()[0]
 
         cursor.execute("""
             SELECT action,
@@ -437,6 +439,7 @@ def get_admin_dashboard_data(days: int = 30, exclude_admin: bool = True) -> dict
                 "rejected_total": rejected_total,
                 "submitted_period": submitted_period,
                 "submitted_period_no_admin": submitted_period_no_admin,
+                "attendees_total": attendees_total,
             },
             "daily_chart": daily_chart,
             "monthly_chart": monthly_chart,
