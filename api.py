@@ -510,6 +510,16 @@ class AttendeeSummaryRequest(BaseModel):
     user_id: Optional[int] = None
 
 
+class AttendingEvent(BaseModel):
+    event_key: str
+    id: int
+    title: str
+    event_date: str
+    show_time: Optional[str] = ""
+    place: Optional[str] = ""
+    category: str
+
+
 # ── Вспомогательные функции ──────────────────────────────────────────────────
 
 def now_minsk() -> datetime:
@@ -770,6 +780,72 @@ def get_attendees_summary(payload: AttendeeSummaryRequest):
                 "current_user_attending": event_key in current,
             })
         return {"items": items}
+
+
+@app.get("/api/user/attending")
+def get_user_attending_events(user_id: int = Query(...)):
+    today = today_str()
+    items = []
+    seen = set()
+    with get_db() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT event_key, event_id, created_at
+            FROM event_attendees
+            WHERE user_id = ?
+            ORDER BY created_at DESC, id DESC
+            """,
+            (user_id,),
+        )
+        rows = cursor.fetchall()
+
+        for row in rows:
+            event_key = row["event_key"] or _resolve_event_key(conn, None, row["event_id"])
+            if not event_key or event_key in seen:
+                continue
+            seen.add(event_key)
+
+            event_row = None
+            if event_key.startswith("cinema:"):
+                _, title, event_date = event_key.split(":", 2)
+                event_row = conn.execute(
+                    f"""
+                    SELECT id, title, event_date, show_time, place, category
+                    FROM events
+                    WHERE category = 'cinema' AND title = ? AND event_date = ?
+                    ORDER BY {TIME_ORDER_SQL}, id
+                    LIMIT 1
+                    """,
+                    (title, event_date),
+                ).fetchone()
+            elif event_key.startswith("other:"):
+                _, title, place = event_key.split(":", 2)
+                event_row = conn.execute(
+                    f"""
+                    SELECT id, title, event_date, show_time, place, category
+                    FROM events
+                    WHERE title = ? AND COALESCE(place, '') = ? AND event_date >= ?
+                    ORDER BY event_date, {TIME_ORDER_SQL}, id
+                    LIMIT 1
+                    """,
+                    (title, place, today),
+                ).fetchone()
+
+            if not event_row:
+                continue
+
+            items.append({
+                "event_key": event_key,
+                "id": event_row["id"],
+                "title": event_row["title"],
+                "event_date": event_row["event_date"],
+                "show_time": event_row["show_time"] or "",
+                "place": event_row["place"] or "",
+                "category": event_row["category"],
+            })
+
+    return {"events": items}
 
 
 # ── Категории ────────────────────────────────────────────────────────────────
