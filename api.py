@@ -801,7 +801,10 @@ def get_user_attending_events(user_id: int = Query(...)):
         rows = cursor.fetchall()
 
         for row in rows:
-            event_key = row["event_key"] or _resolve_event_key(conn, None, row["event_id"])
+            try:
+                event_key = row["event_key"] or _resolve_event_key(conn, None, row["event_id"])
+            except HTTPException:
+                continue
             if not event_key or event_key in seen:
                 continue
             seen.add(event_key)
