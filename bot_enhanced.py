@@ -707,7 +707,7 @@ def get_weekend_events(category: str | None = None):
         
         # ОСОБЫЙ СЛУЧАЙ: категория "free" показывает ВСЕ бесплатные события
         if category == "free":
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT id, title, details, description, event_date, show_time, end_time,
                        place, location, price, category, source_url, is_kids
                 FROM events
@@ -718,7 +718,7 @@ def get_weekend_events(category: str | None = None):
 
         # ОСОБЫЙ СЛУЧАЙ: категория "kids" — все события с is_kids=1
         if category == "kids":
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT id, title, details, description, event_date, show_time, end_time,
                        place, location, price, category, source_url, is_kids
                 FROM events
@@ -729,14 +729,14 @@ def get_weekend_events(category: str | None = None):
 
         # Обычная категория (не free/kids)
         if category and category != "all":
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT id, title, details, description, event_date, show_time, end_time,
                        place, location, price, category, source_url, is_kids
                 FROM events WHERE event_date IN (?, ?) AND category = ?
                 ORDER BY event_date, {TIME_ORDER_SQL}, title
             """, (saturday_str, sunday_str, category))
         else:
-            cursor.execute("""
+            cursor.execute(f"""
                 SELECT id, title, details, description, event_date, show_time, end_time,
                        place, location, price, category, source_url, is_kids
                 FROM events WHERE event_date IN (?, ?)
