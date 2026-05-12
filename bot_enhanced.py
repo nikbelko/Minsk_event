@@ -3488,23 +3488,28 @@ async def successful_payment_callback(update: Update, context: ContextTypes.DEFA
 
 # ---------------------- Хендлеры сообщений ----------------------
 
+from telegram.helpers import escape_markdown
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update, context):
     user = update.effective_user
+    name = escape_markdown(user.first_name or "", version=2)
     save_user_profile(user.id, user.username, user.first_name)
     log_user_action(user.id, user.username, user.first_name, "start")
+    text = (
+        f"🎉 Привет, {name}!\n\n"
+        "Я — 🌟*MinskDvizh*, твой персональный гид по событиям Минска.\n\n"
+        "🔍 *Вот что уже умею:*\n"
+        "• Искать по *названию*, *дате*, *описанию*\n"
+        "• Показывать *сегодня*, *завтра*, *выходные* и *ближайшие* события\n"
+        "• 🔔 Подписываться на *новые события* в выбранной категории\n"
+        "• ✍️ *Добавлять твои события*, чтобы рассказать всем о мероприятии\n"
+        "• ⚡ *Флеш-подписка* — узнавай о долгожданных событиях первым\n\n"
+        "Используй кнопки меню 👇. а лучше жми 🌟\n"
+    )
     await update.message.reply_text(
-        f"🎉 Привет, {user.first_name}!\n\n"
-        "Я — 🌟**MinskDvizh**, твой персональный гид по событиям Минска.\n\n"
-        "🔍 **Я еще учусь, но уже вот что умею:**\n"
-        "• Искать по **названию**|**дате**|**описанию**\n"
-        "• Показывать **сегодня**|**завтра**|**выходные** и **ближайшие** события\n"
-        "• 🔔 Подписываться на **новые события** в выбранной категории\n"
-        "• ✍️ **Добавлять твои события**, чтобы рассказать всем о мероприятии\n"
-        "• ⚡ **Флеш-подписка** — узнавай о долгожданных событиях первым\n\n"
-        "Используй кнопки меню 👇 или открой приложение по 🌟\n",
+        text,
         reply_markup=get_reply_main_menu(), 
-        parse_mode="Markdown",
+        parse_mode="MarkdownV2",
     )
 
 async def today_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
