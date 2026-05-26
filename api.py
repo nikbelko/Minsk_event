@@ -58,19 +58,47 @@ def _run_migrations():
                 UNIQUE(user_id, event_id)
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS event_ticket_posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                event_id INTEGER NOT NULL DEFAULT 0,
+                event_key TEXT NOT NULL DEFAULT '',
+                post_type TEXT NOT NULL,
+                qty INTEGER NOT NULL DEFAULT 1,
+                price_text TEXT DEFAULT '',
+                note TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_event_attendees_event_id ON event_attendees(event_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_event_attendees_user_id ON event_attendees(user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_event_attendees_event_key ON event_attendees(event_key)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ticket_posts_event_key ON event_ticket_posts(event_key)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ticket_posts_user_id ON event_ticket_posts(user_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ticket_posts_type ON event_ticket_posts(post_type)")
         conn.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_event_attendees_user_event_key
             ON event_attendees(user_id, event_key)
             WHERE event_key IS NOT NULL AND event_key != ''
+        """)
+        conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_ticket_posts_user_event_type
+            ON event_ticket_posts(user_id, event_key, post_type)
         """)
         for sql in [
             "ALTER TABLE events ADD COLUMN is_kids INTEGER DEFAULT 0",
             "ALTER TABLE pending_events ADD COLUMN is_kids INTEGER DEFAULT 0",
             "ALTER TABLE users ADD COLUMN telegram_username TEXT DEFAULT ''",
             "ALTER TABLE event_attendees ADD COLUMN event_key TEXT DEFAULT ''",
+            "ALTER TABLE event_ticket_posts ADD COLUMN event_id INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE event_ticket_posts ADD COLUMN event_key TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE event_ticket_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'sell'",
+            "ALTER TABLE event_ticket_posts ADD COLUMN qty INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE event_ticket_posts ADD COLUMN price_text TEXT DEFAULT ''",
+            "ALTER TABLE event_ticket_posts ADD COLUMN note TEXT DEFAULT ''",
+            "ALTER TABLE event_ticket_posts ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''",
         ]:
             try:
                 conn.execute(sql)
@@ -89,6 +117,22 @@ def _run_migrations():
                 )
                 WHERE (event_key IS NULL OR event_key = '')
                   AND EXISTS (SELECT 1 FROM events e WHERE e.id = event_attendees.event_id)
+            """)
+        except Exception:
+            pass
+        try:
+            conn.execute("""
+                UPDATE event_ticket_posts
+                SET event_key = (
+                    SELECT CASE
+                        WHEN e.category = 'cinema' THEN 'cinema:' || e.title || ':' || e.event_date
+                        ELSE 'other:' || e.title || ':' || COALESCE(e.place, '')
+                    END
+                    FROM events e
+                    WHERE e.id = event_ticket_posts.event_id
+                )
+                WHERE (event_key IS NULL OR event_key = '')
+                  AND EXISTS (SELECT 1 FROM events e WHERE e.id = event_ticket_posts.event_id)
             """)
         except Exception:
             pass
@@ -520,6 +564,25 @@ class AttendingEvent(BaseModel):
     category: str
 
 
+class TicketPostRequest(BaseModel):
+    user_id: int
+    event_id: Optional[int] = None
+    event_key: Optional[str] = ""
+    username: Optional[str] = ""
+    first_name: Optional[str] = ""
+    telegram_username: Optional[str] = ""
+    post_type: str
+    qty: int = 1
+    price_text: Optional[str] = ""
+    note: Optional[str] = ""
+
+
+class TicketSummaryRequest(BaseModel):
+    event_ids: Optional[list[int]] = None
+    event_keys: Optional[list[str]] = None
+    user_id: Optional[int] = None
+
+
 # ── Вспомогательные функции ──────────────────────────────────────────────────
 
 def now_minsk() -> datetime:
@@ -647,6 +710,80 @@ def _get_attendee_payload(conn: sqlite3.Connection, event_key: str, user_id: int
         "count": len(attendees),
         "current_user_attending": current_user_attending,
         "attendees": attendees,
+    }
+
+
+def _normalize_ticket_post_type(post_type: str) -> str:
+    normalized = (post_type or "").strip().lower()
+    if normalized not in {"sell", "buy"}:
+        raise HTTPException(status_code=400, detail="post_type must be 'sell' or 'buy'")
+    return normalized
+
+
+def _normalize_ticket_qty(qty: int) -> int:
+    qty = int(qty or 1)
+    if qty < 1 or qty > 4:
+        raise HTTPException(status_code=400, detail="qty must be between 1 and 4")
+    return qty
+
+
+def _normalize_ticket_text(value: str | None, max_len: int) -> str:
+    value = (value or "").strip()
+    if len(value) > max_len:
+        raise HTTPException(status_code=400, detail=f"text too long (max {max_len})")
+    return value
+
+
+def _get_ticket_payload(conn: sqlite3.Connection, event_key: str, user_id: int | None = None) -> dict:
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT tp.id, tp.user_id, tp.post_type, tp.qty, tp.price_text, tp.note, tp.created_at, tp.updated_at,
+               u.first_name, u.telegram_username, u.username
+        FROM event_ticket_posts tp
+        JOIN users u ON u.user_id = tp.user_id
+        WHERE tp.event_key = ?
+        ORDER BY tp.created_at DESC, tp.id DESC
+        """,
+        (event_key,),
+    )
+    sell_posts = []
+    buy_posts = []
+    current_user_sell = False
+    current_user_buy = False
+    for row in cursor.fetchall():
+        username = row["telegram_username"] or row["username"] or ""
+        item = {
+            "id": row["id"],
+            "user_id": row["user_id"],
+            "post_type": row["post_type"],
+            "qty": row["qty"],
+            "price_text": row["price_text"] or "",
+            "note": row["note"] or "",
+            "first_name": row["first_name"] or "",
+            "telegram_username": username,
+            "profile_url": f"https://t.me/{username}" if username else "",
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+        if row["post_type"] == "sell":
+            sell_posts.append(item)
+            if user_id is not None and row["user_id"] == user_id:
+                current_user_sell = True
+        else:
+            buy_posts.append(item)
+            if user_id is not None and row["user_id"] == user_id:
+                current_user_buy = True
+
+    return {
+        "event_key": event_key,
+        "sell_count": len(sell_posts),
+        "buy_count": len(buy_posts),
+        "total_count": len(sell_posts) + len(buy_posts),
+        "current_user_sell": current_user_sell,
+        "current_user_buy": current_user_buy,
+        "sell_posts": sell_posts,
+        "buy_posts": buy_posts,
     }
 
 
@@ -849,6 +986,166 @@ def get_user_attending_events(user_id: int = Query(...)):
             })
 
     return {"events": items}
+
+
+@app.post("/api/events/{event_id}/tickets")
+def upsert_event_ticket_post(event_id: int, payload: TicketPostRequest):
+    with get_db() as conn:
+        resolved_key = _resolve_event_key(conn, payload.event_key, payload.event_id or event_id)
+        post_type = _normalize_ticket_post_type(payload.post_type)
+        qty = _normalize_ticket_qty(payload.qty)
+        price_text = _normalize_ticket_text(payload.price_text, 64)
+        note = _normalize_ticket_text(payload.note, 160)
+        now = datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+        upsert_user_profile(
+            conn,
+            user_id=payload.user_id,
+            username=payload.username,
+            first_name=payload.first_name,
+            telegram_username=payload.telegram_username,
+        )
+        conn.execute(
+            """
+            INSERT INTO event_ticket_posts (
+                user_id, event_id, event_key, post_type, qty, price_text, note, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, event_key, post_type) DO UPDATE SET
+                qty = excluded.qty,
+                price_text = excluded.price_text,
+                note = excluded.note,
+                updated_at = excluded.updated_at
+            """,
+            (
+                payload.user_id,
+                payload.event_id or event_id or 0,
+                resolved_key,
+                post_type,
+                qty,
+                price_text,
+                note,
+                now,
+                now,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO user_stats (user_id, username, first_name, action, detail, created_at) VALUES (?,?,?,?,?,?)",
+            (
+                payload.user_id,
+                payload.username or "",
+                payload.first_name or "",
+                "ticket_post",
+                f"{resolved_key}:{post_type}",
+                now,
+            ),
+        )
+        conn.commit()
+        return _get_ticket_payload(conn, resolved_key, payload.user_id)
+
+
+@app.delete("/api/events/{event_id}/tickets")
+def remove_event_ticket_post(
+    event_id: int,
+    user_id: int = Query(...),
+    post_type: str = Query(...),
+    event_key: str = Query(""),
+    username: str = Query(""),
+    first_name: str = Query(""),
+):
+    with get_db() as conn:
+        resolved_key = _resolve_event_key(conn, event_key, event_id)
+        normalized_type = _normalize_ticket_post_type(post_type)
+        now = datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+        conn.execute(
+            "DELETE FROM event_ticket_posts WHERE event_key = ? AND user_id = ? AND post_type = ?",
+            (resolved_key, user_id, normalized_type),
+        )
+        conn.execute(
+            "INSERT INTO user_stats (user_id, username, first_name, action, detail, created_at) VALUES (?,?,?,?,?,?)",
+            (
+                user_id,
+                username,
+                first_name,
+                "ticket_post_remove",
+                f"{resolved_key}:{normalized_type}",
+                now,
+            ),
+        )
+        conn.commit()
+        return _get_ticket_payload(conn, resolved_key, user_id)
+
+
+@app.get("/api/events/{event_id}/tickets")
+def get_event_ticket_posts(event_id: int, user_id: Optional[int] = Query(None), event_key: str = Query("")):
+    with get_db() as conn:
+        resolved_key = _resolve_event_key(conn, event_key, event_id)
+        return _get_ticket_payload(conn, resolved_key, user_id)
+
+
+@app.post("/api/events/tickets/summary")
+def get_ticket_posts_summary(payload: TicketSummaryRequest):
+    event_keys = sorted({key for key in (payload.event_keys or []) if key})
+    event_ids = sorted({eid for eid in (payload.event_ids or []) if eid > 0})
+
+    with get_db() as conn:
+        if not event_keys and event_ids:
+            event_keys = [_resolve_event_key(conn, None, event_id) for event_id in event_ids]
+
+        if not event_keys:
+            return {"items": []}
+
+        placeholders = ",".join("?" for _ in event_keys)
+        items = []
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT event_key,
+                   SUM(CASE WHEN post_type = 'sell' THEN 1 ELSE 0 END) as sell_count,
+                   SUM(CASE WHEN post_type = 'buy' THEN 1 ELSE 0 END) as buy_count
+            FROM event_ticket_posts
+            WHERE event_key IN ({placeholders})
+            GROUP BY event_key
+            """,
+            event_keys,
+        )
+        counts = {
+            row["event_key"]: {
+                "sell_count": row["sell_count"] or 0,
+                "buy_count": row["buy_count"] or 0,
+            }
+            for row in cursor.fetchall()
+        }
+
+        current_sell = set()
+        current_buy = set()
+        if payload.user_id is not None:
+            cursor.execute(
+                f"""
+                SELECT event_key, post_type
+                FROM event_ticket_posts
+                WHERE user_id = ? AND event_key IN ({placeholders})
+                """,
+                [payload.user_id, *event_keys],
+            )
+            for row in cursor.fetchall():
+                if row["post_type"] == "sell":
+                    current_sell.add(row["event_key"])
+                elif row["post_type"] == "buy":
+                    current_buy.add(row["event_key"])
+
+        for event_key in event_keys:
+            row = counts.get(event_key, {"sell_count": 0, "buy_count": 0})
+            items.append({
+                "event_key": event_key,
+                "sell_count": row["sell_count"],
+                "buy_count": row["buy_count"],
+                "total_count": row["sell_count"] + row["buy_count"],
+                "current_user_sell": event_key in current_sell,
+                "current_user_buy": event_key in current_buy,
+            })
+        return {"items": items}
 
 
 # ── Категории ────────────────────────────────────────────────────────────────

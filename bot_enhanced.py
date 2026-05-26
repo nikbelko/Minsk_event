@@ -189,6 +189,20 @@ def init_db():
             )
         """)
         cursor.execute("""
+            CREATE TABLE IF NOT EXISTS event_ticket_posts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                event_id INTEGER NOT NULL DEFAULT 0,
+                event_key TEXT NOT NULL DEFAULT '',
+                post_type TEXT NOT NULL,
+                qty INTEGER NOT NULL DEFAULT 1,
+                price_text TEXT DEFAULT '',
+                note TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS flash_subscriptions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
@@ -213,6 +227,13 @@ def init_db():
             "ALTER TABLE flash_subscriptions ADD COLUMN last_notified_at TEXT DEFAULT ''",
             "ALTER TABLE users ADD COLUMN telegram_username TEXT DEFAULT ''",
             "ALTER TABLE event_attendees ADD COLUMN event_key TEXT DEFAULT ''",
+            "ALTER TABLE event_ticket_posts ADD COLUMN event_id INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE event_ticket_posts ADD COLUMN event_key TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE event_ticket_posts ADD COLUMN post_type TEXT NOT NULL DEFAULT 'sell'",
+            "ALTER TABLE event_ticket_posts ADD COLUMN qty INTEGER NOT NULL DEFAULT 1",
+            "ALTER TABLE event_ticket_posts ADD COLUMN price_text TEXT DEFAULT ''",
+            "ALTER TABLE event_ticket_posts ADD COLUMN note TEXT DEFAULT ''",
+            "ALTER TABLE event_ticket_posts ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''",
         ]:
             try:
                 cursor.execute(col_sql)
@@ -238,10 +259,17 @@ def init_db():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_attendees_event_id ON event_attendees(event_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_attendees_user_id ON event_attendees(user_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_event_attendees_event_key ON event_attendees(event_key)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ticket_posts_event_key ON event_ticket_posts(event_key)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ticket_posts_user_id ON event_ticket_posts(user_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_ticket_posts_type ON event_ticket_posts(post_type)")
         cursor.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_event_attendees_user_event_key
             ON event_attendees(user_id, event_key)
             WHERE event_key IS NOT NULL AND event_key != ''
+        """)
+        cursor.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_ticket_posts_user_event_type
+            ON event_ticket_posts(user_id, event_key, post_type)
         """)
         try:
             cursor.execute("""
@@ -256,6 +284,22 @@ def init_db():
                 )
                 WHERE (event_key IS NULL OR event_key = '')
                   AND EXISTS (SELECT 1 FROM events e WHERE e.id = event_attendees.event_id)
+            """)
+        except Exception:
+            pass
+        try:
+            cursor.execute("""
+                UPDATE event_ticket_posts
+                SET event_key = (
+                    SELECT CASE
+                        WHEN e.category = 'cinema' THEN 'cinema:' || e.title || ':' || e.event_date
+                        ELSE 'other:' || e.title || ':' || COALESCE(e.place, '')
+                    END
+                    FROM events e
+                    WHERE e.id = event_ticket_posts.event_id
+                )
+                WHERE (event_key IS NULL OR event_key = '')
+                  AND EXISTS (SELECT 1 FROM events e WHERE e.id = event_ticket_posts.event_id)
             """)
         except Exception:
             pass
