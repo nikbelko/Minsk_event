@@ -229,6 +229,15 @@ def get_admin_dashboard_data(days: int = 30, exclude_admin: bool = True) -> dict
         cursor = conn.cursor()
 
         cursor.execute("SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE user_id != ?", (admin_filter,))
+        total_unique_users = cursor.fetchone()[0]
+        cursor.execute("""
+            SELECT COUNT(*) FROM (
+                SELECT DATE(created_at) as day, user_id
+                FROM user_stats
+                WHERE user_id != ?
+                GROUP BY DATE(created_at), user_id
+            )
+        """, (admin_filter,))
         total_users = cursor.fetchone()[0]
         cursor.execute("SELECT COUNT(*) FROM user_stats WHERE user_id != ?", (admin_filter,))
         total_actions = cursor.fetchone()[0]
@@ -281,6 +290,15 @@ def get_admin_dashboard_data(days: int = 30, exclude_admin: bool = True) -> dict
 
         wa_filter = "action IN ('open_webapp', 'webapp_ping') AND user_id != ?"
         cursor.execute(f"SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE {wa_filter}", (admin_filter,))
+        webapp_unique_total = cursor.fetchone()[0]
+        cursor.execute(f"""
+            SELECT COUNT(*) FROM (
+                SELECT DATE(created_at) as day, user_id
+                FROM user_stats
+                WHERE {wa_filter}
+                GROUP BY DATE(created_at), user_id
+            )
+        """, (admin_filter,))
         webapp_total = cursor.fetchone()[0]
         cursor.execute(f"SELECT COUNT(DISTINCT user_id) FROM user_stats WHERE {wa_filter} AND created_at LIKE ?",
                        (admin_filter, f"{today}%"))
@@ -347,6 +365,101 @@ def get_admin_dashboard_data(days: int = 30, exclude_admin: bool = True) -> dict
             })
 
         cursor.execute("""
+            SELECT COUNT(*) FROM (
+                SELECT DATE(created_at) as day, user_id
+                FROM user_stats
+                WHERE user_id != ? AND DATE(created_at) >= DATE('now', '-30 days')
+                GROUP BY DATE(created_at), user_id
+            )
+        """, (admin_filter,))
+        users_30d_total = cursor.fetchone()[0]
+        cursor.execute("""
+            SELECT COUNT(*) FROM user_stats
+            WHERE user_id != ? AND DATE(created_at) >= DATE('now', '-30 days')
+        """, (admin_filter,))
+        actions_30d_total = cursor.fetchone()[0]
+        cursor.execute("""
+            SELECT COUNT(*) FROM user_stats
+            WHERE user_id != ? AND DATE(created_at) >= DATE('now', '-7 days')
+        """, (admin_filter,))
+        actions_7d_total = cursor.fetchone()[0]
+        cursor.execute(f"""
+            SELECT COUNT(*) FROM (
+                SELECT DATE(created_at) as day, user_id
+                FROM user_stats
+                WHERE {wa_filter} AND DATE(created_at) >= DATE('now', '-30 days')
+                GROUP BY DATE(created_at), user_id
+            )
+        """, (admin_filter,))
+        webapp_30d_total = cursor.fetchone()[0]
+
+        cursor.execute("""
+            SELECT COUNT(*) FROM user_stats
+            WHERE user_id != ? AND action = 'subscribe' AND DATE(created_at) >= DATE('now', '-30 days')
+        """, (admin_filter,))
+        subscriptions_30d_total = cursor.fetchone()[0]
+        cursor.execute("""
+            SELECT COUNT(*) FROM user_stats
+            WHERE user_id != ? AND action = 'web_flash_subscribe' AND DATE(created_at) >= DATE('now', '-30 days')
+        """, (admin_filter,))
+        flash_subscriptions_30d_total = cursor.fetchone()[0]
+        cursor.execute("""
+            SELECT COUNT(*) FROM event_attendees
+            WHERE DATE(created_at) >= DATE('now', '-30 days') AND user_id != ?
+        """, (admin_filter,))
+        attendees_30d_total = cursor.fetchone()[0]
+        cursor.execute("""
+            SELECT COUNT(*) FROM event_ticket_posts
+            WHERE DATE(created_at) >= DATE('now', '-30 days') AND user_id != ?
+        """, (admin_filter,))
+        tickets_30d_total = cursor.fetchone()[0]
+
+        cursor.execute("""
+            SELECT COUNT(*) FROM (
+                SELECT DATE(created_at) as day, user_id
+                FROM user_stats
+                WHERE user_id != ?
+                  AND DATE(created_at) >= DATE('now', '-30 days')
+                  AND DATE(created_at) < DATE('now')
+                GROUP BY DATE(created_at), user_id
+            )
+        """, (admin_filter,))
+        users_prev30_total = cursor.fetchone()[0]
+        cursor.execute("""
+            SELECT COUNT(*) FROM user_stats
+            WHERE user_id != ?
+              AND DATE(created_at) >= DATE('now', '-30 days')
+              AND DATE(created_at) < DATE('now')
+        """, (admin_filter,))
+        actions_prev30_total = cursor.fetchone()[0]
+        cursor.execute(f"""
+            SELECT COUNT(*) FROM (
+                SELECT DATE(created_at) as day, user_id
+                FROM user_stats
+                WHERE {wa_filter}
+                  AND DATE(created_at) >= DATE('now', '-30 days')
+                  AND DATE(created_at) < DATE('now')
+                GROUP BY DATE(created_at), user_id
+            )
+        """, (admin_filter,))
+        webapp_prev30_total = cursor.fetchone()[0]
+        cursor.execute("""
+            SELECT COUNT(*) FROM (
+                SELECT user_id FROM user_stats
+                WHERE user_id != ?
+                GROUP BY user_id HAVING MIN(DATE(created_at)) >= DATE('now', '-30 days')
+                                   AND MIN(DATE(created_at)) < DATE('now')
+            )
+        """, (admin_filter,))
+        new_prev30_total = cursor.fetchone()[0]
+
+        users_avg_30d = round(users_prev30_total / 30, 2)
+        unique_users_avg_30d = round(new_prev30_total / 30, 2)
+        actions_avg_30d = round(actions_prev30_total / 30, 2)
+        webapp_avg_30d = round(webapp_prev30_total / 30, 2)
+        activity_avg_30d = round(actions_prev30_total / users_prev30_total, 2) if users_prev30_total > 0 else 0
+
+        cursor.execute("""
             SELECT
                 strftime('%Y-%m', u.created_at) as month,
                 COUNT(*) as actions,
@@ -390,6 +503,8 @@ def get_admin_dashboard_data(days: int = 30, exclude_admin: bool = True) -> dict
 
         cursor.execute("SELECT COUNT(*) FROM events WHERE event_date >= ?", (today,))
         events_count = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*) FROM events WHERE event_date >= ? AND source_name = 'user_submitted'", (today,))
+        user_submitted_count = cursor.fetchone()[0]
         cursor.execute("""
             SELECT source_name, COUNT(*) as count
             FROM events
@@ -448,6 +563,26 @@ def get_admin_dashboard_data(days: int = 30, exclude_admin: bool = True) -> dict
         submitted_period_no_admin = cursor.fetchone()[0]
         cursor.execute("SELECT COUNT(*) FROM event_attendees")
         attendees_total = cursor.fetchone()[0]
+        cursor.execute("""
+            SELECT
+                SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) as active_total,
+                SUM(CASE WHEN status = 'active' AND post_type = 'sell' THEN 1 ELSE 0 END) as active_sell,
+                SUM(CASE WHEN status = 'active' AND post_type = 'buy' THEN 1 ELSE 0 END) as active_buy,
+                SUM(CASE WHEN status = 'closed' AND post_type = 'sell' THEN 1 ELSE 0 END) as closed_sell,
+                SUM(CASE WHEN status = 'closed' AND post_type = 'buy' THEN 1 ELSE 0 END) as closed_buy,
+                SUM(CASE WHEN status = 'expired' AND post_type = 'sell' THEN 1 ELSE 0 END) as expired_sell,
+                SUM(CASE WHEN status = 'expired' AND post_type = 'buy' THEN 1 ELSE 0 END) as expired_buy
+            FROM event_ticket_posts
+            WHERE user_id != ?
+        """, (admin_filter,))
+        tickets_row = cursor.fetchone()
+        tickets_active_total = tickets_row["active_total"] or 0
+        tickets_active_sell = tickets_row["active_sell"] or 0
+        tickets_active_buy = tickets_row["active_buy"] or 0
+        tickets_closed_sell = tickets_row["closed_sell"] or 0
+        tickets_closed_buy = tickets_row["closed_buy"] or 0
+        tickets_expired_sell = tickets_row["expired_sell"] or 0
+        tickets_expired_buy = tickets_row["expired_buy"] or 0
 
         cursor.execute("""
             SELECT action,
@@ -457,7 +592,8 @@ def get_admin_dashboard_data(days: int = 30, exclude_admin: bool = True) -> dict
                 'start', 'menu_today', 'menu_weekend', 'menu_tomorrow',
                 'menu_categories', 'open_category', 'filter_category',
                 'webapp_ping', 'subscribe', 'web_flash_subscribe',
-                'submit_event_sent', 'web_submit_event'
+                'submit_event_sent', 'web_submit_event',
+                'event_attend', 'ticket_post'
             )
             GROUP BY action
         """, (admin_filter,))
@@ -468,22 +604,22 @@ def get_admin_dashboard_data(days: int = 30, exclude_admin: bool = True) -> dict
             "period_days": days,
             "today_summary": {
                 "users_today": dau,
-                "users_delta": dau - dau_yesterday,
+                "users_delta": round(dau - users_avg_30d, 2),
                 "unique_users_today": new_today,
-                "unique_users_delta": new_today - new_yesterday,
+                "unique_users_delta": round(new_today - unique_users_avg_30d, 2),
                 "actions_today": actions_today,
-                "actions_delta": actions_today - actions_yesterday,
+                "actions_delta": round(actions_today - actions_avg_30d, 2),
                 "activity_today": round(actions_today / dau, 2) if dau > 0 else 0,
-                "activity_delta": round(
-                    (actions_today / dau) - (actions_yesterday / dau_yesterday),
-                    2,
-                ) if dau > 0 and dau_yesterday > 0 else 0,
+                "activity_delta": round((actions_today / dau) - activity_avg_30d, 2) if dau > 0 else 0,
             },
             "overview": {
                 "total_users": total_users,
+                "total_unique_users": total_unique_users,
                 "days_alive": days_alive,
                 "total_actions": total_actions,
                 "actions_today": actions_today,
+                "actions_7d": actions_7d_total,
+                "actions_30d": actions_30d_total,
                 "dau": dau,
                 "wau": wau,
                 "mau": mau,
@@ -491,10 +627,12 @@ def get_admin_dashboard_data(days: int = 30, exclude_admin: bool = True) -> dict
                 "new_7d": new_7d,
                 "new_30d": new_30d,
                 "webapp_total": webapp_total,
+                "webapp_unique_total": webapp_unique_total,
                 "webapp_dau": webapp_dau,
                 "webapp_wau": webapp_wau,
                 "webapp_mau": webapp_mau,
                 "events_count": events_count,
+                "user_submitted_count": user_submitted_count,
                 "subscribers_count": subscribers_count,
                 "subscriptions_total": subscriptions_total,
                 "flash_total": flash_total,
@@ -508,6 +646,22 @@ def get_admin_dashboard_data(days: int = 30, exclude_admin: bool = True) -> dict
                 "submitted_period": submitted_period,
                 "submitted_period_no_admin": submitted_period_no_admin,
                 "attendees_total": attendees_total,
+                "tickets_active_total": tickets_active_total,
+                "tickets_active_sell": tickets_active_sell,
+                "tickets_active_buy": tickets_active_buy,
+                "tickets_closed_sell": tickets_closed_sell,
+                "tickets_closed_buy": tickets_closed_buy,
+                "tickets_expired_sell": tickets_expired_sell,
+                "tickets_expired_buy": tickets_expired_buy,
+                "summary_30d_users": users_30d_total,
+                "summary_30d_new_users": new_30d,
+                "summary_30d_actions": actions_30d_total,
+                "summary_30d_webapp": webapp_30d_total,
+                "summary_30d_activity": round(actions_30d_total / users_30d_total, 2) if users_30d_total > 0 else 0,
+                "summary_30d_subscriptions": subscriptions_30d_total,
+                "summary_30d_flash_subscriptions": flash_subscriptions_30d_total,
+                "summary_30d_attendees": attendees_30d_total,
+                "summary_30d_tickets": tickets_30d_total,
             },
             "daily_chart": daily_chart,
             "monthly_chart": monthly_chart,
