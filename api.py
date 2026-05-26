@@ -68,6 +68,7 @@ def _run_migrations():
                 qty INTEGER NOT NULL DEFAULT 1,
                 price_text TEXT DEFAULT '',
                 note TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'active',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
@@ -98,6 +99,7 @@ def _run_migrations():
             "ALTER TABLE event_ticket_posts ADD COLUMN qty INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE event_ticket_posts ADD COLUMN price_text TEXT DEFAULT ''",
             "ALTER TABLE event_ticket_posts ADD COLUMN note TEXT DEFAULT ''",
+            "ALTER TABLE event_ticket_posts ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
             "ALTER TABLE event_ticket_posts ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''",
         ]:
             try:
@@ -134,6 +136,28 @@ def _run_migrations():
                 WHERE (event_key IS NULL OR event_key = '')
                   AND EXISTS (SELECT 1 FROM events e WHERE e.id = event_ticket_posts.event_id)
             """)
+        except Exception:
+            pass
+        try:
+            today = today_str()
+            conn.execute("""
+                UPDATE event_ticket_posts
+                SET status = 'expired'
+                WHERE event_key LIKE 'cinema:%'
+                  AND LENGTH(event_key) >= 10
+                  AND substr(event_key, -10) < ?
+            """, (today,))
+            conn.execute("""
+                UPDATE event_ticket_posts
+                SET status = 'expired'
+                WHERE event_key LIKE 'other:%'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM events e
+                      WHERE ('other:' || e.title || ':' || COALESCE(e.place, '')) = event_ticket_posts.event_key
+                        AND e.event_date >= ?
+                  )
+            """, (today,))
         except Exception:
             pass
         conn.commit()
@@ -734,7 +758,65 @@ def _normalize_ticket_text(value: str | None, max_len: int) -> str:
     return value
 
 
+def _delete_expired_ticket_posts(conn: sqlite3.Connection) -> None:
+    today = today_str()
+    conn.execute(
+        """
+        UPDATE event_ticket_posts
+        SET status = 'expired'
+        WHERE event_key LIKE 'cinema:%'
+          AND LENGTH(event_key) >= 10
+          AND substr(event_key, -10) < ?
+        """,
+        (today,),
+    )
+    conn.execute(
+        """
+        UPDATE event_ticket_posts
+        SET status = 'expired'
+        WHERE event_key LIKE 'other:%'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM events e
+              WHERE ('other:' || e.title || ':' || COALESCE(e.place, '')) = event_ticket_posts.event_key
+                AND e.event_date >= ?
+          )
+        """,
+        (today,),
+    )
+
+
+def _get_event_row_by_ticket_key(conn: sqlite3.Connection, event_key: str):
+    today = today_str()
+    if event_key.startswith("cinema:"):
+        _, title, event_date = event_key.split(":", 2)
+        return conn.execute(
+            f"""
+            SELECT id, title, event_date, show_time, place, category
+            FROM events
+            WHERE category = 'cinema' AND title = ? AND event_date = ?
+            ORDER BY {TIME_ORDER_SQL}, id
+            LIMIT 1
+            """,
+            (title, event_date),
+        ).fetchone()
+    if event_key.startswith("other:"):
+        _, title, place = event_key.split(":", 2)
+        return conn.execute(
+            f"""
+            SELECT id, title, event_date, show_time, place, category
+            FROM events
+            WHERE title = ? AND COALESCE(place, '') = ? AND event_date >= ?
+            ORDER BY event_date, {TIME_ORDER_SQL}, id
+            LIMIT 1
+            """,
+            (title, place, today),
+        ).fetchone()
+    return None
+
+
 def _get_ticket_payload(conn: sqlite3.Connection, event_key: str, user_id: int | None = None) -> dict:
+    _delete_expired_ticket_posts(conn)
     cursor = conn.cursor()
     cursor.execute(
         """
@@ -743,6 +825,7 @@ def _get_ticket_payload(conn: sqlite3.Connection, event_key: str, user_id: int |
         FROM event_ticket_posts tp
         JOIN users u ON u.user_id = tp.user_id
         WHERE tp.event_key = ?
+          AND tp.status = 'active'
         ORDER BY tp.created_at DESC, tp.id DESC
         """,
         (event_key,),
@@ -988,9 +1071,51 @@ def get_user_attending_events(user_id: int = Query(...)):
     return {"events": items}
 
 
+@app.get("/api/user/tickets")
+def get_user_ticket_posts(user_id: int = Query(...)):
+    items = []
+    with get_db() as conn:
+        _delete_expired_ticket_posts(conn)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT event_key, post_type, qty, price_text, note, created_at, updated_at
+            FROM event_ticket_posts
+            WHERE user_id = ?
+              AND status = 'active'
+            ORDER BY updated_at DESC, id DESC
+            """,
+            (user_id,),
+        )
+        for row in cursor.fetchall():
+            event_key = row["event_key"] or ""
+            if not event_key:
+                continue
+            event_row = _get_event_row_by_ticket_key(conn, event_key)
+            if not event_row:
+                continue
+            items.append({
+                "event_key": event_key,
+                "event_id": event_row["id"],
+                "title": event_row["title"],
+                "event_date": event_row["event_date"],
+                "show_time": event_row["show_time"] or "",
+                "place": event_row["place"] or "",
+                "category": event_row["category"],
+                "post_type": row["post_type"],
+                "qty": row["qty"],
+                "price_text": row["price_text"] or "",
+                "note": row["note"] or "",
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            })
+    return {"posts": items}
+
+
 @app.post("/api/events/{event_id}/tickets")
 def upsert_event_ticket_post(event_id: int, payload: TicketPostRequest):
     with get_db() as conn:
+        _delete_expired_ticket_posts(conn)
         resolved_key = _resolve_event_key(conn, payload.event_key, payload.event_id or event_id)
         post_type = _normalize_ticket_post_type(payload.post_type)
         qty = _normalize_ticket_qty(payload.qty)
@@ -1008,13 +1133,14 @@ def upsert_event_ticket_post(event_id: int, payload: TicketPostRequest):
         conn.execute(
             """
             INSERT INTO event_ticket_posts (
-                user_id, event_id, event_key, post_type, qty, price_text, note, created_at, updated_at
+                user_id, event_id, event_key, post_type, qty, price_text, note, status, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
             ON CONFLICT(user_id, event_key, post_type) DO UPDATE SET
                 qty = excluded.qty,
                 price_text = excluded.price_text,
                 note = excluded.note,
+                status = 'active',
                 updated_at = excluded.updated_at
             """,
             (
@@ -1054,13 +1180,18 @@ def remove_event_ticket_post(
     first_name: str = Query(""),
 ):
     with get_db() as conn:
+        _delete_expired_ticket_posts(conn)
         resolved_key = _resolve_event_key(conn, event_key, event_id)
         normalized_type = _normalize_ticket_post_type(post_type)
         now = datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
         conn.execute(
-            "DELETE FROM event_ticket_posts WHERE event_key = ? AND user_id = ? AND post_type = ?",
-            (resolved_key, user_id, normalized_type),
+            """
+            UPDATE event_ticket_posts
+            SET status = 'closed', updated_at = ?
+            WHERE event_key = ? AND user_id = ? AND post_type = ?
+            """,
+            (now, resolved_key, user_id, normalized_type),
         )
         conn.execute(
             "INSERT INTO user_stats (user_id, username, first_name, action, detail, created_at) VALUES (?,?,?,?,?,?)",
@@ -1080,6 +1211,7 @@ def remove_event_ticket_post(
 @app.get("/api/events/{event_id}/tickets")
 def get_event_ticket_posts(event_id: int, user_id: Optional[int] = Query(None), event_key: str = Query("")):
     with get_db() as conn:
+        _delete_expired_ticket_posts(conn)
         resolved_key = _resolve_event_key(conn, event_key, event_id)
         return _get_ticket_payload(conn, resolved_key, user_id)
 
@@ -1090,6 +1222,7 @@ def get_ticket_posts_summary(payload: TicketSummaryRequest):
     event_ids = sorted({eid for eid in (payload.event_ids or []) if eid > 0})
 
     with get_db() as conn:
+        _delete_expired_ticket_posts(conn)
         if not event_keys and event_ids:
             event_keys = [_resolve_event_key(conn, None, event_id) for event_id in event_ids]
 
@@ -1106,6 +1239,7 @@ def get_ticket_posts_summary(payload: TicketSummaryRequest):
                    SUM(CASE WHEN post_type = 'buy' THEN 1 ELSE 0 END) as buy_count
             FROM event_ticket_posts
             WHERE event_key IN ({placeholders})
+              AND status = 'active'
             GROUP BY event_key
             """,
             event_keys,
@@ -1126,6 +1260,7 @@ def get_ticket_posts_summary(payload: TicketSummaryRequest):
                 SELECT event_key, post_type
                 FROM event_ticket_posts
                 WHERE user_id = ? AND event_key IN ({placeholders})
+                  AND status = 'active'
                 """,
                 [payload.user_id, *event_keys],
             )

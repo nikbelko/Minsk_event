@@ -198,6 +198,7 @@ def init_db():
                 qty INTEGER NOT NULL DEFAULT 1,
                 price_text TEXT DEFAULT '',
                 note TEXT DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'active',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
@@ -233,6 +234,7 @@ def init_db():
             "ALTER TABLE event_ticket_posts ADD COLUMN qty INTEGER NOT NULL DEFAULT 1",
             "ALTER TABLE event_ticket_posts ADD COLUMN price_text TEXT DEFAULT ''",
             "ALTER TABLE event_ticket_posts ADD COLUMN note TEXT DEFAULT ''",
+            "ALTER TABLE event_ticket_posts ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
             "ALTER TABLE event_ticket_posts ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''",
         ]:
             try:
@@ -301,6 +303,28 @@ def init_db():
                 WHERE (event_key IS NULL OR event_key = '')
                   AND EXISTS (SELECT 1 FROM events e WHERE e.id = event_ticket_posts.event_id)
             """)
+        except Exception:
+            pass
+        try:
+            today = today_str()
+            cursor.execute("""
+                UPDATE event_ticket_posts
+                SET status = 'expired'
+                WHERE event_key LIKE 'cinema:%'
+                  AND LENGTH(event_key) >= 10
+                  AND substr(event_key, -10) < ?
+            """, (today,))
+            cursor.execute("""
+                UPDATE event_ticket_posts
+                SET status = 'expired'
+                WHERE event_key LIKE 'other:%'
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM events e
+                      WHERE ('other:' || e.title || ':' || COALESCE(e.place, '')) = event_ticket_posts.event_key
+                        AND e.event_date >= ?
+                  )
+            """, (today,))
         except Exception:
             pass
         conn.commit()
