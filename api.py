@@ -900,8 +900,8 @@ def _normalize_ticket_post_type(post_type: str) -> str:
 
 def _normalize_ticket_qty(qty: int) -> int:
     qty = int(qty or 1)
-    if qty < 1 or qty > 4:
-        raise HTTPException(status_code=400, detail="qty must be between 1 and 4")
+    if qty < 1 or qty > 99:
+        raise HTTPException(status_code=400, detail="qty must be between 1 and 99")
     return qty
 
 
