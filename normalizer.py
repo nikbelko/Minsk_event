@@ -219,10 +219,15 @@ PLACE_ALIASES: dict[str, str] = {
     "58 club":                         "Club 58",
     "58клуб":                         "Club 58",
     "58 клуб":                         "Club 58",
+    "модуль":                          "Modul Art Platform",
+    "modul":                          "Modul Art Platform",
+    "wearemodul":                     "Modul Art Platform",
+
 
     # ТЦ
     "galileo":                        "Конкорс",
     "галилео":                        "Конкорс",
+    "конкорс":                        "Конкорс",
 
     # Стадионы
     "стадион динамо":                 "Национальный олимпийский стадион Динамо",
