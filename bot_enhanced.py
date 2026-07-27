@@ -212,8 +212,21 @@ def init_db():
                 status TEXT DEFAULT 'active'
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS flash_ignored_matches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subscription_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                event_key TEXT NOT NULL,
+                title TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                UNIQUE(subscription_id, event_key)
+            )
+        """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_flash_user ON flash_subscriptions(user_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_flash_status ON flash_subscriptions(status)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_flash_ignored_sub ON flash_ignored_matches(subscription_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_flash_ignored_user ON flash_ignored_matches(user_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_stats_user_id ON user_stats(user_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_stats_created_at ON user_stats(created_at)")
         # Миграции для существующих БД
@@ -899,6 +912,51 @@ def remove_flash_subscription(flash_id: int, user_id: int):
         conn.commit()
 
 
+def _flash_event_key(row) -> str:
+    title = (row["title"] or "").strip().lower()
+    date = (row["event_date"] or "").strip()
+    place = (row["place"] or "").strip().lower()
+    return f"{title}|{date}|{place}"
+
+
+def ignore_flash_matches(flash_id: int, user_id: int, event_ids: list[int]) -> int:
+    """Adds shown events to per-subscription ignore list for 'keep searching'."""
+    clean_ids = sorted({int(eid) for eid in event_ids if int(eid) > 0})
+    if not clean_ids:
+        return 0
+
+    with get_db_connection() as conn:
+        owner = conn.execute(
+            "SELECT id FROM flash_subscriptions WHERE id=? AND user_id=? AND status='active'",
+            (flash_id, user_id),
+        ).fetchone()
+        if not owner:
+            return 0
+
+        placeholders = ",".join("?" for _ in clean_ids)
+        rows = conn.execute(
+            f"SELECT id, title, event_date, place FROM events WHERE id IN ({placeholders})",
+            clean_ids,
+        ).fetchall()
+        now = datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        added = 0
+        for row in rows:
+            event_key = _flash_event_key(row)
+            if not event_key:
+                continue
+            cur = conn.execute(
+                """
+                INSERT OR IGNORE INTO flash_ignored_matches
+                    (subscription_id, user_id, event_key, title, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (flash_id, user_id, event_key, row["title"] or "", now),
+            )
+            added += cur.rowcount or 0
+        conn.commit()
+        return added
+
+
 def get_user_flash_subscriptions(user_id: int) -> list:
     with get_db_connection() as conn:
         return conn.execute(
@@ -954,10 +1012,20 @@ async def check_flash_subscriptions(bot) -> int:
                 FROM events
                 WHERE event_date >= ?
                 AND (pylow(title) LIKE ? OR pylow(details) LIKE ?)
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM flash_ignored_matches fim
+                    WHERE fim.subscription_id = ?
+                      AND fim.event_key = (
+                          pylow(TRIM(COALESCE(events.title, ''))) || '|' ||
+                          COALESCE(events.event_date, '') || '|' ||
+                          pylow(TRIM(COALESCE(events.place, '')))
+                      )
+                )
                 {"AND (created_at IS NULL OR created_at > ?)" if last_notified else ""}
                 ORDER BY event_date, {TIME_ORDER_SQL}
                 LIMIT 5
-            """, (today, spl, spl, *((last_notified,) if last_notified else ()))).fetchall()
+            """, (today, spl, spl, sub["id"], *((last_notified,) if last_notified else ()))).fetchall()
 
             if not rows:
                 continue
@@ -981,9 +1049,13 @@ async def check_flash_subscriptions(bot) -> int:
             text = "\n".join(lines)
 
             sub_id = sub["id"]
+            event_id_parts = [str(e["id"]) for e in rows]
+            while event_id_parts and len(f"fc:{sub_id}:{'-'.join(event_id_parts)}") > 64:
+                event_id_parts.pop()
+            event_ids = "-".join(event_id_parts)
             confirm_keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton("✅ Да, нашёл!", callback_data=f"flash_found_{sub_id}"),
-                InlineKeyboardButton("🔄 Нет, искать дальше", callback_data=f"flash_continue_{sub_id}"),
+                InlineKeyboardButton("✅ Да, нашёл!", callback_data=f"ff:{sub_id}"),
+                InlineKeyboardButton("🔄 Нет, искать дальше", callback_data=f"fc:{sub_id}:{event_ids}"),
             ]])
 
             try:
@@ -4682,9 +4754,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 await query.answer("Вы уже подписаны на этот запрос", show_alert=True)
             return
-        if data.startswith("flash_found_"):
+        if data.startswith("ff:") or data.startswith("flash_found_"):
             user = query.from_user
-            flash_id = int(data[len("flash_found_"):])
+            flash_id = int(data.split(":", 1)[1]) if data.startswith("ff:") else int(data[len("flash_found_"):])
             remove_flash_subscription(flash_id, user.id)
             log_user_action(user.id, user.username, user.first_name, "flash_found", str(flash_id))
             await query.answer("🎉 Отлично! Подписка удалена.", show_alert=False)
@@ -4693,9 +4765,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
             return
-        if data.startswith("flash_continue_"):
-            flash_id = int(data[len("flash_continue_"):])
-            await query.answer("🔄 Продолжаем поиск!", show_alert=False)
+        if data.startswith("fc:") or data.startswith("flash_continue_"):
+            user = query.from_user
+            if data.startswith("fc:"):
+                _, flash_id_raw, ids_raw = (data.split(":", 2) + [""])[:3]
+                flash_id = int(flash_id_raw)
+                event_ids = [int(x) for x in ids_raw.split("-") if x.isdigit()]
+            else:
+                flash_id = int(data[len("flash_continue_"):])
+                event_ids = []
+            ignored = ignore_flash_matches(flash_id, user.id, event_ids)
+            log_user_action(user.id, user.username, user.first_name, "flash_continue", f"{flash_id}:{','.join(map(str, event_ids))}")
+            suffix = f" Исключили {ignored} найденн." if ignored else ""
+            await query.answer(f"🔄 Продолжаем поиск!{suffix}", show_alert=False)
             try:
                 await query.edit_message_reply_markup(reply_markup=None)
             except Exception:

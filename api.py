@@ -73,12 +73,25 @@ def _run_migrations():
                 updated_at TEXT NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS flash_ignored_matches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                subscription_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                event_key TEXT NOT NULL,
+                title TEXT DEFAULT '',
+                created_at TEXT NOT NULL,
+                UNIQUE(subscription_id, event_key)
+            )
+        """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_event_attendees_event_id ON event_attendees(event_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_event_attendees_user_id ON event_attendees(user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_event_attendees_event_key ON event_attendees(event_key)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ticket_posts_event_key ON event_ticket_posts(event_key)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ticket_posts_user_id ON event_ticket_posts(user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ticket_posts_type ON event_ticket_posts(post_type)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_flash_ignored_sub ON flash_ignored_matches(subscription_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_flash_ignored_user ON flash_ignored_matches(user_id)")
         conn.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_event_attendees_user_event_key
             ON event_attendees(user_id, event_key)
@@ -714,6 +727,7 @@ class CategoryCounts(BaseModel):
     boardgames: int = 0
     broadcast: int = 0
     education: int = 0
+    quiz: int = 0
     other: int = 0
 
 
@@ -1439,34 +1453,79 @@ def get_ticket_posts_summary(payload: TicketSummaryRequest):
 
 # ── Категории ────────────────────────────────────────────────────────────────
 
-@app.get("/api/categories/counts", response_model=CategoryCounts)
-def categories_counts():
-    """Количество актуальных событий по каждой категории."""
+def _count_events_for_category(
+    category: str,
+    filter_name: Optional[str] = None,
+    date: Optional[str] = None,
+) -> int:
+    """Count events using the same filtering semantics as list endpoints."""
     today = today_str()
-    with get_db() as conn:
-        cursor = conn.cursor()
-        
-        # Обычные категории - ВСЕ события (и платные, и бесплатные)
-        cursor.execute(
-            "SELECT category, COUNT(*) as cnt FROM events WHERE event_date >= ? GROUP BY category",
-            (today,)
-        )
-        data = {row["category"]: row["cnt"] for row in cursor.fetchall()}
-        
-        # Категория free - все бесплатные события (независимо от категории)
-        cursor.execute(
-            "SELECT COUNT(*) FROM events WHERE event_date >= ? AND price = 'Бесплатно'",
-            (today,)
-        )
-        data["free"] = cursor.fetchone()[0]
+    now_t = now_time_str()
+    where: list[str] = []
+    params: list = []
+    extra_union = None
 
-        # Категория kids - все события с флагом is_kids=1 (независимо от category)
-        cursor.execute(
-            "SELECT COUNT(*) FROM events WHERE event_date >= ? AND is_kids = 1",
-            (today,)
-        )
-        data["kids"] = cursor.fetchone()[0]
+    if date:
+        where.append("event_date = ?")
+        params.append(date)
+        if date == today:
+            time_filter, time_params = _build_time_filter(date, today, now_t)
+            where.append(time_filter)
+            params.extend(time_params)
+        extra_union = _build_overnight_union(date, now_t if date == today else None, category)
+    elif filter_name == "today":
+        where.append("event_date = ?")
+        params.append(today)
+        time_filter, time_params = _build_time_filter(today, today, now_t)
+        where.append(time_filter)
+        params.extend(time_params)
+        extra_union = _build_overnight_union(today, now_t, category)
+    elif filter_name == "tomorrow":
+        tomorrow = (now_minsk() + timedelta(days=1)).strftime("%Y-%m-%d")
+        where.append("event_date = ?")
+        params.append(tomorrow)
+        extra_union = _build_overnight_union(tomorrow, None, category)
+    elif filter_name == "weekend":
+        saturday, sunday = get_weekend_dates()
+        where.append("event_date IN (?, ?)")
+        params.extend([saturday, sunday])
+    elif filter_name == "upcoming":
+        until = (now_minsk() + timedelta(days=30)).strftime("%Y-%m-%d")
+        venue_open = now_t < VENUE_CLOSE_TIME
+        if venue_open:
+            today_filter = "(event_date > ? OR (show_time = '' OR show_time IS NULL OR (end_time != '' AND end_time IS NOT NULL AND (end_time > ? OR end_time < show_time)) OR ((end_time = '' OR end_time IS NULL) AND show_time > ?)))"
+        else:
+            today_filter = "(event_date > ? OR ((end_time != '' AND end_time IS NOT NULL AND (end_time > ? OR end_time < show_time)) OR ((end_time = '' OR end_time IS NULL) AND show_time != '' AND show_time IS NOT NULL AND show_time > ?)))"
+        where.extend(["event_date BETWEEN ? AND ?", today_filter])
+        params.extend([today, until, today, now_t, now_t])
+    else:
+        where.append("event_date >= ?")
+        params.append(today)
 
+    if category == "free":
+        where.append("price = 'Бесплатно'")
+    elif category == "kids":
+        where.append("is_kids = 1")
+    elif category and category != "all":
+        where.append("category = ?")
+        params.append(category)
+
+    _, total = fetch_events_paged(where, params, 1, 1, extra_union=extra_union)
+    return total
+
+
+@app.get("/api/categories/counts", response_model=CategoryCounts)
+def categories_counts(
+    filter: Optional[str] = Query(None, pattern="^(today|tomorrow|weekend|upcoming)$"),
+    date: Optional[str] = Query(None, description="YYYY-MM-DD"),
+):
+    """Количество событий по категориям. С filter/date фронт получает все counts одним HTTP-запросом."""
+    categories = [
+        "cinema", "concert", "theater", "exhibition", "kids", "fest", "sport", "party",
+        "free", "excursion", "market", "masterclass", "boardgames", "broadcast",
+        "education", "quiz", "other",
+    ]
+    data = {category: _count_events_for_category(category, filter, date) for category in categories}
     return CategoryCounts(**data)
 
 # ── Даты с событиями (для календаря) ────────────────────────────────────────
