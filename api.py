@@ -884,7 +884,7 @@ def _event_exists(conn: sqlite3.Connection, event_id: int) -> bool:
 
 def _build_event_group_key(category: str, title: str, event_date: str, place: str) -> str:
     if category == "cinema":
-        return f"cinema:{title}:{event_date}"
+        return f"cinema:{title}"
     return f"other:{title}:{place}"
 
 
