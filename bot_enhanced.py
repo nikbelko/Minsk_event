@@ -11,6 +11,8 @@ import sqlite3
 import csv
 import io
 import tempfile
+import uuid
+import random
 from contextlib import contextmanager
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -223,10 +225,19 @@ def init_db():
                 UNIQUE(subscription_id, event_key)
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS flash_subscription_requests (
+                token TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                query TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_flash_user ON flash_subscriptions(user_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_flash_status ON flash_subscriptions(status)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_flash_ignored_sub ON flash_ignored_matches(subscription_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_flash_ignored_user ON flash_ignored_matches(user_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_flash_sub_req_user ON flash_subscription_requests(user_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_stats_user_id ON user_stats(user_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_stats_created_at ON user_stats(created_at)")
         # Миграции для существующих БД
@@ -901,6 +912,34 @@ def add_flash_subscription(user_id: int, query: str) -> bool:
         )
         conn.commit()
         return True
+
+
+def create_flash_subscription_request(user_id: int, query: str) -> str:
+    """Stores full query behind a short callback token."""
+    token = uuid.uuid4().hex[:16]
+    with get_db_connection() as conn:
+        conn.execute(
+            "DELETE FROM flash_subscription_requests WHERE created_at < DATETIME('now', '-7 days')"
+        )
+        conn.execute(
+            "INSERT INTO flash_subscription_requests (token, user_id, query, created_at) VALUES (?, ?, ?, ?)",
+            (token, user_id, query, datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        conn.commit()
+    return token
+
+
+def get_flash_subscription_request(token: str, user_id: int) -> str | None:
+    with get_db_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT query
+            FROM flash_subscription_requests
+            WHERE token=? AND user_id=? AND created_at >= DATETIME('now', '-7 days')
+            """,
+            (token, user_id),
+        ).fetchone()
+        return row["query"] if row else None
 
 
 def remove_flash_subscription(flash_id: int, user_id: int):
@@ -3368,25 +3407,61 @@ async def post_to_channel(bot, post_type: str = "today"):
         title_part = f'<a href="{url}">{title}</a>' if url else title
         return f"→ {title_part}" + (f" | {price}" if price else "")
 
-    def _dedup_by_cat(events_in: list, limit: int = 60) -> dict:
+    def _channel_event_key(e) -> tuple[str, str]:
+        return ((e.get("title") or "").strip().lower(), (e.get("place") or "").strip().lower())
+
+    def _recurrence_counts(events_in: list) -> dict[tuple[str, str], int]:
+        keys = {_channel_event_key(e) for e in events_in}
+        keys = {key for key in keys if key[0]}
+        if not keys:
+            return {}
+
+        counts: dict[tuple[str, str], int] = {}
+        with get_db_connection() as conn:
+            for title, place in keys:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(DISTINCT event_date)
+                    FROM events
+                    WHERE event_date >= DATE('now')
+                      AND LOWER(TRIM(title)) = ?
+                      AND LOWER(TRIM(COALESCE(place, ''))) = ?
+                    """,
+                    (title, place),
+                ).fetchone()
+                counts[(title, place)] = row[0] if row else 1
+        return counts
+
+    def _channel_events_by_cat(events_in: list, seed: str, limit: int = 80) -> dict:
         from collections import defaultdict as _dd
         seen_global: set = set()
         by_cat = _dd(list)
         for e in events_in[:limit]:
-            key = (e.get("title", ""), e.get("place", ""))
+            key = _channel_event_key(e)
             if key in seen_global:
                 continue
             seen_global.add(key)
-            by_cat[e.get("category")].append(e)
-        # deduplicate within each category by title
+            if key[0]:
+                by_cat[e.get("category")].append(e)
+
+        recurrence = _recurrence_counts([e for evs in by_cat.values() for e in evs])
         result = _dd(list)
         for cat, evs in by_cat.items():
-            seen_cat: set = set()
-            for e in evs:
-                t = e.get("title", "")
-                if t not in seen_cat:
-                    seen_cat.add(t)
-                    result[cat].append(e)
+            pool = sorted(
+                evs,
+                key=lambda e: (
+                    min(recurrence.get(_channel_event_key(e), 1), 30),
+                    1 if not (e.get("show_time") or "") else 0,
+                    e.get("show_time") or "99:99",
+                    e.get("title") or "",
+                ),
+            )
+            # Берём не строго первые, а top-пул: повторяющиеся события уходят ниже,
+            # но каждый день выборка немного меняется и не закрепляет один и тот же набор.
+            top_pool = pool[: max(8, min(len(pool), 12))]
+            rng = random.Random(f"{seed}:{cat}")
+            rng.shuffle(top_pool)
+            result[cat] = top_pool
         return result
 
     if post_type == "today":
@@ -3403,7 +3478,7 @@ async def post_to_channel(bot, post_type: str = "today"):
             f"✨ Куда пойти сегодня в Минске?\n",
             f"Планируй когда удобно — всё открыто для тебя.\n",
         ]
-        by_cat = _dedup_by_cat(events)
+        by_cat = _channel_events_by_cat(events, seed=f"today:{now.strftime('%Y-%m-%d')}")
         for cat, evs in by_cat.items():
             emoji    = CAT_EMOJI.get(cat, "📌")
             cat_name = CAT_NAME.get(cat, cat.upper())
@@ -3430,7 +3505,7 @@ async def post_to_channel(bot, post_type: str = "today"):
             f"😎 Планируем яркие выходные в Минске!\n",
         ]
         _SHORT_DAYS = ["пн","вт","ср","чт","пт","сб","вск"]
-        by_cat = _dedup_by_cat(all_events)
+        by_cat = _channel_events_by_cat(all_events, seed=f"weekend:{saturday.strftime('%Y-%m-%d')}")
         for cat, evs in by_cat.items():
             emoji    = CAT_EMOJI.get(cat, "📌")
             cat_name = CAT_NAME.get(cat, cat.upper())
@@ -3902,6 +3977,7 @@ async def search_by_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user_action(user.id, user.username, user.first_name, "search_title", query)
     await update.message.chat.send_action(action="typing")
     events = search_events_by_title(query)
+    flash_token = create_flash_subscription_request(user.id, query)
     if events:
         set_pagination(context, events, f"<b>Результаты: «{query}»</b>",
                        share_query=query)
@@ -3912,7 +3988,7 @@ async def search_by_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton(
                     f"🔔 Подписаться на «{query[:30]}»",
-                    callback_data=f"flash_sub_{query[:50]}"
+                    callback_data=f"fs:{flash_token}"
                 )
             ]]),
             parse_mode="HTML"
@@ -3923,7 +3999,7 @@ async def search_by_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton(
                     f"🔔 Уведомить когда появится",
-                    callback_data=f"flash_sub_{query[:50]}"
+                    callback_data=f"fs:{flash_token}"
                 )
             ]]),
             parse_mode="Markdown"
@@ -4738,9 +4814,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception: pass
             await query.answer("Подписка оформлена 🔔", show_alert=False)
             return
-        if data.startswith("flash_sub_"):
+        if data.startswith("fs:") or data.startswith("flash_sub_"):
             user = query.from_user
-            flash_query = data[len("flash_sub_"):]
+            if data.startswith("fs:"):
+                token = data.split(":", 1)[1]
+                flash_query = get_flash_subscription_request(token, user.id)
+                if not flash_query:
+                    await query.answer("Запрос устарел. Повторите поиск.", show_alert=True)
+                    return
+            else:
+                flash_query = data[len("flash_sub_"):]
             added = add_flash_subscription(user.id, flash_query)
             log_user_action(user.id, user.username, user.first_name, "flash_subscribe", flash_query)
             if added:

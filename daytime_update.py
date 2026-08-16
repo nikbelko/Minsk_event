@@ -256,6 +256,7 @@ def _make_relax_check(source_key: str, url: str):
 
 BYCARD_BASE_URL   = "https://bycard.by"
 BYCARD_LISTING_URL = "https://bycard.by/objects/minsk/1"
+BYCARD_OBJECT_HREF_RE = re.compile(r"/objects/minsk/1/(?:[^\"'?#/\s]+-)?(\d+)(?=[/?#\"'\s]|$)")
 
 # Import decode_nuxt/resolve from bycard_parser (same directory, always available).
 # No fallback: if import fails, bycard check returns error → skipped_due_to_error.
@@ -316,6 +317,20 @@ def _extract_bycard_keys_from_html(html: str) -> list[str]:
     return keys
 
 
+def _fetch_bycard_html(session: requests.Session, url: str) -> str:
+    resp = session.get(url, timeout=REQUEST_TIMEOUT)
+    resp.raise_for_status()
+    resp.encoding = "utf-8"
+    if "hg-security=" in resp.text and "<title>Verification</title>" in resp.text:
+        m = re.search(r"hg-security=([^;\"']+)", resp.text)
+        if m:
+            session.cookies.set("hg-security", m.group(1), domain="bycard.by", path="/")
+            resp = session.get(url, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+            resp.encoding = "utf-8"
+    return resp.text
+
+
 def check_bycard_fingerprint() -> dict:
     """
     Fetch bycard venue listing → collect venue hrefs → per venue extract
@@ -330,15 +345,16 @@ def check_bycard_fingerprint() -> dict:
             "status": "error",
         }
     try:
-        resp = requests.get(BYCARD_LISTING_URL, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
+        session = requests.Session()
+        session.headers.update(HEADERS)
+        listing_html = _fetch_bycard_html(session, BYCARD_LISTING_URL)
+        soup = BeautifulSoup(listing_html, "html.parser")
 
         venue_hrefs: list[str] = []
         seen_ids: set[str] = set()
-        for a in soup.find_all("a", href=re.compile(r"/objects/minsk/1/\d+")):
+        for a in soup.find_all("a", href=BYCARD_OBJECT_HREF_RE):
             href = a.get("href", "")
-            m = re.search(r"/objects/minsk/1/(\d+)", href)
+            m = BYCARD_OBJECT_HREF_RE.search(href)
             if m and m.group(1) not in seen_ids:
                 seen_ids.add(m.group(1))
                 venue_hrefs.append(href)
@@ -358,9 +374,7 @@ def check_bycard_fingerprint() -> dict:
         for href in venue_hrefs:
             try:
                 url = BYCARD_BASE_URL + href
-                r = requests.get(url, headers=HEADERS, timeout=REQUEST_TIMEOUT)
-                r.raise_for_status()
-                keys = _extract_bycard_keys_from_html(r.text)
+                keys = _extract_bycard_keys_from_html(_fetch_bycard_html(session, url))
                 all_keys.extend(keys)
             except Exception as e:
                 log.warning(f"  bycard venue {href} error: {e}")

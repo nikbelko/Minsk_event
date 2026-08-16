@@ -44,6 +44,7 @@ BASE_URL     = "https://bycard.by"
 SOURCE_NAME  = "bycard.by"
 THEATRES_URL = f"{BASE_URL}/objects/minsk/1"
 MAX_DAYS     = 90
+OBJECT_HREF_RE = re.compile(r"/objects/minsk/1/(?:[^\"'?#/\s]+-)?(\d+)(?=[/?#\"'\s]|$)")
 
 HEADERS = {
     "User-Agent": (
@@ -54,6 +55,8 @@ HEADERS = {
     "Accept-Language": "ru-RU,ru;q=0.9",
     "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
 }
+SESSION = requests.Session()
+SESSION.headers.update(HEADERS)
 
 
 # ── HTTP ──────────────────────────────────────────────────────────────────────
@@ -61,9 +64,17 @@ HEADERS = {
 def fetch_page(url: str, retries: int = 3) -> Optional[str]:
     for attempt in range(retries):
         try:
-            r = requests.get(url, headers=HEADERS, timeout=30)
+            r = SESSION.get(url, timeout=30)
             r.raise_for_status()
             r.encoding = "utf-8"
+            if "hg-security=" in r.text and "<title>Verification</title>" in r.text:
+                m = re.search(r"hg-security=([^;\"']+)", r.text)
+                if m:
+                    SESSION.cookies.set("hg-security", m.group(1), domain="bycard.by", path="/")
+                    logger.info("  bycard verification cookie получен, повторяю запрос")
+                    r = SESSION.get(url, timeout=30)
+                    r.raise_for_status()
+                    r.encoding = "utf-8"
             logger.info(f"  Загружено {url} ({len(r.text)} симв.)")
             return r.text
         except Exception as e:
@@ -129,9 +140,9 @@ def fetch_theatre_list(html: str) -> list[dict]:
     theatres = []
     seen_ids: set = set()
 
-    for a in soup.find_all("a", href=re.compile(r"/objects/minsk/1/\d+")):
+    for a in soup.find_all("a", href=OBJECT_HREF_RE):
         href = a.get("href", "")
-        m = re.search(r"/objects/minsk/1/(\d+)", href)
+        m = OBJECT_HREF_RE.search(href)
         if not m:
             continue
         tid = m.group(1)
@@ -161,7 +172,7 @@ def fetch_theatre_list(html: str) -> list[dict]:
 
     # Fallback: ищем ID театров через ссылки в тексте страницы
     if not theatres:
-        all_ids = re.findall(r'/objects/minsk/1/(\d+)', html)
+        all_ids = OBJECT_HREF_RE.findall(html)
         for tid in sorted(set(all_ids)):
             if tid not in seen_ids:
                 seen_ids.add(tid)
