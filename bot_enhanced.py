@@ -13,6 +13,7 @@ import io
 import tempfile
 import uuid
 import random
+import math
 from contextlib import contextmanager
 from collections import defaultdict
 from datetime import datetime, timedelta
@@ -3410,6 +3411,15 @@ async def post_to_channel(bot, post_type: str = "today"):
     def _channel_event_key(e) -> tuple[str, str]:
         return ((e.get("title") or "").strip().lower(), (e.get("place") or "").strip().lower())
 
+    def _event_group_key(e) -> str:
+        category = (e.get("category") or "").strip()
+        title = (e.get("title") or "").strip()
+        if category == "cinema":
+            date_value = (e.get("event_date") or "").strip()
+            return f"cinema:{title}:{date_value}"
+        place = (e.get("place") or "").strip()
+        return f"other:{title}:{place}"
+
     def _recurrence_counts(events_in: list) -> dict[tuple[str, str], int]:
         keys = {_channel_event_key(e) for e in events_in}
         keys = {key for key in keys if key[0]}
@@ -3432,6 +3442,38 @@ async def post_to_channel(bot, post_type: str = "today"):
                 counts[(title, place)] = row[0] if row else 1
         return counts
 
+    def _rating_summary_for_events(events_in: list) -> dict[str, dict]:
+        if not events_in:
+            return {}
+        event_keys = sorted({_event_group_key(e) for e in events_in if _event_group_key(e)})
+        if not event_keys:
+            return {}
+        with get_db_connection() as conn:
+            placeholders = ",".join("?" for _ in event_keys)
+            rows = conn.execute(
+                f"""
+                SELECT event_key,
+                       AVG(score) AS avg_score,
+                       COUNT(*) AS votes
+                FROM event_ratings
+                WHERE event_key IN ({placeholders})
+                GROUP BY event_key
+                """,
+                event_keys,
+            ).fetchall()
+        summary = {}
+        for row in rows:
+            event_key = row["event_key"]
+            avg = float(row["avg_score"] or 0.0)
+            votes = int(row["votes"] or 0)
+            boost = avg * (1.0 + math.log1p(votes) / 10.0)
+            summary[event_key] = {
+                "avg_score": avg,
+                "votes": votes,
+                "boost": boost,
+            }
+        return summary
+
     def _channel_events_by_cat(events_in: list, seed: str, limit: int = 80) -> dict:
         from collections import defaultdict as _dd
         seen_global: set = set()
@@ -3445,19 +3487,28 @@ async def post_to_channel(bot, post_type: str = "today"):
                 by_cat[e.get("category")].append(e)
 
         recurrence = _recurrence_counts([e for evs in by_cat.values() for e in evs])
+        rating_summary = _rating_summary_for_events([e for evs in by_cat.values() for e in evs])
         result = _dd(list)
         for cat, evs in by_cat.items():
-            pool = sorted(
-                evs,
-                key=lambda e: (
-                    min(recurrence.get(_channel_event_key(e), 1), 30),
-                    1 if not (e.get("show_time") or "") else 0,
-                    e.get("show_time") or "99:99",
+            def event_priority(e):
+                key = _channel_event_key(e)
+                current_recurrence = min(recurrence.get(key, 1), 30)
+                event_key = _event_group_key(e)
+                rating = rating_summary.get(event_key, {})
+                avg_score = float(rating.get("avg_score", 0.0) or 0.0)
+                vote_boost = float(rating.get("boost", 0.0) or 0.0)
+                has_time = 0 if (e.get("show_time") or "") else 1
+                time_value = e.get("show_time") or "99:99"
+                # Сильный рейтинг поднимает событие, но повторяемость остаётся ограничителем.
+                return (
+                    -(avg_score * 10 + vote_boost),
+                    current_recurrence,
+                    has_time,
+                    time_value,
                     e.get("title") or "",
-                ),
-            )
-            # Берём не строго первые, а top-пул: повторяющиеся события уходят ниже,
-            # но каждый день выборка немного меняется и не закрепляет один и тот же набор.
+                )
+
+            pool = sorted(evs, key=event_priority)
             top_pool = pool[: max(8, min(len(pool), 12))]
             rng = random.Random(f"{seed}:{cat}")
             rng.shuffle(top_pool)

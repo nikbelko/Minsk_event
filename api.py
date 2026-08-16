@@ -74,6 +74,18 @@ def _run_migrations():
             )
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS event_ratings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                event_id INTEGER NOT NULL DEFAULT 0,
+                event_key TEXT NOT NULL DEFAULT '',
+                score INTEGER NOT NULL CHECK(score BETWEEN 1 AND 5),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(user_id, event_key)
+            )
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS flash_ignored_matches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 subscription_id INTEGER NOT NULL,
@@ -87,6 +99,8 @@ def _run_migrations():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_event_attendees_event_id ON event_attendees(event_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_event_attendees_user_id ON event_attendees(user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_event_attendees_event_key ON event_attendees(event_key)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_event_ratings_event_key ON event_ratings(event_key)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_event_ratings_user_id ON event_ratings(user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ticket_posts_event_key ON event_ticket_posts(event_key)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ticket_posts_user_id ON event_ticket_posts(user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ticket_posts_type ON event_ticket_posts(post_type)")
@@ -114,6 +128,10 @@ def _run_migrations():
             "ALTER TABLE event_ticket_posts ADD COLUMN note TEXT DEFAULT ''",
             "ALTER TABLE event_ticket_posts ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
             "ALTER TABLE event_ticket_posts ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE event_ratings ADD COLUMN event_id INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE event_ratings ADD COLUMN event_key TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE event_ratings ADD COLUMN score INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE event_ratings ADD COLUMN updated_at TEXT NOT NULL DEFAULT ''",
         ]:
             try:
                 conn.execute(sql)
@@ -775,6 +793,21 @@ class TicketSummaryRequest(BaseModel):
     user_id: Optional[int] = None
 
 
+class RatingRequest(BaseModel):
+    user_id: int
+    event_id: Optional[int] = None
+    event_key: Optional[str] = ""
+    username: Optional[str] = ""
+    first_name: Optional[str] = ""
+    score: int = 0
+
+
+class RatingSummaryRequest(BaseModel):
+    event_ids: Optional[list[int]] = None
+    event_keys: Optional[list[str]] = None
+    user_id: Optional[int] = None
+
+
 # ── Вспомогательные функции ──────────────────────────────────────────────────
 
 def now_minsk() -> datetime:
@@ -1038,6 +1071,30 @@ def _get_ticket_payload(conn: sqlite3.Connection, event_key: str, user_id: int |
     }
 
 
+def _get_rating_payload(conn: sqlite3.Connection, event_key: str, user_id: int | None = None) -> dict:
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT AVG(score) AS avg_score,
+               COUNT(*) AS votes,
+               MAX(CASE WHEN user_id = ? THEN score END) AS current_user_score
+        FROM event_ratings
+        WHERE event_key = ?
+        """,
+        (user_id if user_id is not None else -1, event_key),
+    )
+    row = cursor.fetchone()
+    avg_score = float(row["avg_score"]) if row and row["avg_score"] is not None else 0.0
+    votes = int(row["votes"]) if row and row["votes"] is not None else 0
+    current_user_score = int(row["current_user_score"]) if row and row["current_user_score"] is not None else None
+    return {
+        "event_key": event_key,
+        "average_score": round(avg_score, 2),
+        "votes": votes,
+        "current_user_score": current_user_score,
+    }
+
+
 # ── Health ───────────────────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -1167,6 +1224,97 @@ def get_attendees_summary(payload: AttendeeSummaryRequest):
                 "count": counts.get(event_key, 0),
                 "current_user_attending": event_key in current,
             })
+        return {"items": items}
+
+
+@app.get("/api/events/{event_id}/ratings")
+def get_event_ratings(event_id: int, user_id: Optional[int] = Query(None), event_key: str = Query("")):
+    with get_db() as conn:
+        resolved_key = _resolve_event_key(conn, event_key, event_id)
+        return _get_rating_payload(conn, resolved_key, user_id)
+
+
+@app.post("/api/events/{event_id}/rating")
+def upsert_event_rating(event_id: int, payload: RatingRequest):
+    if payload.score < 1 or payload.score > 5:
+        raise HTTPException(status_code=400, detail="score must be between 1 and 5")
+    with get_db() as conn:
+        resolved_key = _resolve_event_key(conn, payload.event_key, payload.event_id or event_id)
+        upsert_user_profile(
+            conn,
+            user_id=payload.user_id,
+            username=payload.username,
+            first_name=payload.first_name,
+            telegram_username=(payload.username or ""),
+        )
+        now = datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        conn.execute(
+            """
+            INSERT INTO event_ratings (user_id, event_id, event_key, score, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, event_key) DO UPDATE SET
+                score = excluded.score,
+                event_id = excluded.event_id,
+                updated_at = excluded.updated_at
+            """,
+            (payload.user_id, payload.event_id or event_id or 0, resolved_key, payload.score, now, now),
+        )
+        conn.execute(
+            "INSERT INTO user_stats (user_id, username, first_name, action, detail, created_at) VALUES (?,?,?,?,?,?)",
+            (
+                payload.user_id,
+                payload.username or "",
+                payload.first_name or "",
+                "event_rating",
+                resolved_key,
+                now,
+            ),
+        )
+        conn.commit()
+        return _get_rating_payload(conn, resolved_key, payload.user_id)
+
+
+@app.post("/api/events/ratings/summary")
+def get_rating_summary(payload: RatingSummaryRequest):
+    event_keys = sorted({key for key in (payload.event_keys or []) if key})
+    event_ids = sorted({eid for eid in (payload.event_ids or []) if eid > 0})
+
+    with get_db() as conn:
+        if not event_keys and event_ids:
+            event_keys = [_resolve_event_key(conn, None, event_id) for event_id in event_ids]
+        if not event_keys:
+            return {"items": []}
+
+        placeholders = ",".join("?" for _ in event_keys)
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT event_key,
+                   AVG(score) AS average_score,
+                   COUNT(*) AS votes,
+                   MAX(CASE WHEN user_id = ? THEN score END) AS current_user_score
+            FROM event_ratings
+            WHERE event_key IN ({placeholders})
+            GROUP BY event_key
+            """,
+            ([payload.user_id if payload.user_id is not None else -1, *event_keys]) if payload.user_id is not None else [*event_keys],
+        )
+        rows = cursor.fetchall()
+        summary = {row["event_key"]: {
+            "event_key": row["event_key"],
+            "average_score": round(float(row["average_score"]), 2) if row["average_score"] is not None else 0.0,
+            "votes": int(row["votes"]) if row["votes"] is not None else 0,
+            "current_user_score": int(row["current_user_score"]) if row["current_user_score"] is not None else None,
+        } for row in rows}
+        items = []
+        for event_key in event_keys:
+            item = summary.get(event_key, {
+                "event_key": event_key,
+                "average_score": 0.0,
+                "votes": 0,
+                "current_user_score": None,
+            })
+            items.append(item)
         return {"items": items}
 
 
