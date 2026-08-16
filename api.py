@@ -1297,7 +1297,7 @@ def get_rating_summary(payload: RatingSummaryRequest):
             WHERE event_key IN ({placeholders})
             GROUP BY event_key
             """,
-            ([payload.user_id if payload.user_id is not None else -1, *event_keys]) if payload.user_id is not None else [*event_keys],
+            ([payload.user_id if payload.user_id is not None else -1, *event_keys]),
         )
         rows = cursor.fetchall()
         summary = {row["event_key"]: {
