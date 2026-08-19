@@ -1274,6 +1274,37 @@ def upsert_event_rating(event_id: int, payload: RatingRequest):
         return _get_rating_payload(conn, resolved_key, payload.user_id)
 
 
+@app.delete("/api/events/{event_id}/rating")
+def remove_event_rating(
+    event_id: int,
+    user_id: int = Query(...),
+    event_key: str = Query(""),
+    username: str = Query(""),
+    first_name: str = Query(""),
+):
+    with get_db() as conn:
+        resolved_key = _resolve_event_key(conn, event_key, event_id)
+        now = datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+        conn.execute(
+            "DELETE FROM event_ratings WHERE event_key = ? AND user_id = ?",
+            (resolved_key, user_id),
+        )
+        conn.execute(
+            "INSERT INTO user_stats (user_id, username, first_name, action, detail, created_at) VALUES (?,?,?,?,?,?)",
+            (
+                user_id,
+                username,
+                first_name,
+                "event_rating_remove",
+                resolved_key,
+                now,
+            ),
+        )
+        conn.commit()
+        return _get_rating_payload(conn, resolved_key, user_id)
+
+
 @app.post("/api/events/ratings/summary")
 def get_rating_summary(payload: RatingSummaryRequest):
     event_keys = sorted({key for key in (payload.event_keys or []) if key})

@@ -131,4 +131,6 @@ BATCH_CATEGORY_MAP = {
     "обучение": "education", "education": "education",
     "квиз": "quiz", "quiz": "quiz",
     "фест": "fest", "фесты": "fest", "fest": "fest",
+    "другое": "other", "other": "other",
+    "прочее": "other", "разное": "other",
 }

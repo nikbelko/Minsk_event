@@ -90,6 +90,7 @@ CATEGORY_EMOJI = {
     "broadcast": "📺",
     "education": "📚",
     "quiz": "❓",
+    "other": "📌",
 }
 
 CATEGORY_NAMES = {
@@ -109,6 +110,7 @@ CATEGORY_NAMES = {
     "broadcast": "📺 Трансляции",
     "education": "📚 Обучение",
     "quiz": "❓ Квизы",
+    "other": "📌 Другое",
 }
 
 # ---------------------- Работа с БД ----------------------
