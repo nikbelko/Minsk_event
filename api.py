@@ -2577,56 +2577,77 @@ def remove_flash_subscription(req: FlashSubscriptionRemoveRequest):
 
 
 def _batch_parse_date(raw: str):
-    """Парсит дату или период. Возвращает (value, error).
-    Поддерживает форматы:
-      - YYYY-MM-DD (ISO, в т.ч. datetime из Excel: "2026-03-29 00:00:00")
+    """Парсит дату, период или список дат через запятую.
+
+    Поддерживает:
+      - YYYY-MM-DD
       - ДД.ММ.ГГГГ
-      - ДД.ММ.ГГГГ-ДД.ММ.ГГГГ (период)
+      - ДД.ММ.ГГГГ-ДД.ММ.ГГГГ
+      - ДД.ММ.ГГГГ, ДД.ММ.ГГГГ, ...
+      - YYYY-MM-DD, YYYY-MM-DD, ...
     """
     import re as _re
     from datetime import date as _date
+
+    def _normalize_single_date(date_str: str):
+        s = (date_str or "").strip()
+        if not s:
+            return None, "пустая дата"
+        excel_dt = _re.match(r"^(\d{4}-\d{2}-\d{2})\s+\d{2}:\d{2}(:\d{2})?$", s)
+        if excel_dt:
+            s = excel_dt.group(1)
+        if _re.match(r"^\d{4}-\d{2}-\d{2}$", s):
+            try:
+                d = _date.fromisoformat(s)
+                if d < _date.today():
+                    return None, f"дата {s} в прошлом"
+                return s, None
+            except Exception:
+                return None, f"невалидная дата {s}"
+        pm = _re.match(r"^(\d{1,2}\.\d{1,2}\.\d{4})-(\d{1,2}\.\d{1,2}\.\d{4})$", s)
+        if pm:
+            def _pd(part):
+                d, mo, y = part.split(".")
+                return _date(int(y), int(mo), int(d))
+            try:
+                d1, d2 = _pd(pm.group(1)), _pd(pm.group(2))
+            except Exception:
+                return None, f"невалидный период {s}"
+            if d2 < d1:
+                return None, "конец периода раньше начала"
+            if d1 < _date.today():
+                return None, "дата начала в прошлом"
+            if (d2 - d1).days > 90:
+                return None, "период > 90 дней"
+            return f"{d1.isoformat()}|{d2.isoformat()}", None
+        m = _re.match(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})$", s)
+        if m:
+            day, month, year = m.groups()
+            try:
+                d = _date(int(year), int(month), int(day))
+            except Exception:
+                return None, f"невалидная дата {s}"
+            if d < _date.today():
+                return None, f"дата {s} в прошлом"
+            return f"{year}-{month.zfill(2)}-{day.zfill(2)}", None
+        return None, f"не распознан формат: {s}"
+
     raw = (raw or "").strip()
     if not raw:
         return None, "пустая дата"
-    # Excel/openpyxl возвращает datetime как "2026-03-29 00:00:00" — берём только дату
-    excel_dt = _re.match(r"^(\d{4}-\d{2}-\d{2})\s+\d{2}:\d{2}(:\d{2})?$", raw)
-    if excel_dt:
-        raw = excel_dt.group(1)
-    if _re.match(r"^\d{4}-\d{2}-\d{2}$", raw):
-        try:
-            d = _date.fromisoformat(raw)
-            if d < _date.today():
-                return None, f"дата {raw} в прошлом"
-            return raw, None
-        except Exception:
-            return None, f"невалидная дата {raw}"
-    pm = _re.match(r"^(\d{1,2}\.\d{1,2}\.\d{4})-(\d{1,2}\.\d{1,2}\.\d{4})$", raw)
-    if pm:
-        def _pd(s):
-            d, mo, y = s.split(".")
-            return _date(int(y), int(mo), int(d))
-        try:
-            d1, d2 = _pd(pm.group(1)), _pd(pm.group(2))
-        except Exception:
-            return None, f"невалидный период {raw}"
-        if d2 < d1:
-            return None, "конец периода раньше начала"
-        if d1 < _date.today():
-            return None, "дата начала в прошлом"
-        if (d2 - d1).days > 90:
-            return None, "период > 90 дней"
-        return f"{d1.isoformat()}|{d2.isoformat()}", None
-    m = _re.match(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})$", raw)
-    if m:
-        day, month, year = m.groups()
-        try:
-            d = _date(int(year), int(month), int(day))
-        except Exception:
-            return None, f"невалидная дата {raw}"
-        if d < _date.today():
-            return None, f"дата {raw} в прошлом"
-        return f"{year}-{month.zfill(2)}-{day.zfill(2)}", None
-    return None, f"не распознан формат: {raw}"
+
+    parts = [p.strip() for p in raw.split(",") if p and p.strip()]
+    if len(parts) > 1:
+        normalized = []
+        for part in parts:
+            parsed, err = _normalize_single_date(part)
+            if err:
+                return None, err
+            normalized.append(parsed)
+        return ",".join(normalized), None
+
+    return _normalize_single_date(raw)
+
 
 
 def _batch_parse_time(raw: str) -> tuple:
@@ -2778,7 +2799,7 @@ async def batch_upload_events(
             results.append({"row": row_num, "title": title[:30], "status": "error", "reason": "не указано место"})
             continue
 
-        cat_raw = row.get("category", "").strip().lower()
+        cat_raw = (row.get("category", "") or "").strip().lower().replace("_", " ")
         category = BATCH_CATEGORY_MAP.get(cat_raw, "other")
 
         details     = (row.get("details", "") or "")[:300]

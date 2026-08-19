@@ -5246,7 +5246,7 @@ async def handle_batch_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             skip_count += 1
             continue
 
-        cat_raw = (row.get("category", "") or "").strip().lower()
+        cat_raw = (row.get("category", "") or "").strip().lower().replace("_", " ")
         category = BATCH_CATEGORY_MAP.get(cat_raw, "other")
 
         details = (row.get("details", "") or "")[:300]
