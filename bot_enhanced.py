@@ -43,6 +43,9 @@ from config import (
     MINSK_TZ, DB_PATH, ADMIN_ID,
     VENUE_OPEN_TIME, VENUE_CLOSE_TIME,
     BATCH_TEMPLATE_HEADERS, BATCH_TEMPLATE_EXAMPLE, BATCH_CATEGORY_MAP,
+    HELPER_DEFAULT_LIMIT, HELPER_TOP_POOL_SIZE, HELPER_MIN_POOL_SIZE,
+    HELPER_RECURRENCE_LIMIT, HELPER_SUBSCRIPTION_LIMIT,
+    HELPER_SUBSCRIPTION_PER_CATEGORY_LIMIT,
     _build_time_filter, _build_overnight_union,
 )
 
@@ -1761,16 +1764,23 @@ async def send_subscriptions_digest(bot, date_type: str):
 
         display_name = CATEGORY_NAMES.get(category, category)
         events_list = [dict(e) if not isinstance(e, dict) else e for e in events]
+        ranked_events = _select_helper_events(
+            events_list,
+            seed=f"subs:{category}:{date_type}",
+            limit=HELPER_SUBSCRIPTION_LIMIT,
+            max_per_category=HELPER_SUBSCRIPTION_PER_CATEGORY_LIMIT,
+        )
+        digest_events = ranked_events[:HELPER_SUBSCRIPTION_LIMIT]
 
         # Группируем как в боте
         if category == "cinema":
-            grouped_items = format_grouped_cinema_events(group_cinema_events(events_list[:10]))
+            grouped_items = format_grouped_cinema_events(group_cinema_events(digest_events))
             event_lines = []
             for text, url in grouped_items[:5]:
                 link = f"\n🔗 <a href=\"{url}\">Подробнее</a>" if url else ""
                 event_lines.append(text + link)
         else:
-            grouped_items = group_other_events(events_list[:10])
+            grouped_items = group_other_events(digest_events)
             event_lines = []
             for item in grouped_items[:5]:
                 link = f"\n🔗 <a href=\"{item['url']}\">Подробнее</a>" if item.get("url") else ""
@@ -3370,6 +3380,140 @@ def _generate_post_card(events: list[dict], title_line1: str, title_line2: str,
     return buf.getvalue()
 
 
+def _channel_event_key(e) -> tuple[str, str]:
+    return ((e.get("title") or "").strip().lower(), (e.get("place") or "").strip().lower())
+
+
+def _event_group_key(e) -> str:
+    category = (e.get("category") or "").strip()
+    title = (e.get("title") or "").strip()
+    if category == "cinema":
+        date_value = (e.get("event_date") or "").strip()
+        return f"cinema:{title}:{date_value}"
+    place = (e.get("place") or "").strip()
+    return f"other:{title}:{place}"
+
+
+def _recurrence_counts(events_in: list) -> dict[tuple[str, str], int]:
+    keys = {_channel_event_key(e) for e in events_in}
+    keys = {key for key in keys if key[0]}
+    if not keys:
+        return {}
+
+    counts: dict[tuple[str, str], int] = {}
+    try:
+        with get_db_connection() as conn:
+            for title, place in keys:
+                row = conn.execute(
+                    """
+                    SELECT COUNT(DISTINCT event_date)
+                    FROM events
+                    WHERE event_date >= DATE('now')
+                      AND LOWER(TRIM(title)) = ?
+                      AND LOWER(TRIM(COALESCE(place, ''))) = ?
+                    """,
+                    (title, place),
+                ).fetchone()
+                counts[(title, place)] = row[0] if row else 1
+    except sqlite3.DatabaseError:
+        for key in keys:
+            counts[key] = 1
+    return counts
+
+
+def _rating_summary_for_events(events_in: list) -> dict[str, dict]:
+    if not events_in:
+        return {}
+    event_keys = sorted({_event_group_key(e) for e in events_in if _event_group_key(e)})
+    if not event_keys:
+        return {}
+    with get_db_connection() as conn:
+        placeholders = ",".join("?" for _ in event_keys)
+        rows = conn.execute(
+            f"""
+            SELECT event_key,
+                   AVG(score) AS avg_score,
+                   COUNT(*) AS votes
+            FROM event_ratings
+            WHERE event_key IN ({placeholders})
+            GROUP BY event_key
+            """,
+            event_keys,
+        ).fetchall()
+    summary = {}
+    for row in rows:
+        event_key = row["event_key"]
+        avg = float(row["avg_score"] or 0.0)
+        votes = int(row["votes"] or 0)
+        boost = avg * (1.0 + math.log1p(votes) / 10.0)
+        summary[event_key] = {
+            "avg_score": avg,
+            "votes": votes,
+            "boost": boost,
+        }
+    return summary
+
+
+def _rank_events_for_helper(
+    events_in: list,
+    seed: str,
+    limit: int = HELPER_DEFAULT_LIMIT,
+    max_per_category: int = HELPER_TOP_POOL_SIZE,
+) -> list:
+    seen_global: set = set()
+    by_cat = defaultdict(list)
+    for e in events_in[:limit]:
+        key = _channel_event_key(e)
+        if key in seen_global:
+            continue
+        seen_global.add(key)
+        if key[0]:
+            by_cat[e.get("category")].append(e)
+
+    recurrence = _recurrence_counts([e for evs in by_cat.values() for e in evs])
+    rating_summary = _rating_summary_for_events([e for evs in by_cat.values() for e in evs])
+    ranked: list = []
+    for cat, evs in by_cat.items():
+        def event_priority(e):
+            key = _channel_event_key(e)
+            current_recurrence = min(recurrence.get(key, 1), HELPER_RECURRENCE_LIMIT)
+            event_key = _event_group_key(e)
+            rating = rating_summary.get(event_key, {})
+            avg_score = float(rating.get("avg_score", 0.0) or 0.0)
+            vote_boost = float(rating.get("boost", 0.0) or 0.0)
+            has_time = 0 if (e.get("show_time") or "") else 1
+            time_value = e.get("show_time") or "99:99"
+            return (
+                -(avg_score * 10 + vote_boost),
+                current_recurrence,
+                has_time,
+                time_value,
+                e.get("title") or "",
+            )
+
+        pool = sorted(evs, key=event_priority)
+        top_pool = pool[: max(HELPER_MIN_POOL_SIZE, min(len(pool), max_per_category))]
+        ranked.extend(top_pool)
+    return ranked[:limit]
+
+
+def _select_helper_events(
+    events_in: list,
+    seed: str,
+    limit: int = HELPER_DEFAULT_LIMIT,
+    max_per_category: int = HELPER_TOP_POOL_SIZE,
+) -> list:
+    ranked = _rank_events_for_helper(events_in, seed=seed, limit=limit, max_per_category=max_per_category)
+    by_cat = defaultdict(list)
+    for e in ranked:
+        by_cat[e.get("category")].append(e)
+
+    selected: list = []
+    for cat, evs in by_cat.items():
+        selected.extend(evs[:max_per_category])
+    return selected[:limit]
+
+
 async def post_to_channel(bot, post_type: str = "today"):
     """Публикует подборку событий в Telegram канал."""
     if not CHANNEL_ID:
@@ -3410,111 +3554,11 @@ async def post_to_channel(bot, post_type: str = "today"):
         title_part = f'<a href="{url}">{title}</a>' if url else title
         return f"→ {title_part}" + (f" | {price}" if price else "")
 
-    def _channel_event_key(e) -> tuple[str, str]:
-        return ((e.get("title") or "").strip().lower(), (e.get("place") or "").strip().lower())
-
-    def _event_group_key(e) -> str:
-        category = (e.get("category") or "").strip()
-        title = (e.get("title") or "").strip()
-        if category == "cinema":
-            date_value = (e.get("event_date") or "").strip()
-            return f"cinema:{title}:{date_value}"
-        place = (e.get("place") or "").strip()
-        return f"other:{title}:{place}"
-
-    def _recurrence_counts(events_in: list) -> dict[tuple[str, str], int]:
-        keys = {_channel_event_key(e) for e in events_in}
-        keys = {key for key in keys if key[0]}
-        if not keys:
-            return {}
-
-        counts: dict[tuple[str, str], int] = {}
-        with get_db_connection() as conn:
-            for title, place in keys:
-                row = conn.execute(
-                    """
-                    SELECT COUNT(DISTINCT event_date)
-                    FROM events
-                    WHERE event_date >= DATE('now')
-                      AND LOWER(TRIM(title)) = ?
-                      AND LOWER(TRIM(COALESCE(place, ''))) = ?
-                    """,
-                    (title, place),
-                ).fetchone()
-                counts[(title, place)] = row[0] if row else 1
-        return counts
-
-    def _rating_summary_for_events(events_in: list) -> dict[str, dict]:
-        if not events_in:
-            return {}
-        event_keys = sorted({_event_group_key(e) for e in events_in if _event_group_key(e)})
-        if not event_keys:
-            return {}
-        with get_db_connection() as conn:
-            placeholders = ",".join("?" for _ in event_keys)
-            rows = conn.execute(
-                f"""
-                SELECT event_key,
-                       AVG(score) AS avg_score,
-                       COUNT(*) AS votes
-                FROM event_ratings
-                WHERE event_key IN ({placeholders})
-                GROUP BY event_key
-                """,
-                event_keys,
-            ).fetchall()
-        summary = {}
-        for row in rows:
-            event_key = row["event_key"]
-            avg = float(row["avg_score"] or 0.0)
-            votes = int(row["votes"] or 0)
-            boost = avg * (1.0 + math.log1p(votes) / 10.0)
-            summary[event_key] = {
-                "avg_score": avg,
-                "votes": votes,
-                "boost": boost,
-            }
-        return summary
-
-    def _channel_events_by_cat(events_in: list, seed: str, limit: int = 80) -> dict:
-        from collections import defaultdict as _dd
-        seen_global: set = set()
-        by_cat = _dd(list)
-        for e in events_in[:limit]:
-            key = _channel_event_key(e)
-            if key in seen_global:
-                continue
-            seen_global.add(key)
-            if key[0]:
-                by_cat[e.get("category")].append(e)
-
-        recurrence = _recurrence_counts([e for evs in by_cat.values() for e in evs])
-        rating_summary = _rating_summary_for_events([e for evs in by_cat.values() for e in evs])
-        result = _dd(list)
-        for cat, evs in by_cat.items():
-            def event_priority(e):
-                key = _channel_event_key(e)
-                current_recurrence = min(recurrence.get(key, 1), 30)
-                event_key = _event_group_key(e)
-                rating = rating_summary.get(event_key, {})
-                avg_score = float(rating.get("avg_score", 0.0) or 0.0)
-                vote_boost = float(rating.get("boost", 0.0) or 0.0)
-                has_time = 0 if (e.get("show_time") or "") else 1
-                time_value = e.get("show_time") or "99:99"
-                # Сильный рейтинг поднимает событие, но повторяемость остаётся ограничителем.
-                return (
-                    -(avg_score * 10 + vote_boost),
-                    current_recurrence,
-                    has_time,
-                    time_value,
-                    e.get("title") or "",
-                )
-
-            pool = sorted(evs, key=event_priority)
-            top_pool = pool[: max(8, min(len(pool), 12))]
-            rng = random.Random(f"{seed}:{cat}")
-            rng.shuffle(top_pool)
-            result[cat] = top_pool
+    def _channel_events_by_cat(events_in: list, seed: str, limit: int = HELPER_DEFAULT_LIMIT) -> dict:
+        ranked = _select_helper_events(events_in, seed=seed, limit=limit, max_per_category=HELPER_TOP_POOL_SIZE)
+        result = defaultdict(list)
+        for e in ranked:
+            result[e.get("category")].append(e)
         return result
 
     if post_type == "today":

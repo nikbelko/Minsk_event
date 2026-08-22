@@ -114,6 +114,15 @@ def _build_overnight_union(
     return sql, params
 
 
+# ── Helper-based event ranking ─────────────────────────────────────────────────
+
+HELPER_DEFAULT_LIMIT = 80
+HELPER_TOP_POOL_SIZE = 12
+HELPER_MIN_POOL_SIZE = 8
+HELPER_RECURRENCE_LIMIT = 30
+HELPER_SUBSCRIPTION_LIMIT = 10
+HELPER_SUBSCRIPTION_PER_CATEGORY_LIMIT = 5
+
 BATCH_CATEGORY_MAP = {
     "кино": "cinema", "cinema": "cinema",
     "концерт": "concert", "концерты": "concert", "concert": "concert",
