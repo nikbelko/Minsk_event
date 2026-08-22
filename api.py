@@ -96,6 +96,18 @@ def _run_migrations():
                 UNIQUE(subscription_id, event_key)
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ticket_match_notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                recipient_user_id INTEGER NOT NULL,
+                event_key TEXT NOT NULL,
+                source_user_id INTEGER NOT NULL,
+                source_post_id INTEGER NOT NULL,
+                match_type TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(recipient_user_id, event_key, source_user_id, source_post_id, match_type)
+            )
+        """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_event_attendees_event_id ON event_attendees(event_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_event_attendees_user_id ON event_attendees(user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_event_attendees_event_key ON event_attendees(event_key)")
@@ -959,6 +971,98 @@ def _normalize_ticket_text(value: str | None, max_len: int) -> str:
     return value
 
 
+def _find_ticket_matches_for_post(conn: sqlite3.Connection, event_key: str, current_user_id: int, current_post_type: str, current_post_id: int | None = None) -> list[sqlite3.Row]:
+    opposite_type = "buy" if current_post_type == "sell" else "sell"
+    whenever = [
+        "event_key = ?",
+        "status = 'active'",
+        "post_type = ?",
+        "user_id != ?",
+    ]
+    params = [event_key, opposite_type, current_user_id]
+    if current_post_id is not None:
+        whenever.append("id != ?")
+        params.append(current_post_id)
+    cursor = conn.execute(
+        f"""
+        SELECT id, user_id, event_key, post_type, qty, price_text, note, created_at, updated_at
+        FROM event_ticket_posts
+        WHERE {' AND '.join(whenever)}
+        ORDER BY created_at ASC, id ASC
+        """,
+        params,
+    )
+    return cursor.fetchall()
+
+
+def _event_title_for_ticket_key(conn: sqlite3.Connection, event_key: str) -> str:
+    if not event_key:
+        return "событие"
+    if event_key.startswith("cinema:"):
+        parts = event_key.split(":", 2)
+        if len(parts) >= 3:
+            title = parts[1]
+            return title
+    elif event_key.startswith("other:"):
+        parts = event_key.split(":", 2)
+        if len(parts) >= 3:
+            return parts[1]
+    row = conn.execute(
+        "SELECT title FROM events WHERE event_key = ? OR ('other:' || title || ':' || COALESCE(place, '')) = ? OR ('cinema:' || title || ':' || event_date) = ? LIMIT 1",
+        (event_key, event_key, event_key),
+    ).fetchone()
+    return row["title"] if row else "событие"
+
+
+def _send_ticket_match_notification(recipient_user_id: int, event_key: str, source_user_id: int, current_post_type: str) -> None:
+    if not BOT_TOKEN:
+        return
+    try:
+        with get_db() as conn:
+            source_user = conn.execute("SELECT first_name, username, telegram_username FROM users WHERE user_id = ?", (source_user_id,)).fetchone()
+            title = _event_title_for_ticket_key(conn, event_key)
+            counterpart = "продавец" if current_post_type == "buy" else "покупатель"
+            buyer_or_seller = "продажа билетов" if current_post_type == "buy" else "поиск билетов"
+            user_label = (source_user["first_name"] or source_user["username"] or source_user["telegram_username"] or "Пользователь") if source_user else "Пользователь"
+            text = (
+                f"🔔 Нашёлся {counterpart} на событие: <b>{title}</b>\n\n"
+                f"Пользователь <b>{user_label}</b> уже разместил {buyer_or_seller}.\n"
+                f"Свяжитесь с ним, чтобы договориться о сделке."
+            )
+            with httpx.Client(timeout=5) as client:
+                client.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                    json={
+                        "chat_id": recipient_user_id,
+                        "text": text,
+                        "parse_mode": "HTML",
+                    },
+                )
+    except Exception:
+        pass
+
+
+def _record_ticket_match_notifications_for_post(conn: sqlite3.Connection, event_key: str, current_user_id: int, current_post_type: str, current_post_id: int | None = None) -> list[int]:
+    matches = _find_ticket_matches_for_post(conn, event_key, current_user_id, current_post_type, current_post_id)
+    now = datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    recipient_ids = []
+    match_type = "sell_to_buy" if current_post_type == "sell" else "buy_to_sell"
+    for row in matches:
+        recipient_user_id = int(row["user_id"])
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO ticket_match_notifications (
+                recipient_user_id, event_key, source_user_id, source_post_id, match_type, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (recipient_user_id, event_key, current_user_id, current_post_id or 0, match_type, now),
+        )
+        if cursor.rowcount > 0:
+            recipient_ids.append(recipient_user_id)
+            _send_ticket_match_notification(recipient_user_id, event_key, current_user_id, current_post_type)
+    return recipient_ids
+
+
 def _delete_expired_ticket_posts(conn: sqlite3.Connection) -> None:
     today = today_str()
     conn.execute(
@@ -1513,6 +1617,18 @@ def upsert_event_ticket_post(event_id: int, payload: TicketPostRequest):
                 now,
             ),
         )
+        current_post = conn.execute(
+            "SELECT id FROM event_ticket_posts WHERE user_id = ? AND event_key = ? AND post_type = ? ORDER BY updated_at DESC, id DESC LIMIT 1",
+            (payload.user_id, resolved_key, post_type),
+        ).fetchone()
+        if current_post:
+            _record_ticket_match_notifications_for_post(
+                conn,
+                event_key=resolved_key,
+                current_user_id=payload.user_id,
+                current_post_type=post_type,
+                current_post_id=int(current_post["id"]),
+            )
         conn.commit()
         return _get_ticket_payload(conn, resolved_key, payload.user_id)
 

@@ -232,6 +232,18 @@ def init_db():
             )
         """)
         cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ticket_match_notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                recipient_user_id INTEGER NOT NULL,
+                event_key TEXT NOT NULL,
+                source_user_id INTEGER NOT NULL,
+                source_post_id INTEGER NOT NULL,
+                match_type TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(recipient_user_id, event_key, source_user_id, source_post_id, match_type)
+            )
+        """)
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS flash_subscription_requests (
                 token TEXT PRIMARY KEY,
                 user_id INTEGER NOT NULL,
