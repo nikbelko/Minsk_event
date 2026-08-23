@@ -1014,6 +1014,41 @@ def _event_title_for_ticket_key(conn: sqlite3.Connection, event_key: str) -> str
     return row["title"] if row else "событие"
 
 
+def _send_ticket_post_confirmation(user_id: int, event_key: str, post_type: str) -> bool:
+    if not BOT_TOKEN:
+        return True
+    try:
+        with get_db() as conn:
+            row = conn.execute(
+                "SELECT first_name, username, telegram_username FROM users WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            first_name = (row["first_name"] if row else "") or ""
+            username = (row["telegram_username"] if row else "") or (row["username"] if row else "") or ""
+            label = first_name or username or "Вы"
+            kind = "продажи" if post_type == "sell" else "поиска"
+            text = (
+                f"✅ Ваше объявление о {kind} билетов подано.\n\n"
+                f"Осталось только убедиться, что другие могут написать вам в Telegram.\n"
+                f"Если нет — проверьте: Настройки → Конфиденциальность → Сообщения → Разрешить сообщения от всех или контактов."
+            )
+            with httpx.Client(timeout=5) as client:
+                response = client.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                    json={
+                        "chat_id": user_id,
+                        "text": text,
+                        "parse_mode": "HTML",
+                    },
+                )
+                data = response.json() if response.content else {}
+                if response.status_code >= 400 or not data.get("ok", False):
+                    return False
+                return True
+    except Exception:
+        return False
+
+
 def _send_ticket_match_notification(recipient_user_id: int, event_key: str, source_user_id: int, current_post_type: str) -> None:
     if not BOT_TOKEN:
         return
@@ -1630,7 +1665,10 @@ def upsert_event_ticket_post(event_id: int, payload: TicketPostRequest):
                 current_post_id=int(current_post["id"]),
             )
         conn.commit()
-        return _get_ticket_payload(conn, resolved_key, payload.user_id)
+        dm_blocked = not _send_ticket_post_confirmation(payload.user_id, resolved_key, post_type)
+        payload_dict = _get_ticket_payload(conn, resolved_key, payload.user_id)
+        payload_dict["dm_blocked"] = dm_blocked
+        return payload_dict
 
 
 @app.delete("/api/events/{event_id}/tickets")
