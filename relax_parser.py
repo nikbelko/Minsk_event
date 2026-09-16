@@ -52,8 +52,8 @@ class RelaxBaseParser:
     return_events_json: bool = False
     # Флаг: если False, /kino/ ссылки на странице не пропускаются (для kids-pass)
     skip_kino_urls: bool = True
-    # Новые ветки Relax (theatre/concert/exhibition/party/free) теперь требуют
-    # диапазонной ссылки; kino/kids продолжают работать со старой базовой страницей.
+    # Relax отдаёт полный сезонный диапазон только через URL с date_from/date_to,
+    # поэтому для всех секций, включая кино и kids, используем диапазонную ссылку.
     use_date_range_url: bool = False
 
     def __init__(self):
@@ -77,10 +77,9 @@ class RelaxBaseParser:
     def build_fetch_url(self) -> str:
         """Возвращает URL для парсинга.
 
-        Для театра, концертов, выставок, вечеринок и free-бриджа Relax теперь
-        отдаёт корректные данные только через единый диапазон даты. Для кино и kids
-        старая базовая ссылка по-прежнему работает, поэтому они остаются без этого
-        обхода. В daterange берём ~1 год вперёд от сегодня для покрытия всего сезона.
+        Для всех Relax-секций, включая кино и kids, сайт отдаёт корректные
+        результаты только через единый диапазон даты. В daterange берём ~1 год
+        вперёд от сегодня для покрытия всего сезона.
         """
         if not self.use_date_range_url:
             return self.section_url
@@ -476,6 +475,7 @@ class RelaxKidsParser(RelaxBaseParser):
     source_name = "relax.by"
     emoji = "🧸"
     clear_label = "детских событий"
+    use_date_range_url = True
     return_events_json = True   # не сохраняем напрямую — обработка через apply_kids_pass
     skip_kino_urls = False      # фильмы на странице kids нужны для маркировки is_kids=1
     known_venues = [
@@ -551,6 +551,7 @@ class RelaxKinoParser(RelaxBaseParser):
     source_name = "relax.by"
     emoji = "🎬"
     clear_label = "сеансов"
+    use_date_range_url = True
     known_venues = []  # кинотеатры берём напрямую из HTML
 
     SKIP_TITLES = {

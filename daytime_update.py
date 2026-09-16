@@ -77,8 +77,8 @@ PARSE_ERROR_COOLDOWN_HOURS = 6
 # relax.by per-category config: source_key → (listing_url, parser_cmd, human_label)
 # source_key is used as the parser_source_state primary key, so each category
 # has its own independent fingerprint/baseline.
-# Для theatre/concert/exhibition/party сайт теперь отдаёт корректный полный период
-# только через URL с date_from/date_to. Kino/kids остаются на старой базовой ссылке.
+# Для всех Relax-секций нужен URL с date_from/date_to: иначе сайт показывает
+# только текущий день вместо полного диапазона событий.
 def _build_relax_range_url(base_url: str) -> str:
     """Возвращает URL вида /section?date_from=...&date_to=... .
     Стартуем с сегодняшнего дня и закрываем через 365 дней."""
@@ -93,8 +93,8 @@ RELAX_CATEGORIES: dict[str, tuple[str, str, str]] = {
     "relax.by:concert":    (_build_relax_range_url("https://afisha.relax.by/conserts/minsk/"), "relax_parser.py concert",    "🎵 Концерты (Relax)"),
     "relax.by:exhibition": (_build_relax_range_url("https://afisha.relax.by/expo/minsk/"),     "relax_parser.py exhibition", "🖼️ Выставки (Relax)"),
     "relax.by:party":      (_build_relax_range_url("https://afisha.relax.by/clubs/minsk/"),    "relax_parser.py party",      "🎉 Вечеринки (Relax)"),
-    "relax.by:kino":       ("https://afisha.relax.by/kino/minsk/",     "relax_parser.py kino",       "🎬 Кино (Relax)"),
-    "relax.by:kids":       ("https://afisha.relax.by/kids/minsk/",     "relax_parser.py kids",       "🧸 Детям (Relax)"),
+    "relax.by:kino":       (_build_relax_range_url("https://afisha.relax.by/kino/minsk/"),      "relax_parser.py kino",       "🎬 Кино (Relax)"),
+    "relax.by:kids":       (_build_relax_range_url("https://afisha.relax.by/kids/minsk/"),      "relax_parser.py kids",       "🧸 Детям (Relax)"),
 }
 
 # Free-events pass must run after ANY relax category was parsed.
