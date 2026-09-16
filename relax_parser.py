@@ -8,8 +8,10 @@ import sqlite3
 import logging
 import time
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import defaultdict
+
+from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
@@ -50,10 +52,14 @@ class RelaxBaseParser:
     return_events_json: bool = False
     # Флаг: если False, /kino/ ссылки на странице не пропускаются (для kids-pass)
     skip_kino_urls: bool = True
+    # Новые ветки Relax (theatre/concert/exhibition/party/free) теперь требуют
+    # диапазонной ссылки; kino/kids продолжают работать со старой базовой страницей.
+    use_date_range_url: bool = False
 
     def __init__(self):
         self.base_url = "https://afisha.relax.by"
         self.section_url = self.base_url + self.path
+        self.fetch_url = self.build_fetch_url()
 
         self.session = requests.Session()
         self.session.headers.update({
@@ -66,8 +72,23 @@ class RelaxBaseParser:
             "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
         })
 
-
     # ---------------------- Утилиты ----------------------
+
+    def build_fetch_url(self) -> str:
+        """Возвращает URL для парсинга.
+
+        Для театра, концертов, выставок, вечеринок и free-бриджа Relax теперь
+        отдаёт корректные данные только через единый диапазон даты. Для кино и kids
+        старая базовая ссылка по-прежнему работает, поэтому они остаются без этого
+        обхода. В daterange берём ~1 год вперёд от сегодня для покрытия всего сезона.
+        """
+        if not self.use_date_range_url:
+            return self.section_url
+
+        now = datetime.now(ZoneInfo("Europe/Minsk"))
+        date_from = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        date_to = (now + timedelta(days=365)).replace(hour=23, minute=59, second=59, microsecond=0)
+        return f"{self.section_url.rstrip('/')}?date_from={int(date_from.timestamp())}&date_to={int(date_to.timestamp())}"
 
     def fetch_page(self, url: str, retries: int = 3) -> str | None:
         for attempt in range(retries):
@@ -323,7 +344,7 @@ class RelaxBaseParser:
         logger.info(f"{self.emoji} ПАРСЕР: {self.source_name.upper()}")
         logger.info("=" * 60)
 
-        events = self.parse_page(self.section_url)
+        events = self.parse_page(self.fetch_url)
 
         if events:
             if self.return_events_json:
@@ -358,6 +379,7 @@ class RelaxTheatreParser(RelaxBaseParser):
     source_name = "relax.by"
     emoji = "🎭"
     clear_label = "спектаклей"
+    use_date_range_url = True
     known_venues = [
         "Молодёжный театр", "Молодежный театр",
         "Молодёжный театр эстрады", "Молодежный театр эстрады",
@@ -387,6 +409,7 @@ class RelaxConcertParser(RelaxBaseParser):
     source_name = "relax.by"
     emoji = "🎵"
     clear_label = "концертов"
+    use_date_range_url = True
     known_venues = [
         "Дворец Профсоюзов",
         "Дворец Республики",
@@ -416,6 +439,7 @@ class RelaxExhibitionParser(RelaxBaseParser):
     source_name = "relax.by"
     emoji = "🖼️"
     clear_label = "выставок"
+    use_date_range_url = True
     known_venues = [
         "Национальный художественный музей",
         "Художественный музей",
@@ -480,6 +504,7 @@ class RelaxPartyParser(RelaxBaseParser):
     source_name = "relax.by"
     emoji = "🎉"
     clear_label = "вечеринок"
+    use_date_range_url = True
     known_venues = [
         "Prime Hall", "Re:Public", "Club Re:Public",
         "ZAVOD", "Dozari", "DoZari Club",
@@ -501,6 +526,7 @@ class RelaxFreeParser(RelaxBaseParser):
     source_name = "relax.by"
     emoji = "🆓"
     clear_label = "бесплатных событий"
+    use_date_range_url = True
     known_venues = []   # принимаем все места — бесплатные мероприятия везде
     return_events_json = True  # включаем режим возврата JSON
 

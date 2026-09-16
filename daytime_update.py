@@ -28,7 +28,7 @@ import re
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import sqlite3
 
@@ -77,11 +77,22 @@ PARSE_ERROR_COOLDOWN_HOURS = 6
 # relax.by per-category config: source_key → (listing_url, parser_cmd, human_label)
 # source_key is used as the parser_source_state primary key, so each category
 # has its own independent fingerprint/baseline.
+# Для theatre/concert/exhibition/party сайт теперь отдаёт корректный полный период
+# только через URL с date_from/date_to. Kino/kids остаются на старой базовой ссылке.
+def _build_relax_range_url(base_url: str) -> str:
+    """Возвращает URL вида /section?date_from=...&date_to=... .
+    Стартуем с сегодняшнего дня и закрываем через 365 дней."""
+    now = datetime.now(MINSK_TZ)
+    date_from = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    date_to = (now + timedelta(days=365)).replace(hour=23, minute=59, second=59, microsecond=0)
+    return f"{base_url.rstrip('/')}?date_from={int(date_from.timestamp())}&date_to={int(date_to.timestamp())}"
+
+
 RELAX_CATEGORIES: dict[str, tuple[str, str, str]] = {
-    "relax.by:theatre":    ("https://afisha.relax.by/theatre/minsk/",  "relax_parser.py theatre",    "🎭 Театр (Relax)"),
-    "relax.by:concert":    ("https://afisha.relax.by/conserts/minsk/", "relax_parser.py concert",    "🎵 Концерты (Relax)"),
-    "relax.by:exhibition": ("https://afisha.relax.by/expo/minsk/",     "relax_parser.py exhibition", "🖼️ Выставки (Relax)"),
-    "relax.by:party":      ("https://afisha.relax.by/clubs/minsk/",    "relax_parser.py party",      "🎉 Вечеринки (Relax)"),
+    "relax.by:theatre":    (_build_relax_range_url("https://afisha.relax.by/theatre/minsk/"),  "relax_parser.py theatre",    "🎭 Театр (Relax)"),
+    "relax.by:concert":    (_build_relax_range_url("https://afisha.relax.by/conserts/minsk/"), "relax_parser.py concert",    "🎵 Концерты (Relax)"),
+    "relax.by:exhibition": (_build_relax_range_url("https://afisha.relax.by/expo/minsk/"),     "relax_parser.py exhibition", "🖼️ Выставки (Relax)"),
+    "relax.by:party":      (_build_relax_range_url("https://afisha.relax.by/clubs/minsk/"),    "relax_parser.py party",      "🎉 Вечеринки (Relax)"),
     "relax.by:kino":       ("https://afisha.relax.by/kino/minsk/",     "relax_parser.py kino",       "🎬 Кино (Relax)"),
     "relax.by:kids":       ("https://afisha.relax.by/kids/minsk/",     "relax_parser.py kids",       "🧸 Детям (Relax)"),
 }
