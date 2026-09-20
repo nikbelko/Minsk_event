@@ -155,7 +155,12 @@ class RelaxBaseParser:
                     if place_a:
                         raw_place = place_a.get_text(strip=True)
                         last_place = normalize_place(raw_place, known_venues=self.known_venues) or raw_place
-                    addr_span = place_div.find("span", class_="schedule__place-link")
+
+                    # Relax changed the markup: address is now inside .schedule__place-address
+                    # (older code looked for .schedule__place-link, which is the venue name link).
+                    addr_span = place_div.find("span", class_="schedule__place-address")
+                    if not addr_span:
+                        addr_span = place_div.find("span", class_="schedule__place-link")
                     last_location = addr_span.get_text(strip=True) if addr_span else "Минск"
 
                 if not last_place:
