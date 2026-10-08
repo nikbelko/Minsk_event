@@ -4360,14 +4360,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         if not query or not getattr(query, "data", None):
             return
-        # Telegram may expire a callback before the bot answers it; wrap the method
-        # so every branch handles stale queries consistently instead of throwing BadRequest.
-        query.answer = lambda *args, **kwargs: safe_callback_answer(query, *args, **kwargs)
         data = query.data
 
         # ── Кнопки /admin панели ─────────────────────────────────
         if data.startswith("adm_") and query.from_user.id == ADMIN_ID:
-            await query.answer()
+            await safe_callback_answer(query)
             cmd = data[4:]
             if cmd == "stats":
                 stats = get_stats_data(exclude_admin=False)
