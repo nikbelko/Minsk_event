@@ -1603,12 +1603,12 @@ def get_reply_main_menu():
         ["📅 Сегодня", "📆 Завтра"],
         ["⏰ Ближайшие", "🎉 Выходные"],
         ["🗓 Календарь", "🎯 Категории"],
-        ["ℹ️ О проекте", "⭐ Поддержать"],
+        ["🌐 Приложение", "🔔 Мои подписки"],
     ], resize_keyboard=True)
 
 
 async def show_main_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE | None = None, send_method=None):
-    text = "🎉 **Главное меню**\n\nВыберите действие:"
+    text = "🎉 **Главное меню**\n\nБыстрый поиск и доступ к приложению."
     kwargs = {"reply_markup": get_reply_main_menu(), "parse_mode": "Markdown"}
     if send_method:
         await send_method(text, **kwargs)
@@ -3819,15 +3819,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user_action(user.id, user.username, user.first_name, "start")
     await update.message.reply_text(
         f"🎉 Привет, {user.first_name}!\n\n"
-        "Я — 🌟**MinskDvizh**, твой персональный гид по событиям Минска.\n\n"
-        "🔍 **Вот, что я уже умею:**\n"
-        "• Искать по **названию**|**дате**|**описанию**\n"
-        "• Показывать **сегодня**|**завтра**|**выходные** и **ближайшие** события\n"
-        "• 🔔 Подписываться на **новые события** в выбранной категории\n"
-        "• ✍️ **Добавлять твои события**, чтобы рассказать всем о мероприятии\n"
-        "• ⚡ **Флеш-подписка** — узнавай о долгожданных событиях первым\n\n"
-        "Используй кнопки меню 👇 или открой приложение по 🌟\n",
-        reply_markup=get_reply_main_menu(), 
+        "Это 🌟**MinskDvizh** — быстрый вход в афишу Минска.\n\n"
+        "🔎 В боте можно быстро найти события по **названию**, **дате** и **категории**.\n"
+        "🌐 Основной интерфейс — веб-приложение: там удобнее смотреть календарь, фильтры и подписки.\n\n"
+        "Что можно сделать здесь:\n"
+        "• посмотреть **сегодня / завтра / ближайшие**\n"
+        "• открыть **категории** и **календарь**\n"
+        "• подписаться на уведомления и следить за новыми событиями\n\n"
+        "Нажми на кнопки ниже или открой приложение, чтобы увидеть всю афишу целиком.",
+        reply_markup=get_reply_main_menu(),
         parse_mode="Markdown",
     )
 
@@ -4138,13 +4138,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     user = update.effective_user
 
-    if text == "⭐ Поддержать":
-        log_user_action(user.id, user.username, user.first_name, "donate_menu_button")
-        await donate_command(update, context)
+    if text == "🌐 Приложение":
+        log_user_action(user.id, user.username, user.first_name, "menu_open_app")
+        await app_command(update, context)
         return
-    if text == "ℹ️ О проекте":
-        log_user_action(user.id, user.username, user.first_name, "about_button")
-        await about(update, context)
+    if text == "🔔 Мои подписки":
+        log_user_action(user.id, user.username, user.first_name, "menu_subscriptions")
+        await show_subscriptions(update, context)
         return
     if text == "📅 Сегодня":
         log_user_action(user.id, user.username, user.first_name, "menu_today")

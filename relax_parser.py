@@ -119,6 +119,47 @@ class RelaxBaseParser:
 
     # ---------------------- Парсинг страницы ----------------------
 
+    def _extract_place_and_location(self, movie_item) -> tuple[str | None, str]:
+        """Возвращает (place, location) для текущей Relax-структуры и старых вариантов."""
+        place_div = (
+            movie_item.find("div", class_="schedule__place--fill")
+            or movie_item.find("div", class_="schedule__place")
+            or movie_item.select_one("div.schedule__place")
+            or movie_item.select_one("div.schedule__place--fill")
+            or movie_item.select_one("div.schedule__place_wrap")
+        )
+
+        place = None
+        location = "Минск"
+
+        if place_div:
+            place_a = (
+                place_div.select_one("a.js-schedule__place-link")
+                or place_div.select_one("a.schedule__place-link")
+                or place_div.find("a", href=True)
+            )
+            if place_a:
+                raw_place = place_a.get_text(" ", strip=True)
+                if raw_place:
+                    place = normalize_place(raw_place, known_venues=self.known_venues) or raw_place
+
+            addr_span = (
+                place_div.select_one("span.schedule__place-address")
+                or place_div.select_one("span.schedule__place-link")
+                or place_div.select_one("span.text-black-light")
+            )
+            if addr_span:
+                txt = addr_span.get_text(" ", strip=True)
+                if txt and txt != place:
+                    location = txt
+
+            if not place and place_div:
+                raw = re.sub(r"\s+", " ", place_div.get_text(" ", strip=True)).strip()
+                if raw and raw != location:
+                    place = normalize_place(raw, known_venues=self.known_venues) or raw
+
+        return place, location
+
     def parse_page(self, url: str) -> list:
         html = self.fetch_page(url)
         if not html:
@@ -149,19 +190,17 @@ class RelaxBaseParser:
             # Каждый movie__item = одно место + одно событие
             for movie_item in day_block.find_all("div", class_="schedule__table--movie__item"):
                 # Обновляем место только при FILL; EMPTY наследует last_place
-                place_div = movie_item.find("div", class_="schedule__place--fill")
+                place_div = (
+                    movie_item.find("div", class_="schedule__place--fill")
+                    or movie_item.find("div", class_="schedule__place")
+                    or movie_item.select_one("div.schedule__place")
+                )
                 if place_div:
-                    place_a = place_div.find("a", class_="js-schedule__place-link")
-                    if place_a:
-                        raw_place = place_a.get_text(strip=True)
-                        last_place = normalize_place(raw_place, known_venues=self.known_venues) or raw_place
-
-                    # Relax changed the markup: address is now inside .schedule__place-address
-                    # (older code looked for .schedule__place-link, which is the venue name link).
-                    addr_span = place_div.find("span", class_="schedule__place-address")
-                    if not addr_span:
-                        addr_span = place_div.find("span", class_="schedule__place-link")
-                    last_location = addr_span.get_text(strip=True) if addr_span else "Минск"
+                    place, location = self._extract_place_and_location(movie_item)
+                    if place:
+                        last_place = place
+                    if location:
+                        last_location = location
 
                 if not last_place:
                     skip_no_place += 1
@@ -577,6 +616,45 @@ class RelaxKinoParser(RelaxBaseParser):
             return f"{year}-{month}-{day}"
         return None
 
+    def _extract_place_and_location(self, movie_item) -> tuple[str | None, str]:
+        """Возвращает (place, location) для кино-страницы и старых/новых DOM-версий."""
+        place_fill = (
+            movie_item.find("div", class_="schedule__place--fill")
+            or movie_item.find("div", class_="schedule__place")
+            or movie_item.select_one("div.schedule__place")
+            or movie_item.select_one("div.schedule__place--fill")
+        )
+        place = None
+        location = "Минск"
+
+        if place_fill:
+            place_a = (
+                place_fill.select_one("a.js-schedule__place-link")
+                or place_fill.select_one("a.schedule__place-link")
+                or place_fill.find("a", href=True)
+            )
+            if place_a:
+                raw_place = place_a.get_text(" ", strip=True)
+                if raw_place:
+                    place = normalize_place(raw_place, known_venues=self.known_venues) or raw_place
+
+            addr_span = (
+                place_fill.select_one("span.schedule__place-address")
+                or place_fill.select_one("span.schedule__place-link")
+                or place_fill.select_one("span.text-black-light")
+            )
+            if addr_span:
+                txt = addr_span.get_text(" ", strip=True)
+                if txt and txt != place:
+                    location = txt
+
+            if not place and place_fill:
+                raw = re.sub(r"\s+", " ", place_fill.get_text(" ", strip=True)).strip()
+                if raw and raw != location:
+                    place = normalize_place(raw, known_venues=self.known_venues) or raw
+
+        return place, location
+
     def parse_page(self, url: str) -> list:
         html = self.fetch_page(url)
         if not html:
@@ -603,14 +681,17 @@ class RelaxKinoParser(RelaxBaseParser):
 
                 for movie_item in table.find_all("div", class_="schedule__table--movie__item"):
                     # Обновляем кинотеатр если FILL
-                    place_fill = movie_item.find("div", class_="schedule__place--fill")
+                    place_fill = (
+                        movie_item.find("div", class_="schedule__place--fill")
+                        or movie_item.find("div", class_="schedule__place")
+                        or movie_item.select_one("div.schedule__place")
+                    )
                     if place_fill:
-                        place_a = place_fill.find("a", class_="js-schedule__place-link")
-                        if place_a:
-                            raw_place = place_a.get_text(strip=True)
-                            last_place = normalize_place(raw_place, known_venues=self.known_venues) or raw_place
-                        addr = place_fill.find("span", class_="schedule__place-link")
-                        last_location = addr.get_text(strip=True) if addr else "Минск"
+                        place, location = self._extract_place_and_location(movie_item)
+                        if place:
+                            last_place = place
+                        if location:
+                            last_location = location
 
                     if not last_place:
                         continue
