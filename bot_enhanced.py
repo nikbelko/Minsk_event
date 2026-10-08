@@ -64,6 +64,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+PARSER_RUN_LOCK = asyncio.Lock()
+
 TOKEN       = os.getenv("TELEGRAM_BOT_TOKEN")
 DB_NAME     = DB_PATH  # алиас для совместимости с кодом бота
 WEB_APP_URL = os.getenv("WEB_APP_URL", "https://minskdvizh-web.up.railway.app")
@@ -2232,83 +2234,93 @@ async def update_parsers(update_or_query, context: ContextTypes.DEFAULT_TYPE):
     else:
         user_id = update_or_query.from_user.id
         message = update_or_query.message
-    
+
     if user_id != ADMIN_ID:
         if isinstance(update_or_query, Update):
             await update_or_query.message.reply_text("⛔ Нет доступа.")
         else:
             await update_or_query.answer("⛔ Нет доступа", show_alert=True)
         return
-    
-    # Отправляем сообщение о начале обновления
-    await message.reply_text("🔄 **Обновление афиши...**\nЗапускаю парсеры, ~1-2 минуты.", parse_mode="Markdown")
-    
-    try:
-        process = await asyncio.create_subprocess_exec(
-            sys.executable, "run_all_parsers.py",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
-        elapsed = (datetime.now(MINSK_TZ) - message.date.astimezone(MINSK_TZ)).total_seconds()
-        
-        if process.returncode == 0:
-            output = stdout.decode("utf-8", errors="replace")
-            report = _parse_parser_report(output)
-            if report:
-                text = _format_parser_report(report, elapsed)
-            else:
-                text = f"✅ Обновление завершено за {elapsed:.0f} сек\n\nℹ️ Детальный отчёт недоступен"
-            await message.reply_text(text, parse_mode="Markdown")
-            
-        else:
-            err = stderr.decode("utf-8", errors="replace").strip() if stderr else ""
-            out = stdout.decode("utf-8", errors="replace").strip() if stdout else ""
-            debug = err or out or "нет вывода"
-            await message.reply_text(
-                f"❌ **Ошибка парсеров** (код {process.returncode})\n\n```\n{debug[:800]}\n```",
-                parse_mode="Markdown"
+
+    if PARSER_RUN_LOCK.locked():
+        await message.reply_text("⏳ Обновление афиши уже запущено — дождитесь завершения текущего запуска.", parse_mode="Markdown")
+        return
+
+    async with PARSER_RUN_LOCK:
+        # Отправляем сообщение о начале обновления
+        await message.reply_text("🔄 **Обновление афиши...**\nЗапускаю парсеры, ~1-2 минуты.", parse_mode="Markdown")
+
+        try:
+            process = await asyncio.create_subprocess_exec(
+                sys.executable, "run_all_parsers.py",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
-            
-    except asyncio.TimeoutError:
-        await message.reply_text("⏰ Превышено время ожидания (5 мин).", parse_mode="Markdown")
-    except Exception as e:
-        await message.reply_text(f"💥 **Ошибка**: `{e}`", parse_mode="Markdown")
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
+            elapsed = (datetime.now(MINSK_TZ) - message.date.astimezone(MINSK_TZ)).total_seconds()
+
+            if process.returncode == 0:
+                output = stdout.decode("utf-8", errors="replace")
+                report = _parse_parser_report(output)
+                if report:
+                    text = _format_parser_report(report, elapsed)
+                else:
+                    text = f"✅ Обновление завершено за {elapsed:.0f} сек\n\nℹ️ Детальный отчёт недоступен"
+                await message.reply_text(text, parse_mode="Markdown")
+
+            else:
+                err = stderr.decode("utf-8", errors="replace").strip() if stderr else ""
+                out = stdout.decode("utf-8", errors="replace").strip() if stdout else ""
+                debug = err or out or "нет вывода"
+                await message.reply_text(
+                    f"❌ **Ошибка парсеров** (код {process.returncode})\n\n```\n{debug[:800]}\n```",
+                    parse_mode="Markdown"
+                )
+
+        except asyncio.TimeoutError:
+            await message.reply_text("⏰ Превышено время ожидания (5 мин).", parse_mode="Markdown")
+        except Exception as e:
+            await message.reply_text(f"💥 **Ошибка**: `{e}`", parse_mode="Markdown")
 
 
 async def run_parsers_job(bot=None):
     """Запускает парсеры по расписанию, отправляет отчёт и рассылает дайджест."""
+    if PARSER_RUN_LOCK.locked():
+        logger.warning("⏳ run_parsers_job: предыдущий запуск ещё выполняется — пропускаем дубликат")
+        return
+
     logger.info("⏰ Запуск парсеров по расписанию...")
     start_time = datetime.now(MINSK_TZ)
-    try:
-        process = await asyncio.create_subprocess_exec(
-            sys.executable, "run_all_parsers.py",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=600)
-        elapsed = (datetime.now(MINSK_TZ) - start_time).total_seconds()
-        if process.returncode == 0:
-            output = stdout.decode()
-            logger.info(f"✅ Парсеры завершены за {elapsed:.0f} сек")
+    async with PARSER_RUN_LOCK:
+        try:
+            process = await asyncio.create_subprocess_exec(
+                sys.executable, "run_all_parsers.py",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=600)
+            elapsed = (datetime.now(MINSK_TZ) - start_time).total_seconds()
+            if process.returncode == 0:
+                output = stdout.decode()
+                logger.info(f"✅ Парсеры завершены за {elapsed:.0f} сек")
+                if bot:
+                    report = _parse_parser_report(output)
+                    await _send_parser_report(bot, report or [], elapsed)
+                    # Проверяем флеш-подписки после обновления базы
+                    flash_sent = await check_flash_subscriptions(bot)
+                    if flash_sent:
+                        logger.info(f"⚡ Флеш-подписки: отправлено {flash_sent} уведомлений")
+            else:
+                error_msg = stderr.decode()[:300] if stderr else "неизвестная ошибка"
+                logger.error(f"❌ Парсеры упали: {error_msg}")
+                if bot:
+                    await bot.send_message(chat_id=ADMIN_ID, text=f"❌ **Ошибка парсеров**\n\n```\n{error_msg}\n```", parse_mode="Markdown")
+        except asyncio.TimeoutError:
+            logger.error("⏰ Таймаут парсеров (10 мин)")
             if bot:
-                report = _parse_parser_report(output)
-                await _send_parser_report(bot, report or [], elapsed)
-                # Проверяем флеш-подписки после обновления базы
-                flash_sent = await check_flash_subscriptions(bot)
-                if flash_sent:
-                    logger.info(f"⚡ Флеш-подписки: отправлено {flash_sent} уведомлений")
-        else:
-            error_msg = stderr.decode()[:300] if stderr else "неизвестная ошибка"
-            logger.error(f"❌ Парсеры упали: {error_msg}")
+                await bot.send_message(chat_id=ADMIN_ID, text="⏰ **Таймаут** парсеров (>10 мин)", parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"💥 Ошибка: {e}")
             if bot:
-                await bot.send_message(chat_id=ADMIN_ID, text=f"❌ **Ошибка парсеров**\n\n```\n{error_msg}\n```", parse_mode="Markdown")
-    except asyncio.TimeoutError:
-        logger.error("⏰ Таймаут парсеров (10 мин)")
-        if bot:
-            await bot.send_message(chat_id=ADMIN_ID, text="⏰ **Таймаут** парсеров (>10 мин)", parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"💥 Ошибка: {e}")
-        if bot:
-            await bot.send_message(chat_id=ADMIN_ID, text=f"💥 **Критическая ошибка**: {e}", parse_mode="Markdown")
+                await bot.send_message(chat_id=ADMIN_ID, text=f"💥 **Критическая ошибка**: {e}", parse_mode="Markdown")
 
 
 def _parse_parser_report(output: str) -> dict | None:
@@ -2394,44 +2406,49 @@ async def send_digest_job(bot=None):
 
 async def run_daytime_update_job(bot=None):
     """Дневная лёгкая проверка источников + полный парсинг при обнаружении изменений."""
+    if PARSER_RUN_LOCK.locked():
+        logger.warning("⏳ run_daytime_update_job: предыдущий запуск уже выполняется — пропускаем дубликат")
+        return
+
     logger.info("☀️ Запуск дневного обновления...")
     start_time = datetime.now(MINSK_TZ)
-    try:
-        process = await asyncio.create_subprocess_exec(
-            sys.executable, "daytime_update.py",
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=1200)
-        elapsed = (datetime.now(MINSK_TZ) - start_time).total_seconds()
+    async with PARSER_RUN_LOCK:
+        try:
+            process = await asyncio.create_subprocess_exec(
+                sys.executable, "daytime_update.py",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=1200)
+            elapsed = (datetime.now(MINSK_TZ) - start_time).total_seconds()
 
-        if process.returncode == 0:
-            output = stdout.decode()
-            logger.info(f"✅ Дневное обновление завершено за {elapsed:.0f} сек")
+            if process.returncode == 0:
+                output = stdout.decode()
+                logger.info(f"✅ Дневное обновление завершено за {elapsed:.0f} сек")
+                if bot:
+                    report = _parse_daytime_report(output)
+                    if report:
+                        await _send_daytime_report(bot, report, elapsed)
+                    # Рассылаем флеш-подписки после дневного обновления базы
+                    flash_sent = await check_flash_subscriptions(bot)
+                    if flash_sent:
+                        logger.info(f"⚡ Флеш-подписки (дневное): отправлено {flash_sent} уведомлений")
+            else:
+                error_msg = stderr.decode()[:300] if stderr else "неизвестная ошибка"
+                logger.error(f"❌ Дневное обновление упало: {error_msg}")
+                if bot:
+                    await bot.send_message(
+                        chat_id=ADMIN_ID,
+                        text=f"❌ *Дневное обновление: ошибка*\n\n```\n{error_msg}\n```",
+                        parse_mode="Markdown",
+                    )
+        except asyncio.TimeoutError:
+            logger.error("⏰ Таймаут дневного обновления (>20 мин)")
             if bot:
-                report = _parse_daytime_report(output)
-                if report:
-                    await _send_daytime_report(bot, report, elapsed)
-                # Рассылаем флеш-подписки после дневного обновления базы
-                flash_sent = await check_flash_subscriptions(bot)
-                if flash_sent:
-                    logger.info(f"⚡ Флеш-подписки (дневное): отправлено {flash_sent} уведомлений")
-        else:
-            error_msg = stderr.decode()[:300] if stderr else "неизвестная ошибка"
-            logger.error(f"❌ Дневное обновление упало: {error_msg}")
+                await bot.send_message(chat_id=ADMIN_ID, text="⏰ *Дневное обновление*: таймаут (>20 мин)", parse_mode="Markdown")
+        except Exception as e:
+            logger.error(f"💥 Дневное обновление: {e}")
             if bot:
-                await bot.send_message(
-                    chat_id=ADMIN_ID,
-                    text=f"❌ *Дневное обновление: ошибка*\n\n```\n{error_msg}\n```",
-                    parse_mode="Markdown",
-                )
-    except asyncio.TimeoutError:
-        logger.error("⏰ Таймаут дневного обновления (>20 мин)")
-        if bot:
-            await bot.send_message(chat_id=ADMIN_ID, text="⏰ *Дневное обновление*: таймаут (>20 мин)", parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"💥 Дневное обновление: {e}")
-        if bot:
-            await bot.send_message(chat_id=ADMIN_ID, text=f"💥 *Дневное обновление*: {e}", parse_mode="Markdown")
+                await bot.send_message(chat_id=ADMIN_ID, text=f"💥 *Дневное обновление*: {e}", parse_mode="Markdown")
 
 
 def _parse_daytime_report(output: str) -> dict | None:
