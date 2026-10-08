@@ -53,6 +53,7 @@ import asyncio
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
 from telegram.ext import PreCheckoutQueryHandler
 
 # ---------------------- Конфиг и логирование ----------------------
@@ -1616,8 +1617,22 @@ async def show_main_menu(chat_id: int, context: ContextTypes.DEFAULT_TYPE | None
         await context.bot.send_message(chat_id=chat_id, text=text, **kwargs)
 
 
+async def safe_callback_answer(query, *args, **kwargs):
+    """Telegram older callback queries can expire before the bot answers them.
+    Ignore only the known stale-query errors; re-raise everything else."""
+    try:
+        await query.answer(*args, **kwargs)
+        return True
+    except BadRequest as exc:
+        msg = str(exc)
+        if "Query is too old" in msg or "query id is invalid" in msg:
+            logger.warning("Ignoring stale callback query: %s", msg)
+            return False
+        raise
+
+
 async def show_categories_menu(query, context: ContextTypes.DEFAULT_TYPE):
-    await query.answer()
+    await safe_callback_answer(query)
     counts = get_events_count_by_category()
     # Строим список: сначала категории из CATEGORY_NAMES (в правильном порядке),
     # потом неизвестные категории из БД
@@ -4343,6 +4358,11 @@ async def handle_simple_buttons(query, context: ContextTypes.DEFAULT_TYPE, data:
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         query = update.callback_query
+        if not query or not getattr(query, "data", None):
+            return
+        # Telegram may expire a callback before the bot answers it; wrap the method
+        # so every branch handles stale queries consistently instead of throwing BadRequest.
+        query.answer = lambda *args, **kwargs: safe_callback_answer(query, *args, **kwargs)
         data = query.data
 
         # ── Кнопки /admin панели ─────────────────────────────────

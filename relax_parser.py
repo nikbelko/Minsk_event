@@ -126,6 +126,8 @@ class RelaxBaseParser:
             or movie_item.find("div", class_="schedule__place")
             or movie_item.select_one("div.schedule__place")
             or movie_item.select_one("div.schedule__place--fill")
+            or movie_item.select_one("div.schedule__event-place")
+            or movie_item.select_one("div.schedule__event")
             or movie_item.select_one("div.schedule__place_wrap")
         )
 
@@ -137,6 +139,8 @@ class RelaxBaseParser:
                 place_div.select_one("a.js-schedule__place-link")
                 or place_div.select_one("a.schedule__place-link")
                 or place_div.find("a", href=True)
+                or movie_item.select_one("a.js-schedule__place-link")
+                or movie_item.select_one("a.schedule__place-link")
             )
             if place_a:
                 raw_place = place_a.get_text(" ", strip=True)
@@ -147,6 +151,8 @@ class RelaxBaseParser:
                 place_div.select_one("span.schedule__place-address")
                 or place_div.select_one("span.schedule__place-link")
                 or place_div.select_one("span.text-black-light")
+                or movie_item.select_one("span.schedule__place-address")
+                or movie_item.select_one("span.text-black-light")
             )
             if addr_span:
                 txt = addr_span.get_text(" ", strip=True)
@@ -189,11 +195,14 @@ class RelaxBaseParser:
 
             # Каждый movie__item = одно место + одно событие
             for movie_item in day_block.find_all("div", class_="schedule__table--movie__item"):
-                # Обновляем место только при FILL; EMPTY наследует last_place
+                # В актуальной Relax-структуре venue может находиться внутри
+                # schedule__event-place или schedule__event; не только в старом блоке.
                 place_div = (
                     movie_item.find("div", class_="schedule__place--fill")
                     or movie_item.find("div", class_="schedule__place")
                     or movie_item.select_one("div.schedule__place")
+                    or movie_item.select_one("div.schedule__event-place")
+                    or movie_item.select_one("div.schedule__event")
                 )
                 if place_div:
                     place, location = self._extract_place_and_location(movie_item)
@@ -623,6 +632,8 @@ class RelaxKinoParser(RelaxBaseParser):
             or movie_item.find("div", class_="schedule__place")
             or movie_item.select_one("div.schedule__place")
             or movie_item.select_one("div.schedule__place--fill")
+            or movie_item.select_one("div.schedule__event-place")
+            or movie_item.select_one("div.schedule__event")
         )
         place = None
         location = "Минск"
@@ -632,6 +643,8 @@ class RelaxKinoParser(RelaxBaseParser):
                 place_fill.select_one("a.js-schedule__place-link")
                 or place_fill.select_one("a.schedule__place-link")
                 or place_fill.find("a", href=True)
+                or movie_item.select_one("a.js-schedule__place-link")
+                or movie_item.select_one("a.schedule__place-link")
             )
             if place_a:
                 raw_place = place_a.get_text(" ", strip=True)
@@ -642,6 +655,8 @@ class RelaxKinoParser(RelaxBaseParser):
                 place_fill.select_one("span.schedule__place-address")
                 or place_fill.select_one("span.schedule__place-link")
                 or place_fill.select_one("span.text-black-light")
+                or movie_item.select_one("span.schedule__place-address")
+                or movie_item.select_one("span.text-black-light")
             )
             if addr_span:
                 txt = addr_span.get_text(" ", strip=True)
@@ -680,11 +695,13 @@ class RelaxKinoParser(RelaxBaseParser):
                 last_location = "Минск"
 
                 for movie_item in table.find_all("div", class_="schedule__table--movie__item"):
-                    # Обновляем кинотеатр если FILL
+                    # В текущем Relax у кинотеатров venue тоже может быть в event-place.
                     place_fill = (
                         movie_item.find("div", class_="schedule__place--fill")
                         or movie_item.find("div", class_="schedule__place")
                         or movie_item.select_one("div.schedule__place")
+                        or movie_item.select_one("div.schedule__event-place")
+                        or movie_item.select_one("div.schedule__event")
                     )
                     if place_fill:
                         place, location = self._extract_place_and_location(movie_item)
