@@ -1015,6 +1015,12 @@ def _event_title_for_ticket_key(conn: sqlite3.Connection, event_key: str) -> str
 
 
 def _send_ticket_post_confirmation(user_id: int, event_key: str, post_type: str) -> bool:
+    """Отправляет уведомление пользователю о том, что объявление подано.
+
+    Это не является надёжной проверкой приватности Telegram: бот может писать
+    пользователю даже тогда, когда другой пользователь не сможет начать диалог.
+    Поэтому мы используем это как мягкое предупреждение, а не как "стоп"-флаг.
+    """
     if not BOT_TOKEN:
         return True
     try:
@@ -1029,8 +1035,8 @@ def _send_ticket_post_confirmation(user_id: int, event_key: str, post_type: str)
             kind = "продажи" if post_type == "sell" else "поиска"
             text = (
                 f"✅ Ваше объявление о {kind} билетов подано.\n\n"
-                f"Осталось только убедиться, что другие могут написать вам в Telegram.\n"
-                f"Если нет — проверьте: Настройки → Конфиденциальность → Сообщения → Разрешить сообщения от всех или контактов."
+                f"Чтобы люди смогли связаться с вами, проверьте настройки Telegram:\n"
+                f"Конфиденциальность → Сообщения → Все"
             )
             with httpx.Client(timeout=5) as client:
                 response = client.post(
