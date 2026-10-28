@@ -138,96 +138,123 @@ class BezkassiraParser:
     def parse_card(self, thumb: BeautifulSoup, category: str,
                    index: dict) -> Optional[Dict]:
         try:
-            # 1. Только Минск — проверяем data-city_id И текст города из hint
+            # 1. Сначала читаем данные из live JSON-LD / data-атрибутов
             city_id = thumb.get("data-city_id", "")
-            hint_tag = thumb.find("small", class_="hint")
-            hint_city = ""
-            if hint_tag:
-                lines = [l.strip() for l in hint_tag.get_text("\n").split("\n") if l.strip()]
-                hint_city = lines[-1] if lines else ""
+            raw_ld = {}
+            script = thumb.find("script", type="application/ld+json")
+            if script and script.string:
+                try:
+                    raw = re.sub(r'[\x00-\x1f\x7f]', ' ', script.string)
+                    raw_ld = json.loads(raw)
+                except Exception:
+                    raw_ld = {}
 
-            # Главный критерий — текст города из hint ("Минск")
-            # city_id используем только как запасной вариант если hint пустой
-            is_minsk = "Минск" in hint_city if hint_city else (city_id == MINSK_CITY_ID)
+            title = ""
+            description = ""
+            event_date = ""
+            show_time = ""
+            place = ""
+            location = "Минск"
+            price = ""
+            url = ""
+
+            if isinstance(raw_ld, dict):
+                title = (raw_ld.get("name") or "").strip()
+                description = (raw_ld.get("description") or "").strip()
+                if raw_ld.get("url"):
+                    url = raw_ld["url"]
+                if raw_ld.get("startDate"):
+                    event_date, show_time = parse_iso_datetime(raw_ld["startDate"])
+
+                loc = raw_ld.get("location")
+                if isinstance(loc, dict):
+                    place = (loc.get("name") or "").strip()
+                    addr = loc.get("address") or {}
+                    if isinstance(addr, dict):
+                        location = (addr.get("addressLocality") or "Минск").strip() or "Минск"
+                        street = (addr.get("streetAddress") or "").strip()
+                        if street and not place:
+                            place = street
+
+                offers = raw_ld.get("offers") or {}
+                if isinstance(offers, dict):
+                    price = format_price_from_offers(offers)
+
+            if not title:
+                h5 = thumb.find("h5")
+                if h5:
+                    title = h5.get_text(" ", strip=True)
+
+            if not event_date:
+                try:
+                    date_attr = thumb.get("data-date", "")
+                    if date_attr:
+                        event_date = parse_text_date(date_attr.replace('s', '', 1))
+                except Exception:
+                    event_date = ""
+
+            if not place:
+                place = thumb.get("data-place") or ""
+                if isinstance(place, str):
+                    place = place.strip()
+
+            if not url:
+                a = thumb.find("a", href=True)
+                if a:
+                    url = a["href"]
+                    if url and not url.startswith('http'):
+                        url = BASE_URL + url
+
+            # 2. Если нет JSON-LD, делаем fallback по старой разметке, если она существует
+            if not title and not event_date and not place:
+                caption = thumb.find("div", class_="caption")
+                if caption:
+                    h5 = caption.find("h5")
+                    if h5:
+                        title = h5.get_text(strip=True)
+                    date_div = caption.find("div", class_="date")
+                    if date_div:
+                        event_date = parse_text_date(date_div.get_text(strip=True))
+                    a = caption.find("a", href=True)
+                    if a:
+                        url = a["href"]
+                        if url and not url.startswith('http'):
+                            url = BASE_URL + url
+
+            if not title:
+                return None
+
+            # 3. Проверка города: Минск по city_id или по JSON-LD locality
+            city_hint = (location or "").lower()
+            is_minsk = (city_id == MINSK_CITY_ID) or ("минск" in city_hint)
             if not is_minsk:
                 self.stats["non_minsk"] += 1
                 return None
 
-            caption = thumb.find("div", class_="caption")
-            if not caption:
-                return None
-
-            # 2. Название
-            h5 = caption.find("h5")
-            if not h5:
-                return None
-            title = h5.get_text(strip=True)
-            if not title:
-                return None
-
-            # 3. Дата и время из JSON-LD (приоритет) или текстового div.date
-            event_date = show_time = ""
-            script = thumb.find("script", type="application/ld+json")
-            ld = {}
-            if script and script.string:
-                try:
-                    raw = re.sub(r'[\x00-\x1f\x7f]', ' ', script.string)
-                    ld = json.loads(raw)
-                except Exception:
-                    pass
-
-            if ld.get("startDate"):
-                event_date, show_time = parse_iso_datetime(ld["startDate"])
-            else:
-                date_div = caption.find("div", class_="date")
-                if date_div:
-                    event_date = parse_text_date(date_div.get_text(strip=True))
-
             if not event_date:
                 return None
 
-            # 4. Фильтр: только будущие события (не дальше 6 месяцев)
+            # 4. Только будущие события (не дальше 180 дней)
             if not is_future_date(event_date, max_days=180):
                 return None
 
-            # 5. Место (hint уже найден выше)
-            hint = hint_tag
-            place = ""
-            if hint:
-                lines = [l.strip() for l in hint.get_text('\n').split('\n') if l.strip()]
-                place = normalize_place(lines[0]) if lines else ""
+            # 5. Нормализуем место
+            if place:
+                place = normalize_place(place)
+            elif location and location != "Минск":
+                place = normalize_place(location)
+            else:
+                place = "Минск"
 
-            # 6. URL
-            a = caption.find("a", href=True)
-            url = a["href"] if a else ""
-            if url and not url.startswith('http'):
-                url = BASE_URL + url
-
-            # 7. Цена
-            price = ""
-            offers = ld.get("offers", {})
-            if offers:
-                price = format_price_from_offers(offers)
-
-            # 8. Описание
-            description = ld.get("description", "")
-            if description and len(description) > 300:
-                description = description[:297] + "..."
-
-            # НОВАЯ ЛОГИКА: проверяем цену 0 и наличие слова "бесплатно" в описании ----
-            # Проверяем, есть ли в описании слово "бесплатно"
-            has_free_word = description and re.search(r"(бесплатно|вход\s*свободный|free)", description, re.IGNORECASE)
-
-            # Если цена 0 и нет слова "бесплатно" в описании — очищаем цену
-            if (price == "Бесплатно" or (isinstance(price, str) and price == "0")) and not has_free_word:
-                price = ""
-            # Если есть слово "бесплатно" и цена пустая — ставим "Бесплатно"
-            elif has_free_word and not price:
-                price = "Бесплатно"
-            # Нормализуем цену (пустая останется пустой, "Бесплатно" останется "Бесплатно")
+            # 6. Цена и описание
+            description = description[:297] + "..." if description and len(description) > 300 else description
+            if not price and description:
+                has_free_word = bool(re.search(r"(бесплатно|вход\s*свободный|free)", description, re.IGNORECASE))
+                if has_free_word:
+                    price = "Бесплатно"
             price = normalize_price(price)
 
-            # 9. Проверка дублей
+            # 7. Проверка дублей
             if self.is_duplicate(title, event_date, place, show_time, index):
                 self.stats["duplicates"] += 1
                 logger.debug(f"  ↩ дубль: {title} / {event_date}")
