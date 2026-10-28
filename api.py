@@ -1033,11 +1033,17 @@ def _send_ticket_post_confirmation(user_id: int, event_key: str, post_type: str)
             username = (row["telegram_username"] if row else "") or (row["username"] if row else "") or ""
             label = first_name or username or "Вы"
             kind = "продажи" if post_type == "sell" else "поиска"
+
             text = (
                 f"✅ Ваше объявление о {kind} билетов подано.\n\n"
                 f"Чтобы люди смогли связаться с вами, проверьте настройки Telegram:\n"
-                f"Конфиденциальность → Сообщения → Все"
+                f"Конфиденциальность → Сообщения → Все\n\n"
             )
+            if not username:
+                text += (
+                    f"Важно: у вас должен быть установлен Telegram username, иначе другие не смогут написать вам.\n"
+                    f"Проверьте: Профиль → Username."
+                )
             with httpx.Client(timeout=5) as client:
                 response = client.post(
                     f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
