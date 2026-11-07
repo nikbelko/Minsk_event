@@ -265,6 +265,25 @@ class TicketproParser:
                 return normalize_price(m.group(0))
         return ''
 
+    @staticmethod
+    def _clean_display_title(title: str) -> str:
+        if not title:
+            return ''
+        clean = re.sub(r'\s+', ' ', title).strip()
+
+        # TicketPro-specific garbage: repeated phrases like "ПЕРЕНОС ПЕРЕНОС".
+        clean = re.sub(r'(?iu)\b([а-яёa-z]+)\s+\1\b', r'\1', clean)
+        clean = re.sub(r'(?iu)\b(перенос)\s+\1\b', r'\1', clean)
+
+        # Remove a trailing single-letter "С" only for obvious noisy fallback text,
+        # not for valid names such as "Виктор С" or "Песня С".
+        if re.search(r'(?iu)\b(?:перенос|переход|переносы|переносить)\s+[с]$', clean):
+            clean = re.sub(r'(?iu)\s+[с]$', '', clean)
+
+        clean = re.sub(r'\s+[|]\s*$', '', clean)
+        clean = clean.strip(' -—–:,."\'')
+        return clean
+
     def _extract_title_from_text(self, text: str) -> str:
         if not text:
             return ''
@@ -277,7 +296,8 @@ class TicketproParser:
         for pattern in candidates:
             match = re.search(pattern, normalized, flags=re.I | re.U)
             if match:
-                title = re.sub(r'\s+', ' ', match.group(1)).strip(' -—–:,.\"\'')
+                title = re.sub(r'\s+', ' ', match.group(1)).strip(' -—–:,."\'')
+                title = self._clean_display_title(title)
                 if title and len(title) > 1:
                     return title
         return ''
@@ -313,9 +333,14 @@ class TicketproParser:
             ld_address = ''
             if isinstance(location_node, dict):
                 ld_place = location_node.get('name', '')
-                ld_address = location_node.get('address', {})
-                if isinstance(ld_address, dict):
-                    ld_address = ld_address.get('addressLocality', '') or ld_address.get('streetAddress', '')
+                address_node = location_node.get('address', {})
+                if isinstance(address_node, dict):
+                    street = (address_node.get('streetAddress') or '').strip()
+                    locality = (address_node.get('addressLocality') or '').strip()
+                    if street and locality:
+                        ld_address = f"{street}, {locality}"
+                    else:
+                        ld_address = street or locality
             elif isinstance(location_node, str):
                 ld_place = location_node
 
@@ -351,6 +376,7 @@ class TicketproParser:
                 page_text = event_html.get_text(' ', strip=True)
                 title = self._extract_title_from_text(page_text)
             if title:
+                title = self._clean_display_title(title)
                 title = re.sub(r'\s+', ' ', title).strip()
             if not title:
                 return None
@@ -470,7 +496,7 @@ class TicketproParser:
                 'event_date': event_date,
                 'show_time': show_time,
                 'place': place,
-                'location': 'Минск',
+                'location': ld_address or 'Минск',
                 'price': price,
                 'category': category,
                 'source_url': source_url,

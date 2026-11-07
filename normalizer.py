@@ -326,6 +326,8 @@ def normalize_place(place: str, known_venues: list | None = None) -> str:
     # Убираем «Минск,» в начале
     cleaned = re.sub(r"^Минск,\s*", "", place)
     cleaned = re.sub(r"^г\.\s*Минск,\s*", "", cleaned)
+    cleaned = re.sub(r"^г\.\s*Минск\s*", "", cleaned)
+    cleaned = re.sub(r"^Минск\s*", "", cleaned)
 
     # Убираем адресные части (для relax-стиля)
     # Паттерны требуют пробел после сокращения чтобы не зацепить «культуры», «переулок» и т.п.
@@ -340,7 +342,13 @@ def normalize_place(place: str, known_venues: list | None = None) -> str:
     # Убираем лишние пробелы
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
 
-    if not cleaned or len(cleaned) < 3:
+    # Не сохраняем только город как "место проведения" — это почти всегда неvenue.
+    if not cleaned:
+        return ""
+    if cleaned.lower() in {"минск", "г минск", "город минск", "г. минск"}:
+        return ""
+
+    if len(cleaned) < 3:
         return place.strip()
 
     # Ищем в словаре по очищенной строке (без кавычек)
@@ -390,6 +398,8 @@ def normalize_title(title: str) -> str:
 
     norm = title.lower()
 
+    # Нормализация в общем случае должна быть осторожной: мусорные хвосты
+    # и повторения очищаются на уровне конкретного источника, если это нужно.
     # Убираем типичные вводные слова в начале
     norm = re.sub(
         r"^(музыкальный\s+проект|акустический\s+эмбиент|выставка-продажа|"
