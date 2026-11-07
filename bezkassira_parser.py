@@ -283,6 +283,7 @@ class BezkassiraParser:
 
     def parse_category(self, url: str, category: str, label: str,
                        index: dict) -> List[Dict]:
+        self.stats["by_category"].setdefault(label, {"found": 0, "saved": 0})
         logger.info(f"📥 Загружаю {label}: {url}")
         html = fetch_page(url)
         if not html:
@@ -300,8 +301,6 @@ class BezkassiraParser:
                 events.append(ev)
 
         self.stats["found"] += len(thumbnails)
-        if label not in self.stats["by_category"]:
-            self.stats["by_category"][label] = {"found": 0, "saved": 0}
         self.stats["by_category"][label]["found"] += len(thumbnails)
 
         logger.info(f"  → Минск / не дубль: {len(events)}")
@@ -418,14 +417,17 @@ class BezkassiraParser:
         index = self.load_existing_index()
 
         for cat in CATEGORIES:
+            label = cat["label"]
+            self.stats["by_category"].setdefault(label, {"found": 0, "saved": 0})
+
             events = self.parse_category(
-                cat["url"], cat["category"], cat["label"], index
+                cat["url"], cat["category"], label, index
             )
-        
+
             # Сохраняем события ЭТОЙ категории (не удаляя другие)
             cat_saved = self._save_category_events(events)
 
-            self.stats["by_category"][cat["label"]]["saved"] = cat_saved
+            self.stats["by_category"][label]["saved"] = cat_saved
             self.stats["saved"] += cat_saved
         
             # Обновляем индекс для дедупликации между категориями

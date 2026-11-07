@@ -12,7 +12,28 @@ MINSK_TZ = timezone(timedelta(hours=3))  # UTC+3
 
 # ── Инфраструктура ────────────────────────────────────────────────────────────
 
-DB_PATH  = os.getenv("DB_PATH", "/data/events_final.db")
+def _resolve_db_path() -> str:
+    """Return a writable SQLite path for local dev and Railway.
+
+    - If DB_PATH is set explicitly, respect it.
+    - Otherwise prefer /data/events_final.db when the directory is available.
+    - Fallback to a repo-local file so local runs do not crash on machines without /data.
+    """
+    env_path = os.getenv("DB_PATH")
+    if env_path:
+        db_path = env_path
+    elif os.path.isdir("/data") or os.access("/data", os.W_OK):
+        db_path = "/data/events_final.db"
+    else:
+        db_path = os.path.join(os.getcwd(), "events_final.db")
+
+    parent_dir = os.path.dirname(db_path)
+    if parent_dir:
+        os.makedirs(parent_dir, exist_ok=True)
+    return db_path
+
+
+DB_PATH = _resolve_db_path()
 ADMIN_ID = int(os.getenv("ADMIN_ID", "502917728"))
 
 # ── Часы работы заведений без явного времени (выставки, музеи и т.п.) ────────
