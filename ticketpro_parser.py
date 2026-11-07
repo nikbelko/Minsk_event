@@ -33,9 +33,15 @@ logger = logging.getLogger(__name__)
 
 
 class TicketproParser:
+    @staticmethod
+    def _normalize_url(url: str) -> str:
+        if not url:
+            return url
+        return url.replace('https://www.ticketpro.by', 'https://ticketpro.by').replace('http://www.ticketpro.by', 'http://ticketpro.by')
+
     def __init__(self, DB_PATH=os.getenv("DB_PATH", "/data/events_final.db")):
         DB_PATH = DB_PATH
-        self.base_url = 'https://www.ticketpro.by'
+        self.base_url = 'https://ticketpro.by'
         
         self.categories = [
             ('/bilety-na-sportivnye-meropriyatiya/', 'sport', 'Спорт'),
@@ -276,21 +282,25 @@ class TicketproParser:
                     return title
         return ''
 
-    def parse_event_from_html(self, event_html, category: str, display_name: str, relax_index: dict = None, title_hint: str = '') -> Optional[Dict]:
+    def parse_event_from_html(self, event_html, category: str, display_name: str, relax_index: dict = None, title_hint: str = '', source_url_hint: str = '') -> Optional[Dict]:
         try:
-            source_url = ''
-            canonical = event_html.select_one('link[rel="canonical"]')
-            og_url = event_html.select_one('meta[property="og:url"]')
-            if canonical and canonical.get('href'):
-                source_url = canonical['href']
-            elif og_url and og_url.get('content'):
-                source_url = og_url['content']
-            elif event_html.name == 'a' and event_html.get('href'):
-                source_url = event_html['href']
-                if not source_url.startswith('http'):
-                    source_url = self.base_url + source_url
+            source_url = source_url_hint.strip() if source_url_hint else ''
+            if not source_url:
+                canonical = event_html.select_one('link[rel="canonical"]')
+                og_url = event_html.select_one('meta[property="og:url"]')
+                if canonical and canonical.get('href'):
+                    source_url = self._normalize_url(canonical['href'])
+                elif og_url and og_url.get('content'):
+                    source_url = self._normalize_url(og_url['content'])
+                elif event_html.name == 'a' and event_html.get('href'):
+                    source_url = event_html['href']
+                    if not source_url.startswith('http'):
+                        source_url = self.base_url + source_url
+                    source_url = self._normalize_url(source_url)
+                else:
+                    source_url = self.base_url
             else:
-                source_url = self.base_url
+                source_url = self._normalize_url(source_url)
 
             ld = self._extract_event_ld(event_html)
             ld_url = ld.get('url', '') or source_url
@@ -315,13 +325,15 @@ class TicketproParser:
             ld_price = format_price_from_offers(offers) if offers else ''
 
             title = ''
-            if ld.get('name'):
-                title = str(ld.get('name')).strip()
-            if title_hint and not title:
+            if title_hint:
                 title = title_hint
                 title = re.sub(r'\s+', ' ', title).strip()
                 title = re.sub(r'\s+\d{1,2}\s+[а-я]+(?:\s+\d{4})?(?:\s+(?:сб|вс|пн|вт|ср|чт|пт))?(?:,\s*\d{1,2}:\d{2})?.*$', '', title, flags=re.I | re.U)
                 title = title.strip(' -—–:,.\"\'')
+            elif ld.get('name'):
+                ld_name = str(ld.get('name')).strip()
+                if not re.search(r'офис\s+\d+|свидетельство\s+о\s+государственной\s+регистрации|юридического\s+лица|ticketpro|ООО', ld_name, re.I | re.U):
+                    title = ld_name
 
             if not title:
                 title_tag = event_html.find('div', class_='event-box__title')
@@ -367,54 +379,37 @@ class TicketproParser:
                 except Exception:
                     pass
 
-            if not event_date or not show_time:
-                date_text = ''
-                date_tag = event_html.find('div', class_='event-box__date')
-                if date_tag:
-                    date_text = date_tag.get_text(strip=True)
-                if not date_text and title_hint:
-                    m = re.search(r'(\d{1,2})\s+[а-я]+\s+(\d{4})', title_hint, flags=re.I | re.U)
-                    if m:
-                        day, year = m.groups()
-                        month_name = re.search(r'\d{1,2}\s+([а-я]+)\s+\d{4}', title_hint, flags=re.I | re.U)
-                        if month_name:
-                            month_num = self._month_name_to_number(month_name.group(1))
-                            if month_num:
-                                date_text = f"{day} {month_name.group(1)} {year}"
-                if not date_text:
-                    text = page_text
-                    date_match = re.search(r'(\d{1,2})\s+(?:[а-я]+)\s+(\d{4})', text)
-                    if date_match:
-                        day, year = date_match.groups()
-                        month_match = re.search(r'(?:\d{1,2})\s+([а-я]+)\s+(\d{4})', text)
-                        if month_match:
-                            month_name = month_match.group(1)
-                            month_num = self._month_name_to_number(month_name)
-                            if month_num:
-                                date_text = f"{day} {month_name} {year}"
-                if date_text:
-                    date_match = re.search(r'(\d{1,2})\s+([а-я]+)\s+(\d{4})', date_text, flags=re.I)
-                    if date_match:
-                        day, month_name, year = date_match.groups()
-                        month_num = self._month_name_to_number(month_name)
-                        if month_num and not event_date:
-                            event_date = f"{year}-{month_num}-{int(day):02d}"
-                    time_match = re.search(r'(\d{1,2}:\d{2})', date_text)
-                    if time_match and not show_time:
-                        show_time = time_match.group(1)
-
             if not event_date:
-                title_from_url, event_date = self._parse_event_meta_from_url(source_url)
-                if title_from_url and not title:
-                    title = title_from_url
+                url_title, url_date = self._parse_event_meta_from_url(source_url)
+                if url_date:
+                    event_date = url_date
+                    if url_title and not title:
+                        title = url_title
+
+            if not event_date or not show_time:
+                for script in event_html.find_all('script'):
+                    raw = script.string or script.get_text(' ', strip=True)
+                    if not raw or 'startTime' not in raw:
+                        continue
+                    m = re.search(r'"startTime":"(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})', raw)
+                    if m:
+                        if not event_date:
+                            event_date = m.group(1)
+                        if not show_time:
+                            show_time = m.group(2)
+                        break
 
             if event_date and not show_time:
-                m = re.search(r'(\d{1,2}:\d{2})', str(event_html), re.I)
+                m = re.search(r'"startTime":"\d{4}-\d{2}-\d{2}T(\d{2}:\d{2})', str(event_html), re.I)
                 if m:
                     show_time = m.group(1)
 
             if not event_date:
                 return None
+
+            # Some TicketPro pages include unrelated announcement/news blocks with publishedAt dates.
+            # We intentionally ignore broad page-text dates here, because they often belong to blog/news cards
+            # rather than the actual event being parsed.
 
             price = ld_price
             if not price:
@@ -514,6 +509,7 @@ class TicketproParser:
                 if not href or '/ru/event/' not in href:
                     continue
                 full_url = href if href.startswith('http') else (self.base_url + href)
+                full_url = self._normalize_url(full_url)
                 if full_url not in seen_urls:
                     seen_urls.add(full_url)
                     event_links.append(full_url)
@@ -535,6 +531,7 @@ class TicketproParser:
                 if not href or '/ru/event/' not in href:
                     continue
                 full_url = href if href.startswith('http') else (self.base_url + href)
+                full_url = self._normalize_url(full_url)
                 if full_url not in seen_urls:
                     continue
                 title_hint = re.sub(r'\s+', ' ', link.get_text(' ', strip=True))
@@ -543,7 +540,14 @@ class TicketproParser:
                 if not detail_html:
                     continue
                 detail_soup = BeautifulSoup(detail_html, 'lxml')
-                event = self.parse_event_from_html(detail_soup, category, display_name, relax_index, title_hint=title_hint)
+                event = self.parse_event_from_html(
+                    detail_soup,
+                    category,
+                    display_name,
+                    relax_index,
+                    title_hint=title_hint,
+                    source_url_hint=full_url,
+                )
                 if event:
                     events.append(event)
 
