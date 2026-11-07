@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from collections import defaultdict
 
-from fastapi import FastAPI, Query, HTTPException, UploadFile, File, Response
+from fastapi import BackgroundTasks, FastAPI, Query, HTTPException, UploadFile, File, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -108,6 +108,17 @@ def _run_migrations():
                 UNIQUE(recipient_user_id, event_key, source_user_id, source_post_id, match_type)
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS attendee_notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                recipient_user_id INTEGER NOT NULL,
+                event_key TEXT NOT NULL,
+                source_user_id INTEGER NOT NULL,
+                source_attendance_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(recipient_user_id, event_key, source_attendance_id)
+            )
+        """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_event_attendees_event_id ON event_attendees(event_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_event_attendees_user_id ON event_attendees(user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_event_attendees_event_key ON event_attendees(event_key)")
@@ -116,6 +127,8 @@ def _run_migrations():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ticket_posts_event_key ON event_ticket_posts(event_key)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ticket_posts_user_id ON event_ticket_posts(user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ticket_posts_type ON event_ticket_posts(post_type)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_attendee_notifications_event ON attendee_notifications(event_key)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_attendee_notifications_recipient ON attendee_notifications(recipient_user_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_flash_ignored_sub ON flash_ignored_matches(subscription_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_flash_ignored_user ON flash_ignored_matches(user_id)")
         conn.execute("""
@@ -1110,6 +1123,76 @@ def _record_ticket_match_notifications_for_post(conn: sqlite3.Connection, event_
     return recipient_ids
 
 
+def _send_attendee_notification(recipient_user_id: int, event_key: str, source_user_id: int) -> None:
+    """Notify an existing attendee that another person joined the event."""
+    if not BOT_TOKEN:
+        return
+    try:
+        import html
+
+        with get_db() as conn:
+            source_user = conn.execute(
+                "SELECT first_name, username, telegram_username FROM users WHERE user_id = ?",
+                (source_user_id,),
+            ).fetchone()
+            title = html.escape(_event_title_for_ticket_key(conn, event_key))
+            user_label = (
+                (source_user["first_name"] or source_user["username"] or source_user["telegram_username"])
+                if source_user else "Пользователь"
+            ) or "Пользователь"
+            user_label = html.escape(user_label)
+
+        text = (
+            f"🔔 К событию присоединился новый участник: <b>{title}</b>\n\n"
+            f"Участник: <b>{user_label}</b>\n"
+            "Откройте событие в приложении, чтобы посмотреть список участников."
+        )
+        with httpx.Client(timeout=5) as client:
+            client.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                json={
+                    "chat_id": recipient_user_id,
+                    "text": text,
+                    "parse_mode": "HTML",
+                },
+            )
+    except Exception as exc:
+        logger.warning("Failed to send attendee notification to %s: %s", recipient_user_id, exc)
+
+
+def _record_attendee_notifications_for_join(
+    conn: sqlite3.Connection,
+    event_key: str,
+    source_user_id: int,
+    source_attendance_id: int,
+) -> list[int]:
+    """Create deduplicated notifications for people already attending."""
+    existing = conn.execute(
+        """
+        SELECT DISTINCT user_id
+        FROM event_attendees
+        WHERE event_key = ? AND user_id != ?
+        """,
+        (event_key, source_user_id),
+    ).fetchall()
+    now = datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    recipients: list[int] = []
+    for row in existing:
+        recipient_user_id = int(row["user_id"])
+        cursor = conn.execute(
+            """
+            INSERT OR IGNORE INTO attendee_notifications (
+                recipient_user_id, event_key, source_user_id,
+                source_attendance_id, created_at
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (recipient_user_id, event_key, source_user_id, source_attendance_id, now),
+        )
+        if cursor.rowcount > 0:
+            recipients.append(recipient_user_id)
+    return recipients
+
+
 def _delete_expired_ticket_posts(conn: sqlite3.Connection) -> None:
     today = today_str()
     conn.execute(
@@ -1264,7 +1347,11 @@ def admin_dashboard(
 
 
 @app.post("/api/events/{event_id}/attend")
-def add_event_attendee(event_id: int, payload: AttendRequest):
+def add_event_attendee(
+    event_id: int,
+    payload: AttendRequest,
+    background_tasks: BackgroundTasks,
+):
     with get_db() as conn:
         resolved_key = _resolve_event_key(conn, payload.event_key, payload.event_id or event_id)
 
@@ -1275,13 +1362,21 @@ def add_event_attendee(event_id: int, payload: AttendRequest):
             first_name=payload.first_name,
             telegram_username=payload.telegram_username,
         )
-        conn.execute(
+        attendee_cursor = conn.execute(
             """
             INSERT OR IGNORE INTO event_attendees (user_id, event_id, event_key, created_at)
             VALUES (?, ?, ?, ?)
             """,
             (payload.user_id, payload.event_id or event_id or 0, resolved_key, datetime.now(MINSK_TZ).strftime("%Y-%m-%d %H:%M:%S")),
         )
+        attendee_recipients: list[int] = []
+        if attendee_cursor.rowcount > 0:
+            attendee_recipients = _record_attendee_notifications_for_join(
+                conn,
+                resolved_key,
+                payload.user_id,
+                int(attendee_cursor.lastrowid),
+            )
         conn.execute(
             "INSERT INTO user_stats (user_id, username, first_name, action, detail, created_at) VALUES (?,?,?,?,?,?)",
             (
@@ -1294,6 +1389,13 @@ def add_event_attendee(event_id: int, payload: AttendRequest):
             ),
         )
         conn.commit()
+        for recipient_user_id in attendee_recipients:
+            background_tasks.add_task(
+                _send_attendee_notification,
+                recipient_user_id,
+                resolved_key,
+                payload.user_id,
+            )
         return _get_attendee_payload(conn, resolved_key, payload.user_id)
 
 

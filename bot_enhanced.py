@@ -247,6 +247,17 @@ def init_db():
             )
         """)
         cursor.execute("""
+            CREATE TABLE IF NOT EXISTS attendee_notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                recipient_user_id INTEGER NOT NULL,
+                event_key TEXT NOT NULL,
+                source_user_id INTEGER NOT NULL,
+                source_attendance_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(recipient_user_id, event_key, source_attendance_id)
+            )
+        """)
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS flash_subscription_requests (
                 token TEXT PRIMARY KEY,
                 user_id INTEGER NOT NULL,
@@ -309,6 +320,8 @@ def init_db():
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_ticket_posts_event_key ON event_ticket_posts(event_key)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_ticket_posts_user_id ON event_ticket_posts(user_id)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_ticket_posts_type ON event_ticket_posts(post_type)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_attendee_notifications_event ON attendee_notifications(event_key)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_attendee_notifications_recipient ON attendee_notifications(recipient_user_id)")
         cursor.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_event_attendees_user_event_key
             ON event_attendees(user_id, event_key)

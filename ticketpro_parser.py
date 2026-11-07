@@ -141,6 +141,48 @@ class TicketproParser:
         title = title_prefix.title() if title_prefix else ''
         return title, event_date
 
+    def _extract_event_ld(self, soup: BeautifulSoup) -> dict:
+        for script in soup.select('script[type="application/ld+json"]'):
+            raw = script.string or script.get_text(' ', strip=True)
+            if not raw:
+                continue
+            try:
+                data = json.loads(re.sub(r'[\x00-\x1f\x7f]', ' ', raw))
+            except Exception:
+                continue
+
+            def walk(node):
+                if isinstance(node, dict):
+                    ctype = node.get('@type')
+                    types = ctype if isinstance(ctype, list) else ([ctype] if ctype else [])
+                    if any('Event' in str(t) for t in types):
+                        return node
+                    for value in node.values():
+                        result = walk(value)
+                        if result:
+                            return result
+                elif isinstance(node, list):
+                    for item in node:
+                        result = walk(item)
+                        if result:
+                            return result
+                return {}
+
+            result = walk(data)
+            if result and (result.get('name') or result.get('startDate') or result.get('location')):
+                return result
+
+            if isinstance(data, dict):
+                if data.get('@type') == 'Event' or (data.get('name') and data.get('startDate')):
+                    return data
+                if '@graph' in data:
+                    graph = data.get('@graph')
+                    if isinstance(graph, list):
+                        for item in graph:
+                            if isinstance(item, dict) and ('Event' in str(item.get('@type', '')) or item.get('name') and item.get('startDate')):
+                                return item
+        return {}
+
     def _extract_place_from_html(self, soup: BeautifulSoup, fallback_text: str = '', title_hint: str = '', source_url: str = '') -> str:
         candidates = [title_hint]
         if source_url:
@@ -236,17 +278,56 @@ class TicketproParser:
 
     def parse_event_from_html(self, event_html, category: str, display_name: str, relax_index: dict = None, title_hint: str = '') -> Optional[Dict]:
         try:
+            source_url = ''
+            canonical = event_html.select_one('link[rel="canonical"]')
+            og_url = event_html.select_one('meta[property="og:url"]')
+            if canonical and canonical.get('href'):
+                source_url = canonical['href']
+            elif og_url and og_url.get('content'):
+                source_url = og_url['content']
+            elif event_html.name == 'a' and event_html.get('href'):
+                source_url = event_html['href']
+                if not source_url.startswith('http'):
+                    source_url = self.base_url + source_url
+            else:
+                source_url = self.base_url
+
+            ld = self._extract_event_ld(event_html)
+            ld_url = ld.get('url', '') or source_url
+            ld_desc = (ld.get('description', '') or '').strip()
+            if len(ld_desc) > 300:
+                ld_desc = ld_desc[:297] + '...'
+
+            location_node = ld.get('location', {})
+            ld_place = ''
+            ld_address = ''
+            if isinstance(location_node, dict):
+                ld_place = location_node.get('name', '')
+                ld_address = location_node.get('address', {})
+                if isinstance(ld_address, dict):
+                    ld_address = ld_address.get('addressLocality', '') or ld_address.get('streetAddress', '')
+            elif isinstance(location_node, str):
+                ld_place = location_node
+
+            offers = ld.get('offers', {})
+            if isinstance(offers, list):
+                offers = offers[0] if offers else {}
+            ld_price = format_price_from_offers(offers) if offers else ''
+
             title = ''
-            if title_hint:
+            if ld.get('name'):
+                title = str(ld.get('name')).strip()
+            if title_hint and not title:
                 title = title_hint
                 title = re.sub(r'\s+', ' ', title).strip()
                 title = re.sub(r'\s+\d{1,2}\s+[а-я]+(?:\s+\d{4})?(?:\s+(?:сб|вс|пн|вт|ср|чт|пт))?(?:,\s*\d{1,2}:\d{2})?.*$', '', title, flags=re.I | re.U)
                 title = title.strip(' -—–:,.\"\'')
 
-            title_tag = event_html.find('div', class_='event-box__title')
-            if not title and title_tag:
-                title = title_tag.get_text(strip=True)
-            elif not title and event_html.name == 'a' and event_html.get('href'):
+            if not title:
+                title_tag = event_html.find('div', class_='event-box__title')
+                if title_tag:
+                    title = title_tag.get_text(strip=True)
+            if not title and event_html.name == 'a' and event_html.get('href'):
                 href = event_html.get('href')
                 title, _ = self._parse_event_meta_from_url(href)
             if not title:
@@ -257,41 +338,14 @@ class TicketproParser:
             if not title:
                 page_text = event_html.get_text(' ', strip=True)
                 title = self._extract_title_from_text(page_text)
+            if title:
+                title = re.sub(r'\s+', ' ', title).strip()
             if not title:
                 return None
 
-            source_url = ''
-            if event_html.name == 'a' and event_html.get('href'):
-                source_url = event_html['href']
-                if not source_url.startswith('http'):
-                    source_url = self.base_url + source_url
-            else:
-                source_url = self.base_url
-
-            # === JSON-LD — основной источник данных ===
-            ld_url = ld_desc = ld_place = ld_price = ld_address = ""
-            script = event_html.find('script', type='application/ld+json')
-            if script and script.string:
-                try:
-                    raw = re.sub(r'[\x00-\x1f\x7f]', ' ', script.string)
-                    ld = json.loads(raw)
-                    ld_url   = ld.get('url', '')
-                    ld_desc  = ld.get('description', '').strip()
-                    if len(ld_desc) > 300:
-                        ld_desc = ld_desc[:297] + '...'
-                    loc = ld.get('location', {})
-                    ld_place = loc.get('name', '')
-                    ld_address = loc.get('address', {})
-                    if isinstance(ld_address, dict):
-                        ld_address = ld_address.get('addressLocality', '') or ld_address.get('streetAddress', '')
-                    offers = ld.get('offers', {})
-                    if offers:
-                        ld_price = format_price_from_offers(offers)
-                except Exception:
-                    pass
+            page_text = event_html.get_text(' ', strip=True)
 
             place_raw = ld_place
-            page_text = event_html.get_text(' ', strip=True)
             if not place_raw:
                 place_tag = event_html.find('div', class_='event-box__place')
                 if place_tag:
@@ -299,82 +353,55 @@ class TicketproParser:
                 else:
                     place_raw = self._extract_place_from_html(BeautifulSoup(str(event_html), 'lxml'), page_text, title_hint or title, source_url)
 
-            # Проверка на Минск — в TicketPro место события обычно уже явно содержит "Минск" или
-            # нормализованное название площадки. Для таких страниц не нужно сканировать весь page_text,
-            # потому что рядом лежат другие события и их названия городов создают ложные срабатывания.
-            check_str = ' '.join(filter(None, [place_raw, ld_address]))
-            if not check_str:
-                event_window = page_text
-                needle_text = title_hint or title
-                positions = []
-                for token in [needle_text, place_raw, ld_address]:
-                    token = (token or '').strip()
-                    if not token:
-                        continue
-                    idx = page_text.lower().find(token.lower())
-                    if idx != -1:
-                        positions.append(idx)
-                if positions:
-                    start = max(0, min(positions) - 60)
-                    end = min(len(page_text), max(positions) + 300)
-                    event_window = page_text[start:end]
-                check_str = event_window
-            if not is_minsk_event(check_str):
-                self.stats['filtered_out'] += 1
-                return None
-
-            place = normalize_place(place_raw) if place_raw else ''
-
-            date_text = ''
-            date_tag = event_html.find('div', class_='event-box__date')
-            if date_tag:
-                date_text = date_tag.get_text(strip=True)
-            if not date_text and title_hint:
-                m = re.search(r'(\d{1,2})\s+[а-я]+\s+(\d{4})', title_hint, flags=re.I | re.U)
-                if m:
-                    day, year = m.groups()
-                    month_name = re.search(r'\d{1,2}\s+([а-я]+)\s+\d{4}', title_hint, flags=re.I | re.U)
-                    if month_name:
-                        month_num = self._month_name_to_number(month_name.group(1))
-                        if month_num:
-                            date_text = f"{day} {month_name.group(1)} {year}"
-            if not date_text:
-                text = page_text
-                date_match = re.search(r'(\d{1,2})\s+(?:[а-я]+)\s+(\d{4})', text)
-                if date_match:
-                    day, year = date_match.groups()
-                    month_match = re.search(r'(?:\d{1,2})\s+([а-я]+)\s+(\d{4})', text)
-                    if month_match:
-                        month_name = month_match.group(1)
-                        month_num = self._month_name_to_number(month_name)
-                        if month_num:
-                            date_text = f"{day} {month_name} {year}"
-            
             event_date = show_time = ""
-            if date_text:
-                date_match = re.search(r'(\d{1,2})\s+([а-я]+)\s+(\d{4})', date_text, flags=re.I)
-                if date_match:
-                    day, month_name, year = date_match.groups()
-                    month_num = self._month_name_to_number(month_name)
-                    if month_num:
-                        event_date = f"{year}-{month_num}-{int(day):02d}"
-                time_match = re.search(r'(\d{1,2}:\d{2})', date_text)
-                if time_match:
-                    show_time = time_match.group(1)
-
-            if (not event_date or not show_time) and script and script.string:
+            start_date = ld.get('startDate', '')
+            if start_date:
                 try:
-                    raw = re.sub(r'[\x00-\x1f\x7f]', ' ', script.string)
-                    ld = json.loads(raw)
-                    sd = ld.get('startDate', '')
-                    if sd and 'T' in sd:
-                        dt = datetime.fromisoformat(sd)
-                        if not event_date:
-                            event_date = dt.strftime('%Y-%m-%d')
-                        if not show_time and dt.hour != 0:
+                    if 'T' in str(start_date):
+                        dt = datetime.fromisoformat(str(start_date))
+                        event_date = dt.strftime('%Y-%m-%d')
+                        if dt.hour != 0:
                             show_time = dt.strftime('%H:%M')
+                    else:
+                        event_date = str(start_date)[:10]
                 except Exception:
                     pass
+
+            if not event_date or not show_time:
+                date_text = ''
+                date_tag = event_html.find('div', class_='event-box__date')
+                if date_tag:
+                    date_text = date_tag.get_text(strip=True)
+                if not date_text and title_hint:
+                    m = re.search(r'(\d{1,2})\s+[а-я]+\s+(\d{4})', title_hint, flags=re.I | re.U)
+                    if m:
+                        day, year = m.groups()
+                        month_name = re.search(r'\d{1,2}\s+([а-я]+)\s+\d{4}', title_hint, flags=re.I | re.U)
+                        if month_name:
+                            month_num = self._month_name_to_number(month_name.group(1))
+                            if month_num:
+                                date_text = f"{day} {month_name.group(1)} {year}"
+                if not date_text:
+                    text = page_text
+                    date_match = re.search(r'(\d{1,2})\s+(?:[а-я]+)\s+(\d{4})', text)
+                    if date_match:
+                        day, year = date_match.groups()
+                        month_match = re.search(r'(?:\d{1,2})\s+([а-я]+)\s+(\d{4})', text)
+                        if month_match:
+                            month_name = month_match.group(1)
+                            month_num = self._month_name_to_number(month_name)
+                            if month_num:
+                                date_text = f"{day} {month_name} {year}"
+                if date_text:
+                    date_match = re.search(r'(\d{1,2})\s+([а-я]+)\s+(\d{4})', date_text, flags=re.I)
+                    if date_match:
+                        day, month_name, year = date_match.groups()
+                        month_num = self._month_name_to_number(month_name)
+                        if month_num and not event_date:
+                            event_date = f"{year}-{month_num}-{int(day):02d}"
+                    time_match = re.search(r'(\d{1,2}:\d{2})', date_text)
+                    if time_match and not show_time:
+                        show_time = time_match.group(1)
 
             if not event_date:
                 title_from_url, event_date = self._parse_event_meta_from_url(source_url)
@@ -404,6 +431,30 @@ class TicketproParser:
                 if first_link:
                     source_url = self.base_url + first_link['href'] if not first_link['href'].startswith('http') else first_link['href']
 
+            # Проверка на Минск — event schema уже идентифицирует это событие, поэтому не делаем
+            # широкие поиски по всему page_text, если есть точное место или адрес площадки.
+            check_str = ' '.join(filter(None, [place_raw, ld_address]))
+            if not check_str:
+                event_window = page_text
+                needle_text = title_hint or title
+                positions = []
+                for token in [needle_text, place_raw, ld_address]:
+                    token = (token or '').strip()
+                    if not token:
+                        continue
+                    idx = page_text.lower().find(token.lower())
+                    if idx != -1:
+                        positions.append(idx)
+                if positions:
+                    start = max(0, min(positions) - 60)
+                    end = min(len(page_text), max(positions) + 300)
+                    event_window = page_text[start:end]
+                check_str = event_window
+            if not is_minsk_event(check_str):
+                self.stats['filtered_out'] += 1
+                return None
+
+            place = normalize_place(place_raw) if place_raw else ''
             if relax_index is not None and self.is_duplicate(title, event_date, place, show_time, relax_index):
                 return None
 
