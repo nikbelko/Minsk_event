@@ -189,6 +189,88 @@ class TicketproParser:
                                 return item
         return {}
 
+    @staticmethod
+    def _parse_iso_date_from_text(value: str) -> Optional[str]:
+        """Extract ISO date from TicketPro text like '13 февраля 2027' or '3 Декабря 2026'."""
+        if not value:
+            return None
+        matches = []
+        for m in re.finditer(r'(\d{1,2})\s+[A-Za-zА-Яа-яЁё]+\s+([A-Za-zА-Яа-яЁё]+)\s+(\d{4})', value, flags=re.I | re.U):
+            day = int(m.group(1))
+            month_name = m.group(2).strip()
+            year = int(m.group(3))
+            month_num = TicketproParser._month_name_to_number(month_name)
+            if month_num:
+                matches.append(f"{year}-{month_num}-{day:02d}")
+        if matches:
+            return max(matches)
+        return None
+
+    def _extract_event_urls_from_page(self, page_html: str) -> List[str]:
+        """Return event URLs from TicketPro's embedded JS payload when present.
+
+        TicketPro renders the category list through a Next.js payload and hides the
+        full dataset behind the UI's 'show more' control. The visible DOM only exposes
+        a partial list, so we prefer the embedded `eventsPage.items` payload and fall
+        back to DOM links only when that payload is absent.
+        """
+        urls: set[str] = set()
+
+        marker = '"eventsPage"'
+        idx = page_html.find(marker)
+        if idx != -1:
+            start = page_html.find('{', idx + len(marker))
+            if start != -1:
+                in_string = False
+                escape = False
+                depth = 0
+                end = None
+                for i in range(start, len(page_html)):
+                    ch = page_html[i]
+                    if in_string:
+                        if escape:
+                            escape = False
+                        elif ch == '\\':
+                            escape = True
+                        elif ch == '"':
+                            in_string = False
+                    else:
+                        if ch == '"':
+                            in_string = True
+                        elif ch == '{':
+                            depth += 1
+                        elif ch == '}':
+                            depth -= 1
+                            if depth == 0:
+                                end = i + 1
+                                break
+
+                if end is not None:
+                    candidate = page_html[start:end]
+                    candidate = candidate.replace('\\"', '"').replace('\\/', '/')
+                    try:
+                        data = json.loads(candidate)
+                        items = data.get('items', []) if isinstance(data, dict) else []
+                        for item in items:
+                            slug = item.get('slug')
+                            if slug:
+                                url = slug if slug.startswith('http') else f"{self.base_url}/ru/event/{slug.lstrip('/')}"
+                                urls.add(self._normalize_url(url))
+                    except Exception:
+                        pass
+
+        if urls:
+            return sorted(urls)
+
+        soup = BeautifulSoup(page_html, 'lxml')
+        for link in soup.select('a[href*="/ru/event/"]'):
+            href = link.get('href', '')
+            if not href:
+                continue
+            full_url = href if href.startswith('http') else (self.base_url + href)
+            urls.add(self._normalize_url(full_url))
+        return sorted(urls)
+
     def _extract_place_from_html(self, soup: BeautifulSoup, fallback_text: str = '', title_hint: str = '', source_url: str = '') -> str:
         candidates = [title_hint]
         if source_url:
@@ -431,6 +513,20 @@ class TicketproParser:
                     show_time = m.group(1)
 
             if not event_date:
+                # Fallback: parse a valid date from the page metadata or visible text.
+                event_date = self._parse_iso_date_from_text(page_text)
+
+            if not event_date:
+                event_date = self._parse_iso_date_from_text(page_text)
+
+            # If TicketPro shows a transfer marker, it may expose both a stale old date and a fresh replacement date.
+            # Prefer the newest valid date from the metadata, not the URL slug date.
+            if 'перенос' in page_text.lower():
+                page_valid_date = self._parse_iso_date_from_text(page_text)
+                if page_valid_date and (not event_date or page_valid_date > event_date):
+                    event_date = page_valid_date
+
+            if not event_date:
                 return None
 
             # Some TicketPro pages include unrelated announcement/news blocks with publishedAt dates.
@@ -528,17 +624,8 @@ class TicketproParser:
                 break
 
             soup = BeautifulSoup(html, 'lxml')
-            event_links = []
-            seen_urls = set()
-            for link in soup.select('a[href*="/ru/event/"]'):
-                href = link.get('href', '')
-                if not href or '/ru/event/' not in href:
-                    continue
-                full_url = href if href.startswith('http') else (self.base_url + href)
-                full_url = self._normalize_url(full_url)
-                if full_url not in seen_urls:
-                    seen_urls.add(full_url)
-                    event_links.append(full_url)
+            event_links = self._extract_event_urls_from_page(html)
+            seen_urls = set(event_links)
 
             old_event_boxes = soup.find_all('div', class_='event-box')
             if old_event_boxes:
@@ -552,15 +639,21 @@ class TicketproParser:
                 logger.info(f"Нет ссылок/блоков на странице {page}, завершаем")
                 break
 
-            for link in soup.select('a[href*="/ru/event/"]'):
-                href = link.get('href', '')
-                if not href or '/ru/event/' not in href:
+            for full_url in event_links:
+                if not full_url:
                     continue
-                full_url = href if href.startswith('http') else (self.base_url + href)
-                full_url = self._normalize_url(full_url)
-                if full_url not in seen_urls:
-                    continue
-                title_hint = re.sub(r'\s+', ' ', link.get_text(' ', strip=True))
+                # Prefer the visible link text as a title hint when it exists.
+                title_hint = ''
+                for link in soup.select('a[href*="/ru/event/"]'):
+                    href = link.get('href', '')
+                    if not href:
+                        continue
+                    candidate = href if href.startswith('http') else (self.base_url + href)
+                    candidate = self._normalize_url(candidate)
+                    if candidate == full_url:
+                        title_hint = re.sub(r'\s+', ' ', link.get_text(' ', strip=True))
+                        break
+
                 self.stats['total_events_found'] += 1
                 detail_html = self.fetch_page(full_url)
                 if not detail_html:
