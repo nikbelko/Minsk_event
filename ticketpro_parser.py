@@ -607,13 +607,15 @@ class TicketproParser:
         """Парсит все страницы категории.
 
         В новой версии TicketPro старые классы `.event-box` больше не используются.
-        Поэтому сначала собираем ссылки `/ru/event/...` прямо из карточек страницы,
-        а затем грузим каждое событие по отдельной странице и парсим уже детальную разметку.
+        Поэтому сначала собираем ссылки `/ru/event/...` из embedded payload, а затем
+        добавляем видимые ссылки из DOM как fallback. Это позволяет сохранить полный
+        список даже при отсутствии нормальной пагинации.
         """
         events = []
         page = 1
         base_url = self.base_url + category_url
-        max_pages = 6
+        max_pages = 20
+        seen_urls = set()
 
         relax_index = self.load_relax_index()
         while page <= max_pages:
@@ -624,8 +626,17 @@ class TicketproParser:
                 break
 
             soup = BeautifulSoup(html, 'lxml')
-            event_links = self._extract_event_urls_from_page(html)
-            seen_urls = set(event_links)
+            event_links = set(self._extract_event_urls_from_page(html))
+            visible_links = {
+                self._normalize_url(
+                    href if href.startswith('http') else (self.base_url + href)
+                )
+                for link in soup.select('a[href*="/ru/event/"]')
+                for href in [link.get('href', '')]
+                if href
+            }
+            candidate_urls = event_links | visible_links
+            logger.info(f"Страница {page}: обнаружено {len(candidate_urls)} уникальных ссылок на события")
 
             old_event_boxes = soup.find_all('div', class_='event-box')
             if old_event_boxes:
@@ -634,14 +645,15 @@ class TicketproParser:
                     if event:
                         events.append(event)
 
-            logger.info(f"Страница {page}: обнаружено {len(event_links)} ссылок на события")
-            if not event_links and not old_event_boxes:
+            if not candidate_urls and not old_event_boxes:
                 logger.info(f"Нет ссылок/блоков на странице {page}, завершаем")
                 break
 
-            for full_url in event_links:
-                if not full_url:
+            for full_url in sorted(candidate_urls):
+                if not full_url or full_url in seen_urls:
                     continue
+                seen_urls.add(full_url)
+
                 # Prefer the visible link text as a title hint when it exists.
                 title_hint = ''
                 for link in soup.select('a[href*="/ru/event/"]'):
@@ -673,15 +685,10 @@ class TicketproParser:
             logger.info(f"Страница {page}: накоплено {len(events)} событий")
             self.stats['total_pages'] += 1
 
-            # Пагинация: если у категории нет page-next, но есть другие ссылки, мы всё равно
-            # завершаем — новый TicketPro рендерит список без старой пагинации.
             pagination = soup.find('div', class_='pagination')
-            if not pagination:
-                logger.info("Пагинация не найдена, завершаем")
-                break
-            next_link = pagination.find('a', class_='page-next')
+            next_link = pagination.find('a', class_='page-next') if pagination else None
             if not next_link or 'disabled' in next_link.get('class', []):
-                logger.info("Нет следующей страницы, завершаем")
+                logger.info("Нет следующей страницы или пагинация не поддерживается — выходим после текущей страницы")
                 break
 
             page += 1
