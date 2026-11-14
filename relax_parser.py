@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 from bs4 import BeautifulSoup
-from normalizer import normalize_place, extract_time, parse_text_date, normalize_price
+from normalizer import normalize_place, extract_time, parse_text_date, normalize_price, ensure_default_end_time
 
 # ---------------------- Путь к БД ----------------------
 
@@ -306,7 +306,7 @@ class RelaxBaseParser:
                     if price:
                         description += f"\n💰 {price}"
 
-                    events.append({
+                    event_record = {
                         "title":       title,
                         "details":     details,
                         "description": description,
@@ -318,7 +318,8 @@ class RelaxBaseParser:
                         "category":    self.category,
                         "source_url":  source_url,
                         "source_name": self.source_name,
-                    })
+                    }
+                    events.append(ensure_default_end_time(event_record))
 
                     t = show_time or "     "
                     p = price or "без цены"

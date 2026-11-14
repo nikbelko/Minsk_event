@@ -20,7 +20,7 @@ import requests
 from bs4 import BeautifulSoup
 from normalizer import (
     normalize_place, normalize_title, is_future_date,
-    is_minsk_event, titles_are_similar,
+    is_minsk_event, titles_are_similar, ensure_default_end_time,
 )
 
 # ── БД ───────────────────────────────────────────────────────────────────────
@@ -285,7 +285,7 @@ def parse_theatre_page(html: str, venue_fallback: str) -> list[dict]:
                 continue
             seen.add(key)
 
-            events.append({
+            event_record = {
                 "title":       title,
                 "details":     "",
                 "description": "",
@@ -298,7 +298,8 @@ def parse_theatre_page(html: str, venue_fallback: str) -> list[dict]:
                 "source_url":  source_url,
                 "source_name": SOURCE_NAME,
                 "_is_sale":    is_sale == "true",
-            })
+            }
+            events.append(ensure_default_end_time(event_record))
 
         break  # обрабатываем только первый NUXT скрипт
 

@@ -13,7 +13,7 @@ from typing import List, Dict, Optional
 
 import requests
 from bs4 import BeautifulSoup
-from normalizer import normalize_place, normalize_title, parse_iso_datetime, parse_text_date, format_price_from_offers, is_future_date, normalize_price
+from normalizer import normalize_place, normalize_title, parse_iso_datetime, parse_text_date, format_price_from_offers, is_future_date, normalize_price, ensure_default_end_time
 
 # ── БД ──────────────────────────────────────────────────────────────────────
 if os.path.exists('/data'):
@@ -260,7 +260,7 @@ class BezkassiraParser:
                 logger.debug(f"  ↩ дубль: {title} / {event_date}")
                 return None
 
-            return {
+            event_record = {
                 "title":       title,
                 "details":     "",
                 "description": description,
@@ -273,6 +273,7 @@ class BezkassiraParser:
                 "source_name": SOURCE_NAME,
                 "source_url":  url,
             }
+            return ensure_default_end_time(event_record)
 
         except Exception as e:
             logger.error(f"Ошибка парсинга карточки: {e}")

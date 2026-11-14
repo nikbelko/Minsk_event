@@ -13,7 +13,14 @@ from typing import List, Dict, Optional
 
 import requests
 from bs4 import BeautifulSoup
-from normalizer import normalize_place, normalize_title, is_minsk_event, format_price_from_offers, normalize_price
+from normalizer import (
+    normalize_place,
+    normalize_title,
+    is_minsk_event,
+    format_price_from_offers,
+    normalize_price,
+    ensure_default_end_time,
+)
 # Определяем путь к БД (локально или на Railway)
 if os.path.exists('/data'):
     DB_PATH = '/data/events_final.db'  # Railway volume
@@ -585,7 +592,7 @@ class TicketproParser:
             self.stats['by_category'][display_name] = self.stats['by_category'].get(display_name, 0) + 1
             logger.info(f"✅ {display_name}: {title[:40]} | {place[:25]} | {price}")
 
-            return {
+            event_record = {
                 'title': title,
                 'details': '',
                 'description': description,
@@ -598,6 +605,7 @@ class TicketproParser:
                 'source_url': source_url,
                 'source_name': 'ticketpro.by'
             }
+            return ensure_default_end_time(event_record)
 
         except Exception as e:
             logger.error(f"Ошибка парсинга HTML: {e}")

@@ -692,6 +692,32 @@ def is_likely_free(event: dict) -> bool:
 #  ДАТА И ВРЕМЯ (без изменений)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def ensure_default_end_time(event: dict) -> dict:
+    """Adds a default +90-minute end time for concert events without an explicit end_time.
+
+    This keeps concerts visible shortly after the start time while we intentionally
+    scope the fallback to concerts first, as requested.
+    """
+    if not isinstance(event, dict):
+        return event
+
+    category = (event.get('category') or '').strip().lower()
+    show_time = (event.get('show_time') or '').strip()
+    if category != 'concert' or not show_time or event.get('end_time'):
+        return event
+
+    try:
+        hh, mm = [int(part) for part in show_time.split(':', 1)]
+        total_minutes = hh * 60 + mm + 90
+        end_h = (total_minutes // 60) % 24
+        end_m = total_minutes % 60
+        event['end_time'] = f"{end_h:02d}:{end_m:02d}"
+    except Exception:
+        pass
+
+    return event
+
+
 def parse_iso_datetime(iso: str) -> tuple[str, str]:
     """
     '2026-03-06T18:00:00+03:00' → ('2026-03-06', '18:00')
