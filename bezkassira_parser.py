@@ -339,12 +339,12 @@ class BezkassiraParser:
             try:
                 cursor.execute("""
                     INSERT INTO events
-                      (title, details, description, event_date, show_time,
+                      (title, details, description, event_date, show_time, end_time,
                        place, location, price, category, source_name, source_url)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
                     ev["title"], ev["details"], ev["description"],
-                    ev["event_date"], ev["show_time"],
+                    ev["event_date"], ev["show_time"], ev.get("end_time") or "",
                     ev["place"], ev["location"], ev["price"],
                     ev["category"], ev["source_name"], ev["source_url"],
                 ))
@@ -483,12 +483,12 @@ class BezkassiraParser:
             try:
                 cursor.execute("""
                     INSERT INTO events
-                      (title, details, description, event_date, show_time,
+                      (title, details, description, event_date, show_time, end_time,
                        place, location, price, category, source_name, source_url)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                 """, (
                     ev["title"], ev["details"], ev["description"],
-                    ev["event_date"], ev["show_time"],
+                    ev["event_date"], ev["show_time"], ev.get("end_time") or "",
                     ev["place"], ev["location"], ev["price"],
                     ev["category"], ev["source_name"], ev["source_url"],
                 ))

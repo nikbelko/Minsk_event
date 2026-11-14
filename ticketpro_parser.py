@@ -737,13 +737,13 @@ class TicketproParser:
             try:
                 cursor.execute("""
                     INSERT INTO events (
-                        title, details, description, event_date, show_time,
+                        title, details, description, event_date, show_time, end_time,
                         place, location, price, category, source_url, source_name
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     event['title'], event['details'], event['description'],
-                    event['event_date'], event['show_time'], event['place'],
-                    event['location'], event['price'], event['category'],
+                    event['event_date'], event['show_time'], event.get('end_time') or '',
+                    event['place'], event['location'], event['price'], event['category'],
                     event['source_url'], event['source_name']
                 ))
                 new_count += 1
